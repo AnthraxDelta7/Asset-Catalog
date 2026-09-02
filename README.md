@@ -9,14 +9,14 @@ python -m venv .venv
 .venv\Scripts\pip install -e .
 ```
 
-Configure the staging folder (required before `ingest`) and, later, the Blender path:
+Configure the staging folder (where unprocessed packs land, required before `ingest`) and the library folder (where the catalogue lives, required before almost everything else):
 
 ```
-asset-catalogue settings set --staging-folder "D:\path\to\staging"
+asset-catalogue settings set --staging-folder "D:\path\to\staging" --library-folder "D:\path\to\library"
 asset-catalogue settings show
 ```
 
-Settings live in `settings.json` at the repo root (gitignored — it's a local machine path). The catalogue database defaults to `catalogue.db` and thumbnails to `thumbnails/`, both at the repo root; override with `--db-path` / `--thumbnail-dir` on `settings set`.
+Settings live in `settings.json` at the repo root (gitignored — it's a local machine path, different per install). The **library folder** is the portable part: it holds `catalogue.db` and `thumbnails/`, derived automatically from `--library-folder` (there's no separate way to configure the DB or thumbnail paths — they always live together, so the whole catalogue moves as one unit). To move the library to another machine, or share it over a network drive, just copy the folder and point `--library-folder` at the copy — `settings set` doesn't need to know anything else about it, and an existing `catalogue.db` found there is picked up as-is, no import step. The staging folder, by contrast, is *not* meant to travel with the library — it's wherever unprocessed packs happen to sit on this particular machine before `ingest`.
 
 ## Ingest
 

@@ -8,7 +8,14 @@ from asset_catalogue import blender_render, db, ingest, settings, tagging, thumb
 
 
 def _connect() -> sqlite3.Connection:
-    return db.connect(settings.load().db_path)
+    s = settings.load()
+    if not s.library_folder:
+        raise SystemExit(
+            "No library folder configured. Run: "
+            "asset-catalogue settings set --library-folder <path>"
+        )
+    Path(s.library_folder).mkdir(parents=True, exist_ok=True)
+    return db.connect(s.db_path())
 
 
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
@@ -35,8 +42,10 @@ def _get_tag_id(conn: sqlite3.Connection, tag_name: str) -> int:
 def cmd_settings_show(args: argparse.Namespace) -> None:
     s = settings.load()
     print(f"staging_folder: {s.staging_folder}")
-    print(f"db_path:        {s.db_path}")
-    print(f"thumbnail_dir:  {s.thumbnail_dir}")
+    print(f"library_folder: {s.library_folder}")
+    if s.library_folder:
+        print(f"  -> database:   {s.db_path()}")
+        print(f"  -> thumbnails: {s.thumbnail_dir()}")
     print(f"blender_path:   {s.blender_path}")
 
 
@@ -44,10 +53,8 @@ def cmd_settings_set(args: argparse.Namespace) -> None:
     s = settings.load()
     if args.staging_folder is not None:
         s.staging_folder = args.staging_folder
-    if args.db_path is not None:
-        s.db_path = args.db_path
-    if args.thumbnail_dir is not None:
-        s.thumbnail_dir = args.thumbnail_dir
+    if args.library_folder is not None:
+        s.library_folder = args.library_folder
     if args.blender_path is not None:
         s.blender_path = args.blender_path
     settings.save(s)
@@ -133,7 +140,7 @@ def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
     stats = thumbnails.generate_texture_thumbnails(
         conn,
         Path(s.staging_folder),
-        Path(s.thumbnail_dir),
+        s.thumbnail_dir(),
         pack_name=args.pack,
         force=args.force,
     )
@@ -173,7 +180,7 @@ def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
     stats = blender_render.generate_model_thumbnails(
         conn,
         Path(s.staging_folder),
-        Path(s.thumbnail_dir),
+        s.thumbnail_dir(),
         blender_exe,
         pack_name=args.pack,
         force=args.force,
@@ -240,8 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     set_parser = settings_sub.add_parser("set", help="Set one or more settings")
     set_parser.add_argument("--staging-folder")
-    set_parser.add_argument("--db-path")
-    set_parser.add_argument("--thumbnail-dir")
+    set_parser.add_argument(
+        "--library-folder",
+        help="Folder holding catalogue.db and thumbnails/ -- portable, point at it "
+        "on a new machine or a shared location to pick up an existing library",
+    )
     set_parser.add_argument("--blender-path")
     set_parser.set_defaults(func=cmd_settings_set)
 

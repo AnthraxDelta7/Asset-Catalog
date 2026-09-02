@@ -37,8 +37,14 @@ class Catalogue:
     @classmethod
     def open(cls) -> Catalogue:
         s = settings.load()
-        conn = db.connect(s.db_path)
-        return cls(conn, Path(s.thumbnail_dir))
+        if not s.library_folder:
+            raise RuntimeError(
+                "No library folder configured. Run: "
+                "asset-catalogue settings set --library-folder <path>"
+            )
+        Path(s.library_folder).mkdir(parents=True, exist_ok=True)
+        conn = db.connect(s.db_path())
+        return cls(conn, s.thumbnail_dir())
 
     def list_packs(self) -> list[str]:
         rows = self._conn.execute("SELECT name FROM packs ORDER BY name").fetchall()

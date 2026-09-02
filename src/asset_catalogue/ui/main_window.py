@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -271,7 +272,11 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    catalogue = Catalogue.open()
+    try:
+        catalogue = Catalogue.open()
+    except RuntimeError as exc:
+        QMessageBox.critical(None, "Asset Catalogue", str(exc))
+        sys.exit(1)
     window = MainWindow(catalogue)
     window.show()
     sys.exit(app.exec())
