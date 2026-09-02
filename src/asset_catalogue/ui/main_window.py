@@ -646,6 +646,11 @@ class MainWindow(QMainWindow):
                 f"Ingested '{dialog.pack_name}': {stats.new} new, "
                 f"{stats.duplicate} duplicate, {stats.total} scanned"
             )
+            if stats.nested_zips_extracted:
+                message += (
+                    f"\nUnpacked {stats.nested_zips_extracted} nested zip file(s) "
+                    "found inside the pack"
+                )
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
             return message

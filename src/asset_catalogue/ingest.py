@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from asset_catalogue import archives
+
 HASH_CHUNK_SIZE = 1024 * 1024
+
+# Guards against a maliciously or accidentally self-referential chain of
+# nested zips (a "zip bomb" via unbounded recursive extraction). Only counts
+# zip-extraction depth, never ordinary folder nesting, which stays unlimited.
+MAX_NESTED_ZIP_DEPTH = 10
 
 ASSET_TYPE_BY_EXTENSION: dict[str, str] = {
     ".obj": "model",
@@ -46,6 +53,7 @@ class IngestStats:
     new: int = 0
     duplicate: int = 0
     total: int = 0
+    nested_zips_extracted: int = 0
 
 
 def get_or_create_pack(
@@ -102,31 +110,76 @@ def get_or_create_pack(
 
 
 def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> IngestStats:
+    """Walks pack_root and catalogues every file as an asset.
+
+    A .zip found anywhere in the walk -- not just at pack_root itself -- is
+    extracted in place into a sibling folder named after it (stripping the
+    .zip suffix) rather than being catalogued as an opaque asset, and that
+    folder's contents are walked too, recursively. This can't be a plain
+    rglob(): files created by an extraction mid-walk need to be picked up
+    within the same pass, so this uses an explicit work queue instead.
+    """
     stats = IngestStats()
-    for path in sorted(pack_root.rglob("*")):
-        if not path.is_file():
-            continue
-        stats.total += 1
-        relative_path = path.relative_to(pack_root).as_posix()
-        content_hash = hash_file(path)
-        extension = path.suffix.lower()
-        cursor = conn.execute(
-            "INSERT OR IGNORE INTO assets "
-            "(pack_id, relative_path, filename, extension, file_size, "
-            " content_hash, asset_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                pack_id,
-                relative_path,
-                path.name,
-                extension,
-                path.stat().st_size,
-                content_hash,
-                classify(extension),
-            ),
-        )
-        if cursor.rowcount == 0:
-            stats.duplicate += 1
-        else:
-            stats.new += 1
+    work_items: list[tuple[Path, int]] = [(pack_root, 0)]
+
+    while work_items:
+        current_dir, zip_depth = work_items.pop()
+        entries = sorted(current_dir.iterdir())
+        # A directory that's the extraction destination of a sibling .zip
+        # (from an earlier ingest pass) shows up here as an ordinary
+        # pre-existing folder too -- skip it on the plain "it's a folder"
+        # path below so it's only queued once, via the zip branch, not
+        # walked twice (which otherwise compounds at every nesting level).
+        zip_stems = {entry.stem for entry in entries if entry.is_file() and entry.suffix.lower() == ".zip"}
+
+        for entry in entries:
+            if entry.is_dir():
+                if entry.name in zip_stems:
+                    continue
+                work_items.append((entry, zip_depth))
+                continue
+            if not entry.is_file():
+                continue
+
+            if entry.suffix.lower() == ".zip":
+                if zip_depth >= MAX_NESTED_ZIP_DEPTH:
+                    raise ValueError(
+                        f"Refusing to extract more than {MAX_NESTED_ZIP_DEPTH} levels "
+                        f"of nested zips: {entry}"
+                    )
+                extracted_dir = entry.with_suffix("")
+                if extracted_dir.exists() and any(extracted_dir.iterdir()):
+                    # Already unpacked on an earlier ingest pass -- just
+                    # re-walk it for anything new, don't re-extract.
+                    pass
+                else:
+                    archives.extract_zip(entry, extracted_dir)
+                    stats.nested_zips_extracted += 1
+                work_items.append((extracted_dir, zip_depth + 1))
+                continue
+
+            stats.total += 1
+            relative_path = entry.relative_to(pack_root).as_posix()
+            content_hash = hash_file(entry)
+            extension = entry.suffix.lower()
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO assets "
+                "(pack_id, relative_path, filename, extension, file_size, "
+                " content_hash, asset_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    pack_id,
+                    relative_path,
+                    entry.name,
+                    extension,
+                    entry.stat().st_size,
+                    content_hash,
+                    classify(extension),
+                ),
+            )
+            if cursor.rowcount == 0:
+                stats.duplicate += 1
+            else:
+                stats.new += 1
+
     conn.commit()
     return stats

@@ -29,6 +29,18 @@ def _connect() -> sqlite3.Connection:
     return db.connect(s.db_path())
 
 
+def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
+    print(
+        f"Ingested '{pack_name}': {stats.new} new, "
+        f"{stats.duplicate} duplicate, {stats.total} scanned"
+    )
+    if stats.nested_zips_extracted:
+        print(
+            f"  (unpacked {stats.nested_zips_extracted} nested zip file(s) "
+            "found inside the pack)"
+        )
+
+
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
     row = conn.execute("SELECT id FROM packs WHERE name = ?", (pack_name,)).fetchone()
     if row is None:
@@ -106,10 +118,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     if updated_fields:
         print(f"Updated pack metadata: {', '.join(updated_fields)}")
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
-    print(
-        f"Ingested '{args.pack_name}': {stats.new} new, "
-        f"{stats.duplicate} duplicate, {stats.total} scanned"
-    )
+    _print_ingest_result(args.pack_name, stats)
 
 
 def cmd_ingest_zip(args: argparse.Namespace) -> None:
@@ -139,10 +148,7 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
     if updated_fields:
         print(f"Updated pack metadata: {', '.join(updated_fields)}")
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
-    print(
-        f"Ingested '{args.pack_name}': {stats.new} new, "
-        f"{stats.duplicate} duplicate, {stats.total} scanned"
-    )
+    _print_ingest_result(args.pack_name, stats)
 
 
 def cmd_tag_pack(args: argparse.Namespace) -> None:

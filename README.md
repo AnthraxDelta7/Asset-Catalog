@@ -46,6 +46,8 @@ asset-catalogue ingest-zip <path\to\pack.zip> --pack-name "Pack Name" [--pack-fo
 
 `<path\to\pack.zip>` can be anywhere on disk — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally. Both paths share the same extraction logic: refuses to extract into a destination that already has files in it (won't silently merge/overwrite an existing pack), and rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
 
+**A `.zip` found anywhere *inside* a pack while ingesting — not just at the top level — is handled the same way**, automatically: extracted into a same-named sibling folder, its contents catalogued under that folder name, and this applies recursively (a zip inside a zip unpacks both). The original `.zip` is left in place, not deleted — only its contents get catalogued. Re-running ingest afterward is still fully idempotent: an already-extracted nested zip is recognized and re-walked for new content rather than re-extracted.
+
 ## Tagging
 
 Pack-level tags cascade to every asset currently in the pack. Safe to re-run after ingesting new files into an already-tagged pack — it only backfills assets that don't have the tag yet, and never touches assets that were tagged explicitly:
