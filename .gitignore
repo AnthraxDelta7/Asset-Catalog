@@ -5,7 +5,8 @@ __pycache__/
 build/
 dist/
 
-# Local machine paths (staging folder, Blender path) and the catalogue DB
-# itself don't belong in version control.
+# Local machine paths (staging folder, Blender path), the catalogue DB, and
+# generated thumbnails don't belong in version control.
 settings.json
 *.db
+/thumbnails/

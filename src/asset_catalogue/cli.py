@@ -4,7 +4,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from asset_catalogue import db, ingest, settings, tagging
+from asset_catalogue import db, ingest, settings, tagging, thumbnails
 
 
 def _connect() -> sqlite3.Connection:
@@ -36,6 +36,7 @@ def cmd_settings_show(args: argparse.Namespace) -> None:
     s = settings.load()
     print(f"staging_folder: {s.staging_folder}")
     print(f"db_path:        {s.db_path}")
+    print(f"thumbnail_dir:  {s.thumbnail_dir}")
     print(f"blender_path:   {s.blender_path}")
 
 
@@ -45,6 +46,8 @@ def cmd_settings_set(args: argparse.Namespace) -> None:
         s.staging_folder = args.staging_folder
     if args.db_path is not None:
         s.db_path = args.db_path
+    if args.thumbnail_dir is not None:
+        s.thumbnail_dir = args.thumbnail_dir
     if args.blender_path is not None:
         s.blender_path = args.blender_path
     settings.save(s)
@@ -65,7 +68,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
     conn = _connect()
     pack_id = ingest.get_or_create_pack(
-        conn, args.pack_name, args.creator, args.licence, args.source_url
+        conn, args.pack_name, args.pack_folder, args.creator, args.licence, args.source_url
     )
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     print(
@@ -117,6 +120,27 @@ def cmd_tags(args: argparse.Namespace) -> None:
     for row in rows:
         category = row["category"] or "-"
         print(f"{row['name']} (category={category}): {row['usage_count']} asset(s)")
+
+
+def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    conn = _connect()
+    stats = thumbnails.generate_texture_thumbnails(
+        conn,
+        Path(s.staging_folder),
+        Path(s.thumbnail_dir),
+        pack_name=args.pack,
+        force=args.force,
+    )
+    print(
+        f"Thumbnails: {stats.generated} generated, "
+        f"{stats.already_done} already done, {stats.failed} failed"
+    )
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -176,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser = settings_sub.add_parser("set", help="Set one or more settings")
     set_parser.add_argument("--staging-folder")
     set_parser.add_argument("--db-path")
+    set_parser.add_argument("--thumbnail-dir")
     set_parser.add_argument("--blender-path")
     set_parser.set_defaults(func=cmd_settings_set)
 
@@ -220,6 +245,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     tags_parser = subparsers.add_parser("tags", help="List the tag vocabulary and usage counts")
     tags_parser.set_defaults(func=cmd_tags)
+
+    thumbnail_parser = subparsers.add_parser("thumbnail", help="Generate thumbnails")
+    thumbnail_sub = thumbnail_parser.add_subparsers(dest="thumbnail_command", required=True)
+
+    thumbnail_generate_parser = thumbnail_sub.add_parser(
+        "generate", help="Generate thumbnails for texture (2D) assets"
+    )
+    thumbnail_generate_parser.add_argument("--pack")
+    thumbnail_generate_parser.add_argument(
+        "--force", action="store_true", help="Re-render even assets already marked done"
+    )
+    thumbnail_generate_parser.set_defaults(func=cmd_thumbnail_generate)
 
     return parser
 

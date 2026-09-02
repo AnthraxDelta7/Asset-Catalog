@@ -16,7 +16,7 @@ asset-catalogue settings set --staging-folder "D:\path\to\staging"
 asset-catalogue settings show
 ```
 
-Settings live in `settings.json` at the repo root (gitignored — it's a local machine path). The catalogue database defaults to `catalogue.db` at the repo root; override with `--db-path` on `settings set`.
+Settings live in `settings.json` at the repo root (gitignored — it's a local machine path). The catalogue database defaults to `catalogue.db` and thumbnails to `thumbnails/`, both at the repo root; override with `--db-path` / `--thumbnail-dir` on `settings set`.
 
 ## Ingest
 
@@ -51,6 +51,16 @@ asset-catalogue tags
 
 **Known limitation:** there's no way yet to explicitly exclude an asset from a pack-level tag — `untag asset` removes the tag, but re-running `tag pack` will re-apply it on the next cascade, since the schema only tracks *how* a tag was applied (inherited/explicit), not "explicitly excluded." Revisit if this comes up in practice.
 
+## Thumbnails (2D)
+
+Renders a 256x256 PNG for every `texture`-type asset, named after its content hash — so identical content, wherever it's re-encountered, never gets rendered twice:
+
+```
+asset-catalogue thumbnail generate [--pack "Pack Name"] [--force]
+```
+
+Assets are retried on the next run if they previously failed (unreadable/corrupt file), but skipped once `thumbnail_status` is `done` — pass `--force` to re-render everything regardless of status. Model (3D) assets are untouched here; they wait on Blender integration (build order step 4).
+
 ## Search
 
 ```
@@ -63,7 +73,7 @@ Build order from the seed doc, tracked here:
 
 - [x] Schema + ingest
 - [x] Tagging (pack cascade + per-file tags, CLI)
-- [ ] 2D thumbnails (Pillow)
+- [x] 2D thumbnails (Pillow)
 - [ ] Blender thumbnails
 - [ ] Qt UI
 - [ ] Per-pack calibration

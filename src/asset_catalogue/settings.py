@@ -7,12 +7,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETTINGS_PATH = REPO_ROOT / "settings.json"
 DEFAULT_DB_PATH = str(REPO_ROOT / "catalogue.db")
+DEFAULT_THUMBNAIL_DIR = str(REPO_ROOT / "thumbnails")
 
 
 @dataclass
 class Settings:
     staging_folder: str | None = None
     db_path: str = DEFAULT_DB_PATH
+    thumbnail_dir: str = DEFAULT_THUMBNAIL_DIR
     blender_path: str | None = None
 
 

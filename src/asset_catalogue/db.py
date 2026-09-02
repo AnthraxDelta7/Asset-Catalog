@@ -7,6 +7,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS packs (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    pack_folder TEXT NOT NULL,
     creator TEXT,
     licence TEXT,
     source_url TEXT,

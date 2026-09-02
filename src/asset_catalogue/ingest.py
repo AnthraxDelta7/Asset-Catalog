@@ -51,6 +51,7 @@ class IngestStats:
 def get_or_create_pack(
     conn: sqlite3.Connection,
     name: str,
+    pack_folder: str,
     creator: str | None,
     licence: str | None,
     source_url: str | None,
@@ -59,9 +60,16 @@ def get_or_create_pack(
     if row is not None:
         return row["id"]
     cursor = conn.execute(
-        "INSERT INTO packs (name, creator, licence, source_url, date_added) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (name, creator, licence, source_url, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO packs (name, pack_folder, creator, licence, source_url, date_added) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            name,
+            pack_folder,
+            creator,
+            licence,
+            source_url,
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     conn.commit()
     return cursor.lastrowid
