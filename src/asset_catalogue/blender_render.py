@@ -67,15 +67,23 @@ def build_job_list(
     thumbnail_dir: Path,
     pack_name: str | None,
     force: bool,
+    asset_id: int | None = None,
 ) -> tuple[list[dict], int]:
+    # Targeting one asset directly is a calibration preview -- always
+    # re-render it regardless of prior status, same as --force.
+    effective_force = force or asset_id is not None
+
     query = (
         "SELECT assets.id, assets.relative_path, assets.content_hash, assets.extension, "
         "packs.pack_folder, packs.corrections "
         "FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'model'"
     )
-    params: list[str] = []
-    if not force:
+    params: list = []
+    if asset_id is not None:
+        query += " AND assets.id = ?"
+        params.append(asset_id)
+    if not effective_force:
         query += " AND assets.thumbnail_status != 'done'"
     if pack_name:
         query += " AND packs.name = ?"
@@ -86,7 +94,7 @@ def build_job_list(
     already_done = 0
     for row in rows:
         dest = thumbnails.thumbnail_path(thumbnail_dir, row["content_hash"])
-        if dest.exists() and not force:
+        if dest.exists() and not effective_force:
             conn.execute(
                 "UPDATE assets SET thumbnail_status = 'done' WHERE id = ?", (row["id"],)
             )
@@ -114,8 +122,11 @@ def generate_model_thumbnails(
     blender_exe: Path,
     pack_name: str | None = None,
     force: bool = False,
+    asset_id: int | None = None,
 ) -> ModelThumbnailStats:
-    jobs, already_done = build_job_list(conn, staging_folder, thumbnail_dir, pack_name, force)
+    jobs, already_done = build_job_list(
+        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id
+    )
     stats = ModelThumbnailStats(already_done=already_done)
     if not jobs:
         return stats

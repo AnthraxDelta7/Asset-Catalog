@@ -4,7 +4,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from asset_catalogue import blender_render, db, ingest, settings, tagging, thumbnails
+from asset_catalogue import blender_render, db, ingest, packs, settings, tagging, thumbnails
 
 
 def _connect() -> sqlite3.Connection:
@@ -184,10 +184,50 @@ def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
         blender_exe,
         pack_name=args.pack,
         force=args.force,
+        asset_id=args.asset_id,
     )
     print(
         f"Model thumbnails: {stats.generated} generated, "
         f"{stats.already_done} already done, {stats.failed} failed"
+    )
+
+
+def cmd_pack_show_corrections(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+    corrections = packs.get_corrections(conn, pack_id)
+    if not corrections:
+        print(f"'{args.pack_name}' has no corrections set.")
+        return
+    for key, value in corrections.items():
+        print(f"{key}: {value}")
+
+
+def cmd_pack_set_corrections(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+
+    if args.clear:
+        packs.set_corrections(conn, pack_id, {})
+        print(f"Cleared corrections for '{args.pack_name}'")
+        return
+
+    corrections = packs.get_corrections(conn, pack_id)
+    if args.up_axis is not None:
+        corrections["up_axis"] = args.up_axis
+    if args.scale is not None:
+        corrections["scale"] = args.scale
+    if args.material_fallback is not None:
+        corrections["material_fallback"] = args.material_fallback
+
+    if not corrections:
+        raise SystemExit("No corrections given. Pass --up-axis, --scale, or --material-fallback.")
+
+    packs.set_corrections(conn, pack_id, corrections)
+    print(f"Corrections for '{args.pack_name}': {corrections}")
+    print(
+        "Re-render to see the effect: asset-catalogue thumbnail generate-models "
+        f"--pack \"{args.pack_name}\" --force"
     )
 
 
@@ -316,7 +356,42 @@ def build_parser() -> argparse.ArgumentParser:
     thumbnail_generate_models_parser.add_argument(
         "--force", action="store_true", help="Re-render even assets already marked done"
     )
+    thumbnail_generate_models_parser.add_argument(
+        "--asset-id",
+        type=int,
+        help="Render just this one asset (for previewing pack corrections), "
+        "regardless of its current thumbnail status",
+    )
     thumbnail_generate_models_parser.set_defaults(func=cmd_thumbnail_generate_models)
+
+    pack_parser = subparsers.add_parser("pack", help="View or set per-pack render corrections")
+    pack_sub = pack_parser.add_subparsers(dest="pack_command", required=True)
+
+    show_corrections_parser = pack_sub.add_parser(
+        "show-corrections", help="Show a pack's current render corrections"
+    )
+    show_corrections_parser.add_argument("pack_name")
+    show_corrections_parser.set_defaults(func=cmd_pack_show_corrections)
+
+    set_corrections_parser = pack_sub.add_parser(
+        "set-corrections",
+        help="Set render corrections for a pack, applied by 'thumbnail generate-models'",
+    )
+    set_corrections_parser.add_argument("pack_name")
+    set_corrections_parser.add_argument(
+        "--up-axis", choices=["Y_UP", "Z_UP"], help="Rotate imports 90deg if the pack is Y-up"
+    )
+    set_corrections_parser.add_argument("--scale", type=float)
+    set_corrections_parser.add_argument(
+        "--material-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Replace imported materials with a flat gray fallback",
+    )
+    set_corrections_parser.add_argument(
+        "--clear", action="store_true", help="Remove all corrections for this pack"
+    )
+    set_corrections_parser.set_defaults(func=cmd_pack_set_corrections)
 
     return parser
 

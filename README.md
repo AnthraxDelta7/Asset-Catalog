@@ -72,7 +72,26 @@ asset-catalogue thumbnail generate-models [--pack "Pack Name"] [--force]
 
 One Blender process handles the whole batch (startup dominates the per-asset cost, so this matters). Supports OBJ, FBX, GLTF/GLB, STL, and `.blend` (via library append). Rendered at 256x256 with EEVEE, a single sun light, dark neutral background, framed to each asset's bounding box. An asset that imports but produces zero mesh objects (or errors outright) is marked `failed` rather than saving a blank thumbnail, and is retried on the next run — same failed/done semantics as the 2D path above.
 
-Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing. There's no CLI to set them yet — that lands with per-pack calibration (build order step 6).
+Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing.
+
+## Per-pack calibration
+
+Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7):
+
+```
+asset-catalogue pack set-corrections <pack_name> [--up-axis Y_UP|Z_UP] [--scale 1.0] [--material-fallback | --no-material-fallback]
+asset-catalogue pack show-corrections <pack_name>
+asset-catalogue pack set-corrections <pack_name> --clear
+```
+
+Workflow: render one asset to check a pack's import looks right, adjust corrections, preview again on just that asset, then re-render the whole pack once it's right:
+
+```
+asset-catalogue thumbnail generate-models --asset-id <id>          # preview one asset, ignores done/pending status
+asset-catalogue thumbnail generate-models --pack "Pack Name" --force   # re-render the whole pack after settling on corrections
+```
+
+**Note:** `scale` won't visibly change the thumbnail — the camera always reframes to fit the asset's bounding box, so a uniformly-scaled object still fills the same portion of frame. It's stored and applied to the imported object regardless (for correctness ahead of the eventual import step, where absolute scale will matter), just not something you can visually calibrate by eye the way `up_axis` and `material_fallback` are.
 
 ## Search (CLI)
 
@@ -97,5 +116,5 @@ Build order from the seed doc, tracked here:
 - [x] 2D thumbnails (Pillow)
 - [x] Blender thumbnails
 - [x] Qt UI (filter panel, thumbnail grid, tagging panel)
-- [ ] Per-pack calibration
+- [x] Per-pack calibration
 - [ ] Import + tracking
