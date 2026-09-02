@@ -125,7 +125,15 @@ asset-catalogue imports [--project <project_root>] [--asset-id ID]
 asset-catalogue-ui
 ```
 
-Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI. Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem or raw SQL directly, per the seed doc's architecture rule (§3) — the CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
+No CLI setup required first — on first launch (no library folder configured yet), a **Settings** dialog opens automatically with folder/file browse buttons for the staging folder, library folder, and Blender path (with an "Auto-detect" button for Blender). Reachable again anytime from **File > Settings...**; changing the library folder live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
+
+Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI.
+
+**File > Ingest Pack...** opens a dialog with a folder-browse button scoped to the configured staging folder (picking a folder outside it is rejected), plus pack name/creator/licence/source URL fields.
+
+**Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected). Both run on a background thread — the window stays responsive while Blender works, which matters since a full pack can take a while — and show a progress dialog until done.
+
+Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem, raw SQL, or `ingest`/`thumbnails`/`blender_render` directly, per the seed doc's architecture rule (§3). Ingest and thumbnail generation from the UI go through `Catalogue.*_bg()` methods, which each open and close their own SQLite connection rather than sharing the main one — SQLite connections aren't safe to share across threads, and these run on a background `QThread`. The CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
 
 ## Status
 

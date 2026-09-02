@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from asset_catalogue import db, settings, tagging, thumbnails
+from asset_catalogue import blender_render, db, ingest, settings, tagging, thumbnails
 
 
 @dataclass
@@ -30,8 +30,11 @@ class Catalogue:
     or raw SQL directly. See asset-catalogue-seed.md section 3.
     """
 
-    def __init__(self, conn: sqlite3.Connection, thumbnail_dir: Path) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, staging_folder: Path | None, thumbnail_dir: Path
+    ) -> None:
         self._conn = conn
+        self._staging_folder = staging_folder
         self._thumbnail_dir = thumbnail_dir
 
     @classmethod
@@ -44,7 +47,14 @@ class Catalogue:
             )
         Path(s.library_folder).mkdir(parents=True, exist_ok=True)
         conn = db.connect(s.db_path())
-        return cls(conn, s.thumbnail_dir())
+        staging_folder = Path(s.staging_folder) if s.staging_folder else None
+        return cls(conn, staging_folder, s.thumbnail_dir())
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def staging_folder(self) -> Path | None:
+        return self._staging_folder
 
     def list_packs(self) -> list[str]:
         rows = self._conn.execute("SELECT name FROM packs ORDER BY name").fetchall()
@@ -129,3 +139,79 @@ class Catalogue:
         if row is None:
             return
         tagging.untag_asset(self._conn, asset_id, row["id"])
+
+    # -- Background-safe operations -----------------------------------
+    #
+    # Each of these opens and closes its own SQLite connection rather than
+    # using self._conn, so it's safe to call from a worker thread (SQLite
+    # connections aren't shared safely across threads) -- used by the UI to
+    # run ingest/thumbnail generation without freezing the window.
+
+    def resolve_blender(self) -> Path:
+        s = settings.load()
+        blender_exe = blender_render.find_blender(s.blender_path)
+        if blender_exe is None:
+            raise RuntimeError("Blender not found. Set its path in Settings, or install it.")
+        version = blender_render.get_blender_version(blender_exe)
+        if version is None:
+            raise RuntimeError(f"Could not determine Blender's version from {blender_exe}")
+        if version < blender_render.MIN_BLENDER_VERSION:
+            min_version = ".".join(str(part) for part in blender_render.MIN_BLENDER_VERSION)
+            found_version = ".".join(str(part) for part in version)
+            raise RuntimeError(
+                f"Blender {found_version} is older than the minimum supported {min_version}"
+            )
+        return blender_exe
+
+    def ingest_pack_bg(
+        self,
+        pack_folder_name: str,
+        pack_name: str,
+        creator: str | None,
+        licence: str | None,
+        source_url: str | None,
+    ) -> ingest.IngestStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        pack_root = self._staging_folder / pack_folder_name
+        if not pack_root.is_dir():
+            raise RuntimeError(f"Pack folder not found: {pack_root}")
+        conn = db.connect(settings.load().db_path())
+        try:
+            pack_id = ingest.get_or_create_pack(
+                conn, pack_name, pack_folder_name, creator, licence, source_url
+            )
+            return ingest.ingest_pack(conn, pack_root, pack_id)
+        finally:
+            conn.close()
+
+    def generate_2d_thumbnails_bg(
+        self, pack: str | None = None, force: bool = False
+    ) -> thumbnails.ThumbnailStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return thumbnails.generate_texture_thumbnails(
+                conn, self._staging_folder, self._thumbnail_dir, pack_name=pack, force=force
+            )
+        finally:
+            conn.close()
+
+    def generate_model_thumbnails_bg(
+        self, blender_exe: Path, pack: str | None = None, force: bool = False
+    ) -> blender_render.ModelThumbnailStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return blender_render.generate_model_thumbnails(
+                conn,
+                self._staging_folder,
+                self._thumbnail_dir,
+                blender_exe,
+                pack_name=pack,
+                force=force,
+            )
+        finally:
+            conn.close()
