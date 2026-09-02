@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+from asset_catalogue import thumbnails
+
+# bpy.ops.wm.obj_import / bpy.ops.wm.stl_import (used by the render script)
+# were introduced in Blender 4.0, replacing the legacy import_scene.obj /
+# import_mesh.stl operators. Verified against 5.2.1; not tested below 4.0.
+MIN_BLENDER_VERSION = (4, 0, 0)
+
+RENDER_SCRIPT_PATH = Path(__file__).parent / "blender_thumbnail_script.py"
+
+_WINDOWS_SEARCH_DIRS = (
+    Path("C:/Program Files/Blender Foundation"),
+    Path.home() / "AppData/Local/Programs/Blender Foundation",
+)
+
+
+def find_blender(blender_path_setting: str | None) -> Path | None:
+    if blender_path_setting:
+        candidate = Path(blender_path_setting)
+        if candidate.is_file():
+            return candidate
+
+    found = shutil.which("blender")
+    if found:
+        return Path(found)
+
+    for base in _WINDOWS_SEARCH_DIRS:
+        if not base.is_dir():
+            continue
+        matches = sorted(base.glob("Blender */blender.exe"), reverse=True)
+        if matches:
+            return matches[0]
+
+    return None
+
+
+def get_blender_version(blender_exe: Path) -> tuple[int, int, int] | None:
+    result = subprocess.run(
+        [str(blender_exe), "--version"], capture_output=True, text=True, timeout=30
+    )
+    match = re.search(r"Blender (\d+)\.(\d+)\.(\d+)", result.stdout)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+@dataclass
+class ModelThumbnailStats:
+    generated: int = 0
+    already_done: int = 0
+    failed: int = 0
+
+
+def build_job_list(
+    conn: sqlite3.Connection,
+    staging_folder: Path,
+    thumbnail_dir: Path,
+    pack_name: str | None,
+    force: bool,
+) -> tuple[list[dict], int]:
+    query = (
+        "SELECT assets.id, assets.relative_path, assets.content_hash, assets.extension, "
+        "packs.pack_folder, packs.corrections "
+        "FROM assets JOIN packs ON packs.id = assets.pack_id "
+        "WHERE assets.asset_type = 'model'"
+    )
+    params: list[str] = []
+    if not force:
+        query += " AND assets.thumbnail_status != 'done'"
+    if pack_name:
+        query += " AND packs.name = ?"
+        params.append(pack_name)
+
+    rows = conn.execute(query, params).fetchall()
+    jobs: list[dict] = []
+    already_done = 0
+    for row in rows:
+        dest = thumbnails.thumbnail_path(thumbnail_dir, row["content_hash"])
+        if dest.exists() and not force:
+            conn.execute(
+                "UPDATE assets SET thumbnail_status = 'done' WHERE id = ?", (row["id"],)
+            )
+            already_done += 1
+            continue
+
+        corrections = json.loads(row["corrections"]) if row["corrections"] else {}
+        jobs.append(
+            {
+                "asset_id": row["id"],
+                "source_path": str(staging_folder / row["pack_folder"] / row["relative_path"]),
+                "output_path": str(dest),
+                "extension": row["extension"],
+                "corrections": corrections,
+            }
+        )
+    conn.commit()
+    return jobs, already_done
+
+
+def generate_model_thumbnails(
+    conn: sqlite3.Connection,
+    staging_folder: Path,
+    thumbnail_dir: Path,
+    blender_exe: Path,
+    pack_name: str | None = None,
+    force: bool = False,
+) -> ModelThumbnailStats:
+    jobs, already_done = build_job_list(conn, staging_folder, thumbnail_dir, pack_name, force)
+    stats = ModelThumbnailStats(already_done=already_done)
+    if not jobs:
+        return stats
+
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        json.dump(jobs, f)
+        job_list_path = Path(f.name)
+
+    try:
+        process = subprocess.Popen(
+            [
+                str(blender_exe),
+                "--background",
+                "--python",
+                str(RENDER_SCRIPT_PATH),
+                "--",
+                str(job_list_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        seen_ids: set[int] = set()
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.strip()
+            if not line.startswith("ASSET_CATALOGUE_RESULT|"):
+                continue
+            _, asset_id_str, status = line.split("|")
+            asset_id = int(asset_id_str)
+            seen_ids.add(asset_id)
+            new_status = "done" if status == "ok" else "failed"
+            conn.execute(
+                "UPDATE assets SET thumbnail_status = ? WHERE id = ?", (new_status, asset_id)
+            )
+            conn.commit()
+            if status == "ok":
+                stats.generated += 1
+            else:
+                stats.failed += 1
+            print(f"  [{len(seen_ids)}/{len(jobs)}] asset {asset_id}: {status}")
+
+        process.wait()
+
+        missing = [job for job in jobs if job["asset_id"] not in seen_ids]
+        for job in missing:
+            conn.execute(
+                "UPDATE assets SET thumbnail_status = 'failed' WHERE id = ?",
+                (job["asset_id"],),
+            )
+            stats.failed += 1
+        conn.commit()
+
+        if missing:
+            print(
+                f"Warning: Blender exited (code {process.returncode}) before completing "
+                f"{len(missing)} job(s); marked failed."
+            )
+    finally:
+        job_list_path.unlink(missing_ok=True)
+
+    return stats

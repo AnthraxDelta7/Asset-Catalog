@@ -4,7 +4,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from asset_catalogue import db, ingest, settings, tagging, thumbnails
+from asset_catalogue import blender_render, db, ingest, settings, tagging, thumbnails
 
 
 def _connect() -> sqlite3.Connection:
@@ -143,6 +143,47 @@ def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+
+    blender_exe = blender_render.find_blender(s.blender_path)
+    if blender_exe is None:
+        raise SystemExit(
+            "Blender not found. Install it, or point at it with: "
+            "asset-catalogue settings set --blender-path <path to blender.exe>"
+        )
+
+    version = blender_render.get_blender_version(blender_exe)
+    if version is None:
+        raise SystemExit(f"Could not determine Blender's version from {blender_exe}")
+    if version < blender_render.MIN_BLENDER_VERSION:
+        min_version = ".".join(str(part) for part in blender_render.MIN_BLENDER_VERSION)
+        found_version = ".".join(str(part) for part in version)
+        raise SystemExit(
+            f"Blender {found_version} is older than the minimum supported "
+            f"{min_version} (found at {blender_exe})"
+        )
+
+    conn = _connect()
+    stats = blender_render.generate_model_thumbnails(
+        conn,
+        Path(s.staging_folder),
+        Path(s.thumbnail_dir),
+        blender_exe,
+        pack_name=args.pack,
+        force=args.force,
+    )
+    print(
+        f"Model thumbnails: {stats.generated} generated, "
+        f"{stats.already_done} already done, {stats.failed} failed"
+    )
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     conn = _connect()
     query = (
@@ -257,6 +298,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Re-render even assets already marked done"
     )
     thumbnail_generate_parser.set_defaults(func=cmd_thumbnail_generate)
+
+    thumbnail_generate_models_parser = thumbnail_sub.add_parser(
+        "generate-models", help="Generate thumbnails for model (3D) assets via Blender"
+    )
+    thumbnail_generate_models_parser.add_argument("--pack")
+    thumbnail_generate_models_parser.add_argument(
+        "--force", action="store_true", help="Re-render even assets already marked done"
+    )
+    thumbnail_generate_models_parser.set_defaults(func=cmd_thumbnail_generate_models)
 
     return parser
 

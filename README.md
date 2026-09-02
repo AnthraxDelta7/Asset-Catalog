@@ -61,6 +61,19 @@ asset-catalogue thumbnail generate [--pack "Pack Name"] [--force]
 
 Assets are retried on the next run if they previously failed (unreadable/corrupt file), but skipped once `thumbnail_status` is `done` — pass `--force` to re-render everything regardless of status. Model (3D) assets are untouched here; they wait on Blender integration (build order step 4).
 
+## Thumbnails (3D / Blender)
+
+Requires Blender 4.0+ (auto-detected in the standard Windows install locations, or point at it explicitly):
+
+```
+asset-catalogue settings set --blender-path "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
+asset-catalogue thumbnail generate-models [--pack "Pack Name"] [--force]
+```
+
+One Blender process handles the whole batch (startup dominates the per-asset cost, so this matters). Supports OBJ, FBX, GLTF/GLB, STL, and `.blend` (via library append). Rendered at 256x256 with EEVEE, a single sun light, dark neutral background, framed to each asset's bounding box. An asset that imports but produces zero mesh objects (or errors outright) is marked `failed` rather than saving a blank thumbnail, and is retried on the next run — same failed/done semantics as the 2D path above.
+
+Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing. There's no CLI to set them yet — that lands with per-pack calibration (build order step 6).
+
 ## Search
 
 ```
@@ -74,7 +87,7 @@ Build order from the seed doc, tracked here:
 - [x] Schema + ingest
 - [x] Tagging (pack cascade + per-file tags, CLI)
 - [x] 2D thumbnails (Pillow)
-- [ ] Blender thumbnails
+- [x] Blender thumbnails
 - [ ] Qt UI
 - [ ] Per-pack calibration
 - [ ] Import + tracking
