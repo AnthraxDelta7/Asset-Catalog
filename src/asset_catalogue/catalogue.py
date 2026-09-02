@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from asset_catalogue import blender_render, db, ingest, settings, tagging, thumbnails
+from asset_catalogue import archives, blender_render, db, ingest, settings, tagging, thumbnails
 
 
 @dataclass
@@ -176,6 +176,28 @@ class Catalogue:
         pack_root = self._staging_folder / pack_folder_name
         if not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
+        conn = db.connect(settings.load().db_path())
+        try:
+            pack_id = ingest.get_or_create_pack(
+                conn, pack_name, pack_folder_name, creator, licence, source_url
+            )
+            return ingest.ingest_pack(conn, pack_root, pack_id)
+        finally:
+            conn.close()
+
+    def extract_and_ingest_pack_bg(
+        self,
+        zip_path: Path,
+        pack_folder_name: str,
+        pack_name: str,
+        creator: str | None,
+        licence: str | None,
+        source_url: str | None,
+    ) -> ingest.IngestStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        pack_root = self._staging_folder / pack_folder_name
+        archives.extract_zip(zip_path, pack_root)
         conn = db.connect(settings.load().db_path())
         try:
             pack_id = ingest.get_or_create_pack(

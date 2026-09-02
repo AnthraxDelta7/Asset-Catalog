@@ -28,6 +28,14 @@ asset-catalogue ingest <pack_folder_name> --pack-name "Pack Name" --creator "Cre
 
 Every file is SHA-256 hashed. Identical content — whether re-scanning the same pack or the same file shipped in two different packs — is recognized and skipped, never duplicated.
 
+If a pack is a `.zip` (the common case for purchased packs), skip manual extraction:
+
+```
+asset-catalogue ingest-zip <path\to\pack.zip> --pack-name "Pack Name" [--pack-folder folder_name] --creator "Creator" --licence "CC0"
+```
+
+`<path\to\pack.zip>` can be anywhere on disk (e.g. your Downloads folder) — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally. Refuses to extract into a destination that already has files in it (won't silently merge/overwrite an existing pack), and rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
+
 ## Tagging
 
 Pack-level tags cascade to every asset currently in the pack. Safe to re-run after ingesting new files into an already-tagged pack — it only backfills assets that don't have the tag yet, and never touches assets that were tagged explicitly:
@@ -130,6 +138,8 @@ No CLI setup required first — on first launch (no library folder configured ye
 Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI.
 
 **File > Ingest Pack...** opens a dialog with a folder-browse button scoped to the configured staging folder (picking a folder outside it is rejected), plus pack name/creator/licence/source URL fields.
+
+**File > Extract and Ingest from Zip...** — same idea, but the browse button picks a `.zip` file from anywhere on disk, plus an editable "extract to" folder name (defaults to the zip's filename). Runs extraction + ingest as one background job.
 
 **Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected). Both run on a background thread — the window stays responsive while Blender works, which matters since a full pack can take a while — and show a progress dialog until done.
 

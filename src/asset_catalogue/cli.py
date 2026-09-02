@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from asset_catalogue import (
+    archives,
     blender_render,
     db,
     importing,
@@ -85,6 +86,37 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     conn = _connect()
     pack_id = ingest.get_or_create_pack(
         conn, args.pack_name, args.pack_folder, args.creator, args.licence, args.source_url
+    )
+    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+    print(
+        f"Ingested '{args.pack_name}': {stats.new} new, "
+        f"{stats.duplicate} duplicate, {stats.total} scanned"
+    )
+
+
+def cmd_ingest_zip(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    zip_path = Path(args.zip_path)
+    if not zip_path.is_file():
+        raise SystemExit(f"Zip file not found: {zip_path}")
+
+    pack_folder = args.pack_folder or zip_path.stem
+    pack_root = Path(s.staging_folder) / pack_folder
+
+    try:
+        archives.extract_zip(zip_path, pack_root)
+    except (FileExistsError, archives.UnsafeZipError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"Extracted '{zip_path.name}' to {pack_root}")
+
+    conn = _connect()
+    pack_id = ingest.get_or_create_pack(
+        conn, args.pack_name, pack_folder, args.creator, args.licence, args.source_url
     )
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     print(
@@ -388,6 +420,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--licence")
     ingest_parser.add_argument("--source-url")
     ingest_parser.set_defaults(func=cmd_ingest)
+
+    ingest_zip_parser = subparsers.add_parser(
+        "ingest-zip", help="Extract a zip archive into the staging folder and ingest it"
+    )
+    ingest_zip_parser.add_argument("zip_path", help="Path to the .zip file (anywhere on disk)")
+    ingest_zip_parser.add_argument(
+        "--pack-folder",
+        help="Destination folder name inside the staging folder (default: zip filename)",
+    )
+    ingest_zip_parser.add_argument("--pack-name", required=True)
+    ingest_zip_parser.add_argument("--creator")
+    ingest_zip_parser.add_argument("--licence")
+    ingest_zip_parser.add_argument("--source-url")
+    ingest_zip_parser.set_defaults(func=cmd_ingest_zip)
 
     list_parser = subparsers.add_parser("list", help="List catalogued assets")
     list_parser.add_argument("--pack")

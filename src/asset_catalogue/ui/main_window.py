@@ -394,6 +394,78 @@ class IngestDialog(QDialog):
         self.accept()
 
 
+class IngestZipDialog(QDialog):
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self.setWindowTitle("Extract and Ingest from Zip")
+        self.resize(460, 260)
+
+        self.zip_path: Path | None = None
+        self.pack_folder_name: str = ""
+        self.pack_name: str = ""
+        self.creator: str | None = None
+        self.licence: str | None = None
+        self.source_url: str | None = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.zip_path_edit = QLineEdit()
+        self.zip_path_edit.setReadOnly(True)
+        form.addRow("Zip file:", _browse_row(self.zip_path_edit, self._browse))
+
+        self.pack_folder_edit = QLineEdit()
+        form.addRow("Extract to (folder name):", self.pack_folder_edit)
+
+        self.pack_name_edit = QLineEdit()
+        form.addRow("Pack name:", self.pack_name_edit)
+        self.creator_edit = QLineEdit()
+        form.addRow("Creator:", self.creator_edit)
+        self.licence_edit = QLineEdit()
+        form.addRow("Licence:", self.licence_edit)
+        self.source_url_edit = QLineEdit()
+        form.addRow("Source URL:", self.source_url_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Extract and Ingest")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(self, "Select zip file", "", "Zip archives (*.zip)")
+        if not chosen:
+            return
+        path = Path(chosen)
+        self.zip_path_edit.setText(str(path))
+        if not self.pack_folder_edit.text():
+            self.pack_folder_edit.setText(path.stem)
+        if not self.pack_name_edit.text():
+            self.pack_name_edit.setText(path.stem)
+
+    def _on_accept(self) -> None:
+        zip_text = self.zip_path_edit.text().strip()
+        pack_folder = self.pack_folder_edit.text().strip()
+        pack_name = self.pack_name_edit.text().strip()
+        if not zip_text or not pack_folder or not pack_name:
+            QMessageBox.warning(
+                self,
+                "Extract and Ingest from Zip",
+                "Pick a zip file, a destination folder name, and a pack name.",
+            )
+            return
+        self.zip_path = Path(zip_text)
+        self.pack_folder_name = pack_folder
+        self.pack_name = pack_name
+        self.creator = self.creator_edit.text().strip() or None
+        self.licence = self.licence_edit.text().strip() or None
+        self.source_url = self.source_url_edit.text().strip() or None
+        self.accept()
+
+
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -451,6 +523,8 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings_dialog)
         ingest_action = file_menu.addAction("Ingest Pack...")
         ingest_action.triggered.connect(self._open_ingest_dialog)
+        ingest_zip_action = file_menu.addAction("Extract and Ingest from Zip...")
+        ingest_zip_action.triggered.connect(self._open_ingest_zip_dialog)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
@@ -508,6 +582,32 @@ class MainWindow(QMainWindow):
                 dialog.source_url,
             ),
             f"Ingesting '{dialog.pack_name}'...",
+            lambda stats: (
+                f"Ingested '{dialog.pack_name}': {stats.new} new, "
+                f"{stats.duplicate} duplicate, {stats.total} scanned"
+            ),
+            rebuild_filters=True,
+        )
+
+    def _open_ingest_zip_dialog(self) -> None:
+        if self._catalogue.staging_folder() is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+        dialog = IngestZipDialog(self._catalogue, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.extract_and_ingest_pack_bg(
+                dialog.zip_path,
+                dialog.pack_folder_name,
+                dialog.pack_name,
+                dialog.creator,
+                dialog.licence,
+                dialog.source_url,
+            ),
+            f"Extracting and ingesting '{dialog.pack_name}'...",
             lambda stats: (
                 f"Ingested '{dialog.pack_name}': {stats.new} new, "
                 f"{stats.duplicate} duplicate, {stats.total} scanned"
