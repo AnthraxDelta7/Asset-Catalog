@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Local machine paths (staging folder, Blender path) and the catalogue DB
+# itself don't belong in version control.
+settings.json
+*.db

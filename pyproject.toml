@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asset-catalogue"
+version = "0.1.0"
+description = "Cataloguing, tagging, previewing and importing game assets"
+requires-python = ">=3.11"
+
+[project.scripts]
+asset-catalogue = "asset_catalogue.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
