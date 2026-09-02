@@ -4,8 +4,9 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -114,6 +115,8 @@ class ThumbnailGrid(QListWidget):
         self.setGridSize(
             QSize(THUMBNAIL_ICON_SIZE.width() + 16, THUMBNAIL_ICON_SIZE.height() + 48)
         )
+        # Ctrl/Shift-click and Ctrl+A ("select all") for bulk removal.
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
     def set_assets(self, assets: list[AssetSummary], catalogue: Catalogue) -> None:
         # Rebuilding the item list can make Qt pick its own new "current"
@@ -198,6 +201,13 @@ class DetailPanel(QWidget):
         self._asset_id = None
         self.title_label.setText("No asset selected")
         self.meta_label.setText("")
+        self.tag_list.clear()
+        self.setEnabled(False)
+
+    def show_multi_selection(self, count: int) -> None:
+        self._asset_id = None
+        self.title_label.setText(f"{count} assets selected")
+        self.meta_label.setText("Select exactly one asset to view or edit its tags.")
         self.tag_list.clear()
         self.setEnabled(False)
 
@@ -331,13 +341,22 @@ class SettingsDialog(QDialog):
 
 
 class IngestDialog(QDialog):
+    """One dialog for both pack sources -- an already-extracted folder inside
+    the staging folder, or a .zip anywhere on disk. Two browse buttons rather
+    than one is a real Qt/OS limitation, not a design choice: a native file
+    picker is either a folder picker or a file picker, never both at once.
+    """
+
     def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._catalogue = catalogue
         self.setWindowTitle("Ingest Pack")
-        self.resize(440, 240)
+        self.resize(480, 300)
 
-        self.pack_folder_name: str | None = None
+        self._source_kind: str | None = None  # "folder" or "zip"
+        self._zip_path: Path | None = None
+
+        self.pack_folder_name: str = ""
         self.pack_name: str = ""
         self.creator: str | None = None
         self.licence: str | None = None
@@ -346,9 +365,21 @@ class IngestDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.pack_folder_edit = QLineEdit()
-        self.pack_folder_edit.setReadOnly(True)
-        form.addRow("Pack folder:", _browse_row(self.pack_folder_edit, self._browse))
+        self.source_edit = QLineEdit()
+        self.source_edit.setReadOnly(True)
+        source_row = QHBoxLayout()
+        browse_folder_button = QPushButton("Browse Folder...")
+        browse_folder_button.clicked.connect(self._browse_folder)
+        browse_zip_button = QPushButton("Browse Zip...")
+        browse_zip_button.clicked.connect(self._browse_zip)
+        source_row.addWidget(self.source_edit)
+        source_row.addWidget(browse_folder_button)
+        source_row.addWidget(browse_zip_button)
+        form.addRow("Pack source:", source_row)
+
+        self.dest_folder_edit = QLineEdit()
+        self.dest_folder_edit.setEnabled(False)
+        form.addRow("Extract to (folder name):", self.dest_folder_edit)
 
         self.pack_name_edit = QLineEdit()
         form.addRow("Pack name:", self.pack_name_edit)
@@ -361,13 +392,28 @@ class IngestDialog(QDialog):
 
         layout.addLayout(form)
 
+        hint = QLabel(
+            "Browse Folder: pick an already-extracted pack inside the staging folder.\n"
+            "Browse Zip: pick a .zip anywhere on disk -- it's extracted into the staging "
+            "folder first, using the folder name above."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Ingest")
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _browse(self) -> None:
+    def is_zip_source(self) -> bool:
+        return self._source_kind == "zip"
+
+    @property
+    def zip_path(self) -> Path | None:
+        return self._zip_path
+
+    def _browse_folder(self) -> None:
         staging_folder = self._catalogue.staging_folder()
         if staging_folder is None:
             QMessageBox.warning(self, "Ingest Pack", "No staging folder configured.")
@@ -383,89 +429,37 @@ class IngestDialog(QDialog):
                 self, "Ingest Pack", "The selected folder must be inside the staging folder."
             )
             return
-        self.pack_folder_edit.setText(str(relative))
+        self._source_kind = "folder"
+        self._zip_path = None
+        self.source_edit.setText(str(relative))
+        self.dest_folder_edit.setText(str(relative))
+        self.dest_folder_edit.setEnabled(False)
         if not self.pack_name_edit.text():
             self.pack_name_edit.setText(chosen_path.name)
 
-    def _on_accept(self) -> None:
-        pack_folder = self.pack_folder_edit.text().strip()
-        pack_name = self.pack_name_edit.text().strip()
-        if not pack_folder or not pack_name:
-            QMessageBox.warning(self, "Ingest Pack", "Pick a pack folder and enter a pack name.")
-            return
-        self.pack_folder_name = pack_folder
-        self.pack_name = pack_name
-        self.creator = self.creator_edit.text().strip() or None
-        self.licence = self.licence_edit.text().strip() or None
-        self.source_url = self.source_url_edit.text().strip() or None
-        self.accept()
-
-
-class IngestZipDialog(QDialog):
-    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._catalogue = catalogue
-        self.setWindowTitle("Extract and Ingest from Zip")
-        self.resize(460, 260)
-
-        self.zip_path: Path | None = None
-        self.pack_folder_name: str = ""
-        self.pack_name: str = ""
-        self.creator: str | None = None
-        self.licence: str | None = None
-        self.source_url: str | None = None
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.zip_path_edit = QLineEdit()
-        self.zip_path_edit.setReadOnly(True)
-        form.addRow("Zip file:", _browse_row(self.zip_path_edit, self._browse))
-
-        self.pack_folder_edit = QLineEdit()
-        form.addRow("Extract to (folder name):", self.pack_folder_edit)
-
-        self.pack_name_edit = QLineEdit()
-        form.addRow("Pack name:", self.pack_name_edit)
-        self.creator_edit = QLineEdit()
-        form.addRow("Creator:", self.creator_edit)
-        self.licence_edit = QLineEdit()
-        form.addRow("Licence:", self.licence_edit)
-        self.source_url_edit = QLineEdit()
-        form.addRow("Source URL:", self.source_url_edit)
-
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Extract and Ingest")
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _browse(self) -> None:
+    def _browse_zip(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(self, "Select zip file", "", "Zip archives (*.zip)")
         if not chosen:
             return
         path = Path(chosen)
-        self.zip_path_edit.setText(str(path))
-        if not self.pack_folder_edit.text():
-            self.pack_folder_edit.setText(path.stem)
+        self._source_kind = "zip"
+        self._zip_path = path
+        self.source_edit.setText(str(path))
+        self.dest_folder_edit.setEnabled(True)
+        if not self.dest_folder_edit.text():
+            self.dest_folder_edit.setText(path.stem)
         if not self.pack_name_edit.text():
             self.pack_name_edit.setText(path.stem)
 
     def _on_accept(self) -> None:
-        zip_text = self.zip_path_edit.text().strip()
-        pack_folder = self.pack_folder_edit.text().strip()
         pack_name = self.pack_name_edit.text().strip()
-        if not zip_text or not pack_folder or not pack_name:
+        dest_folder = self.dest_folder_edit.text().strip()
+        if self._source_kind is None or not dest_folder or not pack_name:
             QMessageBox.warning(
-                self,
-                "Extract and Ingest from Zip",
-                "Pick a zip file, a destination folder name, and a pack name.",
+                self, "Ingest Pack", "Pick a pack folder or zip file, and enter a pack name."
             )
             return
-        self.zip_path = Path(zip_text)
-        self.pack_folder_name = pack_folder
+        self.pack_folder_name = dest_folder
         self.pack_name = pack_name
         self.creator = self.creator_edit.text().strip() or None
         self.licence = self.licence_edit.text().strip() or None
@@ -505,7 +499,7 @@ class MainWindow(QMainWindow):
 
         self.filter_panel = FilterPanel(catalogue, self._refresh_grid)
         self.grid = ThumbnailGrid()
-        self.grid.currentItemChanged.connect(self._on_selection_changed)
+        self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
         self.detail_panel = DetailPanel(catalogue, self._on_tags_changed)
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -535,6 +529,16 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
 
+        edit_menu = menu_bar.addMenu("&Edit")
+        select_all_action = edit_menu.addAction("Select All")
+        select_all_action.setShortcut(QKeySequence.SelectAll)
+        # self.grid doesn't exist yet at this point in __init__ -- a lambda
+        # defers the lookup to trigger-time instead of connect-time.
+        select_all_action.triggered.connect(lambda: self.grid.selectAll())
+        remove_action = edit_menu.addAction("Remove Selected...")
+        remove_action.setShortcut(QKeySequence.Delete)
+        remove_action.triggered.connect(self._remove_selected_assets)
+
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
         gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
         gen_2d_action.triggered.connect(self._generate_2d_thumbnails)
@@ -550,9 +554,6 @@ class MainWindow(QMainWindow):
 
         ingest_action = toolbar.addAction("Ingest Pack...")
         ingest_action.triggered.connect(self._open_ingest_dialog)
-
-        ingest_zip_action = toolbar.addAction("Ingest from Zip...")
-        ingest_zip_action.triggered.connect(self._open_ingest_zip_dialog)
 
     def _update_window_title(self) -> None:
         library_folder = settings.load().library_folder or "no library configured"
@@ -620,45 +621,39 @@ class MainWindow(QMainWindow):
         dialog = IngestDialog(self._catalogue, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        self._run_background_job(
-            lambda: self._catalogue.ingest_pack_bg(
-                dialog.pack_folder_name,
-                dialog.pack_name,
-                dialog.creator,
-                dialog.licence,
-                dialog.source_url,
-            ),
-            f"Ingesting '{dialog.pack_name}'...",
-            lambda stats: (
-                f"Ingested '{dialog.pack_name}': {stats.new} new, "
-                f"{stats.duplicate} duplicate, {stats.total} scanned"
-            ),
-            rebuild_filters=True,
-        )
 
-    def _open_ingest_zip_dialog(self) -> None:
-        if self._catalogue.staging_folder() is None:
-            QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
-            )
-            return
-        dialog = IngestZipDialog(self._catalogue, self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        self._run_background_job(
-            lambda: self._catalogue.extract_and_ingest_pack_bg(
+        if dialog.is_zip_source():
+            job = lambda: self._catalogue.extract_and_ingest_pack_bg(
                 dialog.zip_path,
                 dialog.pack_folder_name,
                 dialog.pack_name,
                 dialog.creator,
                 dialog.licence,
                 dialog.source_url,
-            ),
-            f"Extracting and ingesting '{dialog.pack_name}'...",
-            lambda stats: (
+            )
+        else:
+            job = lambda: self._catalogue.ingest_pack_bg(
+                dialog.pack_folder_name,
+                dialog.pack_name,
+                dialog.creator,
+                dialog.licence,
+                dialog.source_url,
+            )
+
+        def format_result(result: tuple) -> str:
+            stats, updated_fields = result
+            message = (
                 f"Ingested '{dialog.pack_name}': {stats.new} new, "
                 f"{stats.duplicate} duplicate, {stats.total} scanned"
-            ),
+            )
+            if updated_fields:
+                message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
+            return message
+
+        self._run_background_job(
+            job,
+            f"Ingesting '{dialog.pack_name}'...",
+            format_result,
             rebuild_filters=True,
         )
 
@@ -729,16 +724,42 @@ class MainWindow(QMainWindow):
         self.grid.select_asset_id(self._selected_asset_id)
         self.statusBar().showMessage(f"{len(self._current_assets)} asset(s)")
 
-    def _on_selection_changed(self, current: QListWidgetItem, previous: QListWidgetItem) -> None:
-        if current is None:
-            self._selected_asset_id = None
-            self.detail_panel.clear_selection()
+    def _on_grid_selection_changed(self) -> None:
+        selected = self.grid.selectedItems()
+        if len(selected) == 1:
+            asset_id = selected[0].data(Qt.UserRole)
+            asset = next((a for a in self._current_assets if a.id == asset_id), None)
+            if asset is not None:
+                self._selected_asset_id = asset_id
+                self.detail_panel.show_asset(asset)
             return
-        asset_id = current.data(Qt.UserRole)
-        asset = next((a for a in self._current_assets if a.id == asset_id), None)
-        if asset is not None:
-            self._selected_asset_id = asset_id
-            self.detail_panel.show_asset(asset)
+        self._selected_asset_id = None
+        if selected:
+            self.detail_panel.show_multi_selection(len(selected))
+        else:
+            self.detail_panel.clear_selection()
+
+    def _remove_selected_assets(self) -> None:
+        selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
+        if not selected_ids:
+            QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Remove Assets",
+            f"Remove {len(selected_ids)} asset(s) from the catalogue?\n\n"
+            "This only removes them from the catalogue database and deletes their "
+            "thumbnails -- the original files in your staging folder are untouched.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.remove_assets_bg(selected_ids),
+            f"Removing {len(selected_ids)} asset(s)...",
+            lambda stats: f"Removed {stats.removed} asset(s) from the catalogue.",
+            rebuild_filters=True,
+        )
 
     def _on_tags_changed(self) -> None:
         self.filter_panel.refresh_tags(self._catalogue)

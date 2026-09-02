@@ -28,13 +28,23 @@ asset-catalogue ingest <pack_folder_name> --pack-name "Pack Name" --creator "Cre
 
 Every file is SHA-256 hashed. Identical content — whether re-scanning the same pack or the same file shipped in two different packs — is recognized and skipped, never duplicated.
 
-If a pack is a `.zip` (the common case for purchased packs), skip manual extraction:
+**Re-ingesting an existing pack with different metadata updates only what changed** (the delta) — e.g. re-running with a corrected `--creator` updates just that field; a `--licence` you already had recorded and don't re-specify this time is left alone, never blanked out. Only fields you actually pass and that differ from what's stored get overwritten.
+
+If a pack is a `.zip` (the common case for purchased packs) and it's already sitting inside the staging folder, plain `ingest` handles it transparently — no separate step:
+
+```
+asset-catalogue ingest <pack_name.zip> --pack-name "Pack Name" --creator "Creator" --licence "CC0"
+```
+
+If the given path resolves to a `.zip` file rather than a folder, it's extracted first (into a same-named sibling folder) and then ingested normally, same as any other pack.
+
+For a zip that lives *outside* the staging folder (e.g. still in your Downloads folder), use `ingest-zip` instead, which brings it in:
 
 ```
 asset-catalogue ingest-zip <path\to\pack.zip> --pack-name "Pack Name" [--pack-folder folder_name] --creator "Creator" --licence "CC0"
 ```
 
-`<path\to\pack.zip>` can be anywhere on disk (e.g. your Downloads folder) — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally. Refuses to extract into a destination that already has files in it (won't silently merge/overwrite an existing pack), and rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
+`<path\to\pack.zip>` can be anywhere on disk — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally. Both paths share the same extraction logic: refuses to extract into a destination that already has files in it (won't silently merge/overwrite an existing pack), and rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
 
 ## Tagging
 
@@ -109,6 +119,16 @@ asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--
 
 `--unused` shows assets that have never been imported into any project.
 
+## Removing assets
+
+Removes one, many, or all assets from the catalogue — the database row, tags, import history, and rendered thumbnail. **Never touches the original files in the staging folder**; those stay exactly as shipped, same as everywhere else in this tool. Requires a filter (or `--all`) for the same reason `import` does — an easy fat-finger away from wiping the whole catalogue otherwise:
+
+```
+asset-catalogue remove --asset-id <id> [--asset-id <id> ...] | --pack "Pack Name" | --type texture | --tag tag_name | --all [--yes]
+```
+
+Prints what's about to be removed and asks for confirmation unless `--yes` is passed.
+
 ## Import
 
 Copies selected assets into a target project, rebuilding each asset's relative folder structure under a per-pack subfolder (default `imported_assets/<Pack Name>/...`, not dumped flat) rather than symlinking — see the design note below for why. Requires at least one selection filter, or `--all` to import the entire catalogue on purpose (a bare `import <project>` with nothing else is refused, since it's an easy fat-finger away from copying everything):
@@ -137,9 +157,11 @@ No CLI setup required first. A library folder is required above everything else 
 
 **File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path together. **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
 
-Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI.
+Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A) — selecting more than one asset switches the bottom panel to a "N assets selected" state (tag editing needs exactly one asset selected).
 
-**Ingest Pack...** and **Ingest from Zip...** are toolbar buttons, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. Ingest Pack opens a folder-browse scoped to the configured staging folder (picking a folder outside it is rejected), plus pack name/creator/licence/source URL fields. Ingest from Zip is the same idea, but the browse button picks a `.zip` file from anywhere on disk, plus an editable "extract to" folder name (defaults to the zip's filename); it extracts and ingests as one background job.
+**Ingest Pack...** is a toolbar button, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. One dialog handles both pack sources: **Browse Folder...** for an already-extracted pack inside the staging folder, or **Browse Zip...** for a `.zip` anywhere on disk (extracted into the staging folder first, using an editable destination folder name). Two browse buttons rather than one folder-or-file picker is a real OS/Qt limitation, not a design choice — a native picker is either a folder picker or a file picker, never both. Either way, one "Ingest" action runs it as a single background job, and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
+
+**Edit > Remove Selected...** (or the Delete key) removes whatever's selected in the grid — one, many, or all of it — from the catalogue database and thumbnails only; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
 
 **Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected). Both run on a background thread — the window stays responsive while Blender works, which matters since a full pack can take a while — and show a progress dialog until done.
 

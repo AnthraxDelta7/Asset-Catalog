@@ -55,10 +55,36 @@ def get_or_create_pack(
     creator: str | None,
     licence: str | None,
     source_url: str | None,
-) -> int:
-    row = conn.execute("SELECT id FROM packs WHERE name = ?", (name,)).fetchone()
+) -> tuple[int, list[str]]:
+    """Returns (pack_id, updated_fields).
+
+    Re-ingesting an existing pack (matched by name) only overwrites fields
+    that were actually supplied this time AND differ from what's stored --
+    the delta, not a blind overwrite. Omitting --creator on a re-ingest
+    (creator=None) must never erase a creator recorded on an earlier run.
+    """
+    row = conn.execute(
+        "SELECT id, pack_folder, creator, licence, source_url FROM packs WHERE name = ?",
+        (name,),
+    ).fetchone()
     if row is not None:
-        return row["id"]
+        updates: dict[str, str | None] = {}
+        if pack_folder != row["pack_folder"]:
+            updates["pack_folder"] = pack_folder
+        if creator is not None and creator != row["creator"]:
+            updates["creator"] = creator
+        if licence is not None and licence != row["licence"]:
+            updates["licence"] = licence
+        if source_url is not None and source_url != row["source_url"]:
+            updates["source_url"] = source_url
+        if updates:
+            set_clause = ", ".join(f"{column} = ?" for column in updates)
+            conn.execute(
+                f"UPDATE packs SET {set_clause} WHERE id = ?",
+                (*updates.values(), row["id"]),
+            )
+            conn.commit()
+        return row["id"], list(updates.keys())
     cursor = conn.execute(
         "INSERT INTO packs (name, pack_folder, creator, licence, source_url, date_added) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -72,7 +98,7 @@ def get_or_create_pack(
         ),
     )
     conn.commit()
-    return cursor.lastrowid
+    return cursor.lastrowid, []
 
 
 def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> IngestStats:

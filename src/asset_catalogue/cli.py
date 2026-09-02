@@ -11,6 +11,7 @@ from asset_catalogue import (
     importing,
     ingest,
     packs,
+    removal,
     settings,
     tagging,
     thumbnails,
@@ -79,14 +80,31 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             "asset-catalogue settings set --staging-folder <path>"
         )
     staging_folder = Path(s.staging_folder)
-    pack_root = staging_folder / args.pack_folder
-    if not pack_root.is_dir():
-        raise SystemExit(f"Pack folder not found: {pack_root}")
+    source_path = staging_folder / args.pack_folder
+
+    # A child of the staging folder that turns out to be a .zip is handled
+    # transparently -- extracted first -- rather than requiring the
+    # separate ingest-zip command for something already sitting in staging.
+    if source_path.is_file() and source_path.suffix.lower() == ".zip":
+        pack_folder = source_path.stem
+        pack_root = staging_folder / pack_folder
+        try:
+            archives.extract_zip(source_path, pack_root)
+        except (FileExistsError, archives.UnsafeZipError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Extracted '{source_path.name}' to {pack_root}")
+    else:
+        pack_folder = args.pack_folder
+        pack_root = source_path
+        if not pack_root.is_dir():
+            raise SystemExit(f"Pack folder not found: {pack_root}")
 
     conn = _connect()
-    pack_id = ingest.get_or_create_pack(
-        conn, args.pack_name, args.pack_folder, args.creator, args.licence, args.source_url
+    pack_id, updated_fields = ingest.get_or_create_pack(
+        conn, args.pack_name, pack_folder, args.creator, args.licence, args.source_url
     )
+    if updated_fields:
+        print(f"Updated pack metadata: {', '.join(updated_fields)}")
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     print(
         f"Ingested '{args.pack_name}': {stats.new} new, "
@@ -115,9 +133,11 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
     print(f"Extracted '{zip_path.name}' to {pack_root}")
 
     conn = _connect()
-    pack_id = ingest.get_or_create_pack(
+    pack_id, updated_fields = ingest.get_or_create_pack(
         conn, args.pack_name, pack_folder, args.creator, args.licence, args.source_url
     )
+    if updated_fields:
+        print(f"Updated pack metadata: {', '.join(updated_fields)}")
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     print(
         f"Ingested '{args.pack_name}': {stats.new} new, "
@@ -347,6 +367,67 @@ def cmd_imports(args: argparse.Namespace) -> None:
     print(f"{len(rows)} import record(s)")
 
 
+def cmd_remove(args: argparse.Namespace) -> None:
+    if not any([args.asset_id, args.pack, args.type, args.tag, args.all]):
+        raise SystemExit(
+            "Refusing to remove the entire catalogue unfiltered. Pass --asset-id, --pack, "
+            "--type, --tag, or --all to remove everything on purpose."
+        )
+    conn = _connect()
+
+    if args.asset_id:
+        placeholders = ",".join("?" for _ in args.asset_id)
+        rows = conn.execute(
+            "SELECT assets.id, assets.filename, packs.name AS pack_name "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id "
+            f"WHERE assets.id IN ({placeholders})",
+            args.asset_id,
+        ).fetchall()
+    else:
+        query = (
+            "SELECT assets.id, assets.filename, packs.name AS pack_name "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id"
+        )
+        clauses = []
+        params: list = []
+        if args.tag:
+            query += (
+                " JOIN asset_tags ON asset_tags.asset_id = assets.id"
+                " JOIN tags ON tags.id = asset_tags.tag_id"
+            )
+            clauses.append("tags.name = ?")
+            params.append(args.tag)
+        if args.pack:
+            clauses.append("packs.name = ?")
+            params.append(args.pack)
+        if args.type:
+            clauses.append("assets.asset_type = ?")
+            params.append(args.type)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        rows = conn.execute(query, params).fetchall()
+
+    if not rows:
+        print("No matching assets to remove.")
+        return
+
+    print(f"About to remove {len(rows)} asset(s) from the catalogue (source files are untouched):")
+    for row in rows[:20]:
+        print(f"  [{row['id']}] {row['pack_name']} / {row['filename']}")
+    if len(rows) > 20:
+        print(f"  ... and {len(rows) - 20} more")
+
+    if not args.yes:
+        answer = input("Continue? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    s = settings.load()
+    stats = removal.remove_assets(conn, s.thumbnail_dir(), [row["id"] for row in rows])
+    print(f"Removed {stats.removed} asset(s) from the catalogue.")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     conn = _connect()
     query = (
@@ -551,6 +632,24 @@ def build_parser() -> argparse.ArgumentParser:
     imports_parser.add_argument("--project", help="Filter to one target project path")
     imports_parser.add_argument("--asset-id", type=int)
     imports_parser.set_defaults(func=cmd_imports)
+
+    remove_parser = subparsers.add_parser(
+        "remove",
+        help="Remove assets from the catalogue (does not touch the original source files)",
+    )
+    remove_parser.add_argument(
+        "--asset-id", type=int, action="append", help="Repeatable; remove specific asset ids"
+    )
+    remove_parser.add_argument("--pack")
+    remove_parser.add_argument("--type")
+    remove_parser.add_argument("--tag")
+    remove_parser.add_argument(
+        "--all", action="store_true", help="Remove the entire catalogue, unfiltered"
+    )
+    remove_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt"
+    )
+    remove_parser.set_defaults(func=cmd_remove)
 
     return parser
 

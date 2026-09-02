@@ -4,7 +4,16 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from asset_catalogue import archives, blender_render, db, ingest, settings, tagging, thumbnails
+from asset_catalogue import (
+    archives,
+    blender_render,
+    db,
+    ingest,
+    removal,
+    settings,
+    tagging,
+    thumbnails,
+)
 
 
 @dataclass
@@ -170,18 +179,27 @@ class Catalogue:
         creator: str | None,
         licence: str | None,
         source_url: str | None,
-    ) -> ingest.IngestStats:
+    ) -> tuple[ingest.IngestStats, list[str]]:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         pack_root = self._staging_folder / pack_folder_name
-        if not pack_root.is_dir():
+
+        # A folder pick that turns out to be a .zip (e.g. one sitting
+        # directly in staging) is handled transparently rather than failing.
+        if pack_root.is_file() and pack_root.suffix.lower() == ".zip":
+            pack_folder_name = pack_root.stem
+            zip_path = pack_root
+            pack_root = self._staging_folder / pack_folder_name
+            archives.extract_zip(zip_path, pack_root)
+        elif not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
+
         conn = db.connect(settings.load().db_path())
         try:
-            pack_id = ingest.get_or_create_pack(
+            pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
-            return ingest.ingest_pack(conn, pack_root, pack_id)
+            return ingest.ingest_pack(conn, pack_root, pack_id), updated_fields
         finally:
             conn.close()
 
@@ -193,17 +211,24 @@ class Catalogue:
         creator: str | None,
         licence: str | None,
         source_url: str | None,
-    ) -> ingest.IngestStats:
+    ) -> tuple[ingest.IngestStats, list[str]]:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         pack_root = self._staging_folder / pack_folder_name
         archives.extract_zip(zip_path, pack_root)
         conn = db.connect(settings.load().db_path())
         try:
-            pack_id = ingest.get_or_create_pack(
+            pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
-            return ingest.ingest_pack(conn, pack_root, pack_id)
+            return ingest.ingest_pack(conn, pack_root, pack_id), updated_fields
+        finally:
+            conn.close()
+
+    def remove_assets_bg(self, asset_ids: list[int]) -> removal.RemoveStats:
+        conn = db.connect(settings.load().db_path())
+        try:
+            return removal.remove_assets(conn, self._thumbnail_dir, asset_ids)
         finally:
             conn.close()
 
