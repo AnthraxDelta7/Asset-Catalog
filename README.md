@@ -133,13 +133,13 @@ asset-catalogue imports [--project <project_root>] [--asset-id ID]
 asset-catalogue-ui
 ```
 
-No CLI setup required first — on first launch (no library folder configured yet), a **Settings** dialog opens automatically with folder/file browse buttons for the staging folder, library folder, and Blender path (with an "Auto-detect" button for Blender). Reachable again anytime from **File > Settings...**; changing the library folder live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
+No CLI setup required first. A library folder is required above everything else — the app checks on startup and won't open the main window without one, looping back to a **Settings** dialog (folder/file browse buttons, Blender "Auto-detect") until either a library actually opens or you quit. A path that's merely unconfigured is prompted for silently; a path that's configured but broken (bad permissions, points at a file, etc.) shows the actual error in the dialog rather than crashing. The window title always shows which library is currently open.
+
+**File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path together. **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
 
 Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI.
 
-**File > Ingest Pack...** opens a dialog with a folder-browse button scoped to the configured staging folder (picking a folder outside it is rejected), plus pack name/creator/licence/source URL fields.
-
-**File > Extract and Ingest from Zip...** — same idea, but the browse button picks a `.zip` file from anywhere on disk, plus an editable "extract to" folder name (defaults to the zip's filename). Runs extraction + ingest as one background job.
+**Ingest Pack...** and **Ingest from Zip...** are toolbar buttons, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. Ingest Pack opens a folder-browse scoped to the configured staging folder (picking a folder outside it is rejected), plus pack name/creator/licence/source URL fields. Ingest from Zip is the same idea, but the browse button picks a `.zip` file from anywhere on disk, plus an editable "extract to" folder name (defaults to the zip's filename); it extracts and ingests as one background job.
 
 **Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected). Both run on a background thread — the window stays responsive while Blender works, which matters since a full pack can take a while — and show a progress dialog until done.
 

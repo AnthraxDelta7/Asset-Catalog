@@ -242,13 +242,20 @@ class SettingsDialog(QDialog):
     touches the environment, not catalogue data.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, error_message: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(520, 260)
         s = settings.load()
 
         layout = QVBoxLayout(self)
+
+        if error_message:
+            error_label = QLabel(f"Could not open the library: {error_message}")
+            error_label.setWordWrap(True)
+            error_label.setStyleSheet("color: #d64545; font-weight: bold;")
+            layout.addWidget(error_label)
+
         form = QFormLayout()
 
         self.staging_edit = QLineEdit(s.staging_folder or "")
@@ -490,10 +497,11 @@ class MainWindow(QMainWindow):
         self._current_assets: list[AssetSummary] = []
         self._selected_asset_id: int | None = None
         self._active_worker: _BackgroundWorker | None = None
-        self.setWindowTitle("Asset Catalogue")
         self.resize(1100, 700)
+        self._update_window_title()
 
         self._build_menu()
+        self._build_toolbar()
 
         self.filter_panel = FilterPanel(catalogue, self._refresh_grid)
         self.grid = ThumbnailGrid()
@@ -521,10 +529,8 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("&File")
         settings_action = file_menu.addAction("Settings...")
         settings_action.triggered.connect(self._open_settings_dialog)
-        ingest_action = file_menu.addAction("Ingest Pack...")
-        ingest_action.triggered.connect(self._open_ingest_dialog)
-        ingest_zip_action = file_menu.addAction("Extract and Ingest from Zip...")
-        ingest_zip_action.triggered.connect(self._open_ingest_zip_dialog)
+        switch_library_action = file_menu.addAction("Switch Library...")
+        switch_library_action.triggered.connect(self._switch_library)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
@@ -537,19 +543,60 @@ class MainWindow(QMainWindow):
         )
         gen_3d_action.triggered.connect(self._generate_model_thumbnails)
 
+    def _build_toolbar(self) -> None:
+        toolbar = self.addToolBar("Ingest")
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+
+        ingest_action = toolbar.addAction("Ingest Pack...")
+        ingest_action.triggered.connect(self._open_ingest_dialog)
+
+        ingest_zip_action = toolbar.addAction("Ingest from Zip...")
+        ingest_zip_action.triggered.connect(self._open_ingest_zip_dialog)
+
+    def _update_window_title(self) -> None:
+        library_folder = settings.load().library_folder or "no library configured"
+        self.setWindowTitle(f"Asset Catalogue -- {library_folder}")
+
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
             self._reload_catalogue()
 
+    def _switch_library(self) -> None:
+        current = settings.load().library_folder or ""
+        chosen = QFileDialog.getExistingDirectory(self, "Select library folder", current)
+        if not chosen:
+            return
+        chosen_path = Path(chosen)
+
+        if (chosen_path / "catalogue.db").exists():
+            message = f"Switch to the existing library at:\n{chosen_path}"
+        else:
+            message = (
+                f"No catalogue.db found at:\n{chosen_path}\n\n"
+                "Switching here will create a new, empty library. Continue?"
+            )
+        confirm = QMessageBox.question(
+            self, "Switch Library", message, QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        s = settings.load()
+        s.library_folder = str(chosen_path)
+        settings.save(s)
+        self._reload_catalogue()
+
     def _reload_catalogue(self) -> None:
         try:
             new_catalogue = Catalogue.open()
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             QMessageBox.critical(self, "Asset Catalogue", str(exc))
             return
         self._catalogue.close()
         self._catalogue = new_catalogue
+        self._update_window_title()
         self.detail_panel.set_catalogue(self._catalogue)
         self.detail_panel.clear_selection()
         self._rebuild_filter_panel()
@@ -698,20 +745,28 @@ class MainWindow(QMainWindow):
         self._refresh_grid()
 
 
+def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:
+    try:
+        return Catalogue.open(), None
+    except (RuntimeError, OSError) as exc:
+        return None, str(exc)
+
+
 def main() -> None:
     app = QApplication(sys.argv)
 
-    try:
-        catalogue = Catalogue.open()
-    except RuntimeError:
-        dialog = SettingsDialog()
+    # A library folder is required above everything else -- nothing else in
+    # the app can run without one, so this loops until Catalogue.open()
+    # actually succeeds or the user explicitly quits, rather than letting a
+    # bad path (permissions, a typo, anything beyond "not configured yet")
+    # crash past this gate with a raw traceback.
+    catalogue, _ = _try_open_catalogue()
+    error_message: str | None = None
+    while catalogue is None:
+        dialog = SettingsDialog(error_message=error_message)
         if dialog.exec() != QDialog.Accepted:
             sys.exit(0)
-        try:
-            catalogue = Catalogue.open()
-        except RuntimeError as exc:
-            QMessageBox.critical(None, "Asset Catalogue", str(exc))
-            sys.exit(1)
+        catalogue, error_message = _try_open_catalogue()
 
     window = MainWindow(catalogue)
     window.show()
