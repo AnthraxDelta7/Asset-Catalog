@@ -96,8 +96,28 @@ asset-catalogue thumbnail generate-models --pack "Pack Name" --force   # re-rend
 ## Search (CLI)
 
 ```
-asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name]
+asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name] [--unused]
 ```
+
+`--unused` shows assets that have never been imported into any project.
+
+## Import
+
+Copies selected assets into a target project, rebuilding each asset's relative folder structure under a per-pack subfolder (default `imported_assets/<Pack Name>/...`, not dumped flat) rather than symlinking — see the design note below for why. Requires at least one selection filter, or `--all` to import the entire catalogue on purpose (a bare `import <project>` with nothing else is refused, since it's an easy fat-finger away from copying everything):
+
+```
+asset-catalogue import <project_root> [--pack "Pack Name"] [--type texture] [--tag tag_name] [--asset-id ID] [--all] [--dest-subfolder imported_assets]
+```
+
+If `<project_root>` contains a `project.godot`, that's reported; if not, the tool proceeds anyway (Godot is one possible destination, not the only one this tool targets). Every import is recorded — asset, target project (by resolved absolute path), and timestamp — which is what makes these queries possible:
+
+```
+asset-catalogue imports [--project <project_root>] [--asset-id ID]
+```
+
+`imports` with no filter is the full history; `--project` shows what's already in one project; `--asset-id` shows every project a given asset has been imported into.
+
+**Design note (copy vs symlink):** copy was chosen deliberately over symlink — simpler, safer, and avoids Windows' symlink creation normally needing Developer Mode or admin rights. The trade-off is real: a symlinked project would auto-pick-up pack updates and use less disk, but at the cost of the project silently breaking if the library folder isn't present at build/package time. Not revisited unless it becomes a real pain point.
 
 ## UI
 
@@ -117,4 +137,6 @@ Build order from the seed doc, tracked here:
 - [x] Blender thumbnails
 - [x] Qt UI (filter panel, thumbnail grid, tagging panel)
 - [x] Per-pack calibration
-- [ ] Import + tracking
+- [x] Import + tracking
+
+All seven build-order steps from the seed doc are now done. The UI (§ above) only covers browsing/tagging so far — import, calibration, and ingest are still CLI-only; folding them into the UI would be natural next work, but isn't part of the seed's stated build order.

@@ -4,7 +4,16 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from asset_catalogue import blender_render, db, ingest, packs, settings, tagging, thumbnails
+from asset_catalogue import (
+    blender_render,
+    db,
+    importing,
+    ingest,
+    packs,
+    settings,
+    tagging,
+    thumbnails,
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -231,6 +240,81 @@ def cmd_pack_set_corrections(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_import(args: argparse.Namespace) -> None:
+    if not any([args.pack, args.type, args.tag, args.asset_id, args.all]):
+        raise SystemExit(
+            "Refusing to import the entire catalogue unfiltered. Pass --pack, --type, "
+            "--tag, or --asset-id, or --all to import everything on purpose."
+        )
+
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+
+    project_root = Path(args.project_root)
+    if not project_root.is_dir():
+        raise SystemExit(f"Project folder not found: {project_root}")
+
+    if importing.is_godot_project(project_root):
+        print(f"Detected Godot project at {project_root}")
+    else:
+        print(f"No {importing.GODOT_PROJECT_FILE} found at {project_root} -- proceeding anyway")
+
+    conn = _connect()
+    assets = importing.select_assets(
+        conn, pack=args.pack, asset_type=args.type, tag=args.tag, asset_id=args.asset_id
+    )
+    if not assets:
+        print("No matching assets to import.")
+        return
+
+    project_identifier = str(project_root.resolve())
+    stats = importing.import_assets(
+        conn,
+        Path(s.staging_folder),
+        project_root,
+        project_identifier,
+        args.dest_subfolder,
+        assets,
+    )
+    print(f"Imported {stats.copied} asset(s) into {project_root}")
+
+
+def cmd_imports(args: argparse.Namespace) -> None:
+    conn = _connect()
+    query = (
+        "SELECT imports.id, imports.project_identifier, imports.timestamp, "
+        "assets.filename, packs.name AS pack_name "
+        "FROM imports JOIN assets ON assets.id = imports.asset_id "
+        "JOIN packs ON packs.id = assets.pack_id"
+    )
+    clauses = []
+    params: list = []
+    if args.project:
+        clauses.append("imports.project_identifier = ?")
+        params.append(str(Path(args.project).resolve()))
+    if args.asset_id:
+        clauses.append("imports.asset_id = ?")
+        params.append(args.asset_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY imports.timestamp DESC"
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        print("No import history found.")
+        return
+    for row in rows:
+        print(
+            f"[{row['id']}] {row['timestamp']}  {row['pack_name']} / {row['filename']}"
+            f" -> {row['project_identifier']}"
+        )
+    print(f"{len(rows)} import record(s)")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     conn = _connect()
     query = (
@@ -253,6 +337,8 @@ def cmd_list(args: argparse.Namespace) -> None:
     if args.type:
         clauses.append("assets.asset_type = ?")
         params.append(args.type)
+    if args.unused:
+        clauses.append("NOT EXISTS (SELECT 1 FROM imports WHERE imports.asset_id = assets.id)")
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY packs.name, assets.relative_path"
@@ -307,6 +393,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--pack")
     list_parser.add_argument("--type")
     list_parser.add_argument("--tag")
+    list_parser.add_argument(
+        "--unused", action="store_true", help="Only show assets never imported into any project"
+    )
     list_parser.set_defaults(func=cmd_list)
 
     tag_parser = subparsers.add_parser("tag", help="Apply a tag to a pack or an asset")
@@ -392,6 +481,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--clear", action="store_true", help="Remove all corrections for this pack"
     )
     set_corrections_parser.set_defaults(func=cmd_pack_set_corrections)
+
+    import_parser = subparsers.add_parser(
+        "import", help="Copy selected assets into a target project and record it"
+    )
+    import_parser.add_argument("project_root", help="Path to the target project")
+    import_parser.add_argument("--pack")
+    import_parser.add_argument("--type")
+    import_parser.add_argument("--tag")
+    import_parser.add_argument("--asset-id", type=int)
+    import_parser.add_argument(
+        "--all", action="store_true", help="Import the entire catalogue, unfiltered"
+    )
+    import_parser.add_argument(
+        "--dest-subfolder",
+        default="imported_assets",
+        help="Subfolder under the project root that imports land in, grouped by pack "
+        "(default: imported_assets)",
+    )
+    import_parser.set_defaults(func=cmd_import)
+
+    imports_parser = subparsers.add_parser("imports", help="Show import history")
+    imports_parser.add_argument("--project", help="Filter to one target project path")
+    imports_parser.add_argument("--asset-id", type=int)
+    imports_parser.set_defaults(func=cmd_imports)
 
     return parser
 
