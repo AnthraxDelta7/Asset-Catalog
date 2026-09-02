@@ -74,11 +74,19 @@ One Blender process handles the whole batch (startup dominates the per-asset cos
 
 Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing. There's no CLI to set them yet — that lands with per-pack calibration (build order step 6).
 
-## Search
+## Search (CLI)
 
 ```
 asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name]
 ```
+
+## UI
+
+```
+asset-catalogue-ui
+```
+
+Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI. Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem or raw SQL directly, per the seed doc's architecture rule (§3) — the CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
 
 ## Status
 
@@ -88,6 +96,6 @@ Build order from the seed doc, tracked here:
 - [x] Tagging (pack cascade + per-file tags, CLI)
 - [x] 2D thumbnails (Pillow)
 - [x] Blender thumbnails
-- [ ] Qt UI
+- [x] Qt UI (filter panel, thumbnail grid, tagging panel)
 - [ ] Per-pack calibration
 - [ ] Import + tracking

@@ -9,10 +9,12 @@ description = "Cataloguing, tagging, previewing and importing game assets"
 requires-python = ">=3.11"
 dependencies = [
     "Pillow>=10",
+    "PySide6>=6.5",
 ]
 
 [project.scripts]
 asset-catalogue = "asset_catalogue.cli:main"
+asset-catalogue-ui = "asset_catalogue.ui.main_window:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
