@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -158,11 +159,34 @@ class ThumbnailGrid(QListWidget):
 
 
 class DetailPanel(QWidget):
-    def __init__(self, catalogue: Catalogue, on_tags_changed) -> None:
+    """Single-asset mode (exactly one grid selection): full tag editing plus
+    a link to the asset's archived copy in the library. Multi-select mode
+    (2+ selected): tag list and "show in library" are disabled (ambiguous
+    for a set of different assets), but adding a tag still works -- it's
+    applied to every selected asset at once. All actual catalogue writes are
+    delegated to MainWindow via callbacks rather than done here directly,
+    since MainWindow decides whether a write needs to run in the background
+    (a bulk tag can trigger many file copies) or can stay fast/synchronous
+    (a single tag write, archived quietly afterward).
+    """
+
+    def __init__(
+        self,
+        catalogue: Catalogue,
+        on_tag_asset,
+        on_untag_asset,
+        on_bulk_tag_assets,
+        on_show_in_library,
+    ) -> None:
         super().__init__()
         self._catalogue = catalogue
-        self._on_tags_changed = on_tags_changed
+        self._on_tag_asset = on_tag_asset
+        self._on_untag_asset = on_untag_asset
+        self._on_bulk_tag_assets = on_bulk_tag_assets
+        self._on_show_in_library = on_show_in_library
         self._asset_id: int | None = None
+        self._current_asset: AssetSummary | None = None
+        self._multi_asset_ids: list[int] = []
 
         layout = QVBoxLayout(self)
         self.title_label = QLabel("No asset selected")
@@ -171,6 +195,10 @@ class DetailPanel(QWidget):
 
         self.meta_label = QLabel("")
         layout.addWidget(self.meta_label)
+
+        self.show_in_library_button = QPushButton("Show in Library Folder")
+        self.show_in_library_button.clicked.connect(self._show_in_library)
+        layout.addWidget(self.show_in_library_button)
 
         layout.addWidget(QLabel("Tags"))
         self.tag_list = QListWidget()
@@ -192,47 +220,77 @@ class DetailPanel(QWidget):
         add_row.addWidget(self.add_button)
         layout.addLayout(add_row)
 
-        self.setEnabled(False)
+        self._set_idle_state()
 
     def set_catalogue(self, catalogue: Catalogue) -> None:
         self._catalogue = catalogue
 
+    def _set_idle_state(self) -> None:
+        self.tag_list.setEnabled(False)
+        self.remove_button.setEnabled(False)
+        self.new_tag_input.setEnabled(False)
+        self.add_button.setEnabled(False)
+        self.show_in_library_button.setEnabled(False)
+
     def clear_selection(self) -> None:
         self._asset_id = None
+        self._current_asset = None
+        self._multi_asset_ids = []
         self.title_label.setText("No asset selected")
         self.meta_label.setText("")
         self.tag_list.clear()
-        self.setEnabled(False)
+        self._set_idle_state()
 
-    def show_multi_selection(self, count: int) -> None:
+    def show_multi_selection(self, asset_ids: list[int]) -> None:
         self._asset_id = None
-        self.title_label.setText(f"{count} assets selected")
-        self.meta_label.setText("Select exactly one asset to view or edit its tags.")
+        self._current_asset = None
+        self._multi_asset_ids = asset_ids
+        self.title_label.setText(f"{len(asset_ids)} assets selected")
+        self.meta_label.setText("Add a tag to apply it to all selected assets.")
         self.tag_list.clear()
-        self.setEnabled(False)
+        self.tag_list.setEnabled(False)
+        self.remove_button.setEnabled(False)
+        self.new_tag_input.setEnabled(True)
+        self.add_button.setEnabled(True)
+        self.show_in_library_button.setEnabled(False)
 
     def show_asset(self, asset: AssetSummary) -> None:
         self._asset_id = asset.id
+        self._current_asset = asset
+        self._multi_asset_ids = []
         self.title_label.setText(f"{asset.pack_name} / {asset.filename}")
         self.meta_label.setText(f"type: {asset.asset_type}   thumbnail: {asset.thumbnail_status}")
         self.tag_list.clear()
         self.tag_list.addItems(asset.tags)
-        self.setEnabled(True)
+        self.tag_list.setEnabled(True)
+        self.remove_button.setEnabled(True)
+        self.new_tag_input.setEnabled(True)
+        self.add_button.setEnabled(True)
+        archived = self._catalogue.library_asset_path_if_archived(
+            asset.pack_name, asset.relative_path
+        )
+        self.show_in_library_button.setEnabled(archived is not None)
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
-        if not name or self._asset_id is None:
+        if not name:
             return
-        self._catalogue.tag_asset(self._asset_id, name)
         self.new_tag_input.clear()
-        self._on_tags_changed()
+        if self._asset_id is not None:
+            self._on_tag_asset(self._asset_id, name)
+        elif self._multi_asset_ids:
+            self._on_bulk_tag_assets(list(self._multi_asset_ids), name)
 
     def _remove_selected_tag(self) -> None:
         item = self.tag_list.currentItem()
         if item is None or self._asset_id is None:
             return
-        self._catalogue.untag_asset(self._asset_id, item.text())
-        self._on_tags_changed()
+        self._on_untag_asset(self._asset_id, item.text())
+
+    def _show_in_library(self) -> None:
+        if self._current_asset is None:
+            return
+        self._on_show_in_library(self._current_asset.pack_name, self._current_asset.relative_path)
 
 
 def _browse_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
@@ -467,6 +525,60 @@ class IngestDialog(QDialog):
         self.accept()
 
 
+class TagPackDialog(QDialog):
+    def __init__(
+        self, catalogue: Catalogue, initial_pack: str | None, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tag Pack")
+        self.resize(380, 200)
+
+        self.pack_name: str = ""
+        self.tag_name: str = ""
+        self.category: str | None = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.pack_combo = QComboBox()
+        packs = catalogue.list_packs()
+        self.pack_combo.addItems(packs)
+        if initial_pack and initial_pack in packs:
+            self.pack_combo.setCurrentText(initial_pack)
+        form.addRow("Pack:", self.pack_combo)
+
+        self.tag_name_edit = QLineEdit()
+        form.addRow("Tag name:", self.tag_name_edit)
+        self.category_edit = QLineEdit()
+        form.addRow("Category (optional):", self.category_edit)
+
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Applies the tag to every asset currently in the pack. Safe to re-run "
+            "later -- never touches assets that were tagged explicitly."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Tag Pack")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        pack_name = self.pack_combo.currentText().strip()
+        tag_name = self.tag_name_edit.text().strip()
+        if not pack_name or not tag_name:
+            QMessageBox.warning(self, "Tag Pack", "Pick a pack and enter a tag name.")
+            return
+        self.pack_name = pack_name
+        self.tag_name = tag_name
+        self.category = self.category_edit.text().strip() or None
+        self.accept()
+
+
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -491,6 +603,7 @@ class MainWindow(QMainWindow):
         self._current_assets: list[AssetSummary] = []
         self._selected_asset_id: int | None = None
         self._active_worker: _BackgroundWorker | None = None
+        self._background_workers: set[_BackgroundWorker] = set()
         self.resize(1100, 700)
         self._update_window_title()
 
@@ -500,7 +613,13 @@ class MainWindow(QMainWindow):
         self.filter_panel = FilterPanel(catalogue, self._refresh_grid)
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
-        self.detail_panel = DetailPanel(catalogue, self._on_tags_changed)
+        self.detail_panel = DetailPanel(
+            catalogue,
+            self._handle_tag_asset,
+            self._handle_untag_asset,
+            self._handle_bulk_tag_assets,
+            self._show_in_library_folder,
+        )
 
         right_splitter = QSplitter(Qt.Vertical)
         right_splitter.addWidget(self.grid)
@@ -538,6 +657,9 @@ class MainWindow(QMainWindow):
         remove_action = edit_menu.addAction("Remove Selected...")
         remove_action.setShortcut(QKeySequence.Delete)
         remove_action.triggered.connect(self._remove_selected_assets)
+        edit_menu.addSeparator()
+        tag_pack_action = edit_menu.addAction("Tag Pack...")
+        tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
 
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
         gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
@@ -681,7 +803,7 @@ class MainWindow(QMainWindow):
             job,
             f"Ingesting '{dialog.pack_name}'...",
             format_result,
-            rebuild_filters=True,
+            self._rebuild_filter_panel,
         )
 
     def _generate_2d_thumbnails(self) -> None:
@@ -693,7 +815,7 @@ class MainWindow(QMainWindow):
                 f"Thumbnails: {stats.generated} generated, "
                 f"{stats.already_done} already done, {stats.failed} failed"
             ),
-            rebuild_filters=False,
+            self._refresh_grid,
         )
 
     def _generate_model_thumbnails(self) -> None:
@@ -710,10 +832,115 @@ class MainWindow(QMainWindow):
                 f"Model thumbnails: {stats.generated} generated, "
                 f"{stats.already_done} already done, {stats.failed} failed"
             ),
-            rebuild_filters=False,
+            self._refresh_grid,
         )
 
-    def _run_background_job(self, fn, progress_text: str, format_result, rebuild_filters: bool) -> None:
+    def _open_tag_pack_dialog(self) -> None:
+        if not self._catalogue.list_packs():
+            QMessageBox.information(self, "Asset Catalogue", "No packs to tag yet -- ingest one first.")
+            return
+        dialog = TagPackDialog(self._catalogue, self.filter_panel.selected_pack(), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        def format_result(stats) -> str:
+            message = (
+                f"Applied '{dialog.tag_name}' to {stats.tagged} asset(s) in '{dialog.pack_name}', "
+                f"archived {stats.archived} to the library"
+            )
+            if stats.archive_failed:
+                message += (
+                    f" ({stats.archive_failed} could not be archived -- source file missing)"
+                )
+            return message
+
+        self._run_background_job(
+            lambda: self._catalogue.tag_pack_bg(dialog.pack_name, dialog.tag_name, dialog.category),
+            f"Tagging pack '{dialog.pack_name}'...",
+            format_result,
+            self._on_tags_changed,
+        )
+
+    def _handle_tag_asset(self, asset_id: int, tag_name: str) -> None:
+        self._catalogue.tag_asset(asset_id, tag_name)
+        self._on_tags_changed()
+        self._archive_asset_fire_and_forget(asset_id)
+
+    def _handle_untag_asset(self, asset_id: int, tag_name: str) -> None:
+        self._catalogue.untag_asset(asset_id, tag_name)
+        self._on_tags_changed()
+
+    def _handle_bulk_tag_assets(self, asset_ids: list[int], tag_name: str) -> None:
+        def format_result(stats) -> str:
+            message = (
+                f"Tagged {stats.tagged} asset(s) with '{tag_name}', "
+                f"archived {stats.archived} to the library"
+            )
+            if stats.archive_failed:
+                message += (
+                    f" ({stats.archive_failed} could not be archived -- source file missing)"
+                )
+            return message
+
+        self._run_background_job(
+            lambda: self._catalogue.bulk_tag_assets_bg(asset_ids, tag_name),
+            f"Tagging {len(asset_ids)} asset(s)...",
+            format_result,
+            self._on_tags_changed,
+        )
+
+    def _archive_asset_fire_and_forget(self, asset_id: int) -> None:
+        """Archives one asset in the background with only a status-bar
+        message, not the modal progress dialog _run_background_job uses --
+        this fires after every single-asset tag, so a popup for each one
+        would be constant noise. Multiple can run concurrently (rapid
+        tagging), so each worker is tracked in a set rather than the single
+        _active_worker slot the modal jobs use.
+        """
+        worker = _BackgroundWorker(lambda: self._catalogue.archive_asset_bg(asset_id))
+
+        def cleanup() -> None:
+            self._background_workers.discard(worker)
+
+        def on_ok(path) -> None:
+            if path is not None:
+                self.statusBar().showMessage(f"Archived to library: {path.name}", 4000)
+                # The archive finished after the grid's own post-tag refresh
+                # already ran (and found nothing archived yet) -- if this is
+                # still the asset on screen, refresh its "Show in Library
+                # Folder" state now rather than leaving it stuck disabled
+                # until some unrelated action happens to refresh it.
+                if self._selected_asset_id == asset_id:
+                    asset = next((a for a in self._current_assets if a.id == asset_id), None)
+                    if asset is not None:
+                        self.detail_panel.show_asset(asset)
+
+        def on_fail(message: str) -> None:
+            self.statusBar().showMessage(f"Could not archive asset: {message}", 5000)
+
+        worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
+        worker.failed.connect(on_fail, Qt.QueuedConnection)
+        worker.finished.connect(cleanup)
+        worker.finished.connect(worker.deleteLater)
+        self._background_workers.add(worker)
+        worker.start()
+
+    def _show_in_library_folder(self, pack_name: str, relative_path: str) -> None:
+        path = self._catalogue.library_asset_path_if_archived(pack_name, relative_path)
+        if path is None:
+            QMessageBox.information(
+                self,
+                "Asset Catalogue",
+                "This asset hasn't been archived to the library yet -- archiving "
+                "happens automatically the first time it's tagged.",
+            )
+            return
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", f"/select,{path}"])
+        else:
+            QMessageBox.information(self, "Asset Catalogue", f"Library copy is at:\n{path}")
+
+    def _run_background_job(self, fn, progress_text: str, format_result, on_success_refresh) -> None:
         progress = QProgressDialog(progress_text, None, 0, 0, self)
         progress.setWindowTitle("Asset Catalogue")
         progress.setWindowModality(Qt.WindowModal)
@@ -726,10 +953,7 @@ class MainWindow(QMainWindow):
         def on_ok(result) -> None:
             progress.close()
             QMessageBox.information(self, "Asset Catalogue", format_result(result))
-            if rebuild_filters:
-                self._rebuild_filter_panel()
-            else:
-                self._refresh_grid()
+            on_success_refresh()
 
         def on_fail(message: str) -> None:
             progress.close()
@@ -762,7 +986,8 @@ class MainWindow(QMainWindow):
             return
         self._selected_asset_id = None
         if selected:
-            self.detail_panel.show_multi_selection(len(selected))
+            asset_ids = [item.data(Qt.UserRole) for item in selected]
+            self.detail_panel.show_multi_selection(asset_ids)
         else:
             self.detail_panel.clear_selection()
 
@@ -775,8 +1000,9 @@ class MainWindow(QMainWindow):
             self,
             "Remove Assets",
             f"Remove {len(selected_ids)} asset(s) from the catalogue?\n\n"
-            "This only removes them from the catalogue database and deletes their "
-            "thumbnails -- the original files in your staging folder are untouched.",
+            "This removes them from the catalogue database and deletes their "
+            "thumbnails and any archived library copy -- the original files in "
+            "your staging folder are untouched.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
@@ -785,7 +1011,7 @@ class MainWindow(QMainWindow):
             lambda: self._catalogue.remove_assets_bg(selected_ids),
             f"Removing {len(selected_ids)} asset(s)...",
             lambda stats: f"Removed {stats.removed} asset(s) from the catalogue.",
-            rebuild_filters=True,
+            self._rebuild_filter_panel,
         )
 
     def _on_tags_changed(self) -> None:

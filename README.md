@@ -73,6 +73,12 @@ asset-catalogue tags
 
 **Known limitation:** there's no way yet to explicitly exclude an asset from a pack-level tag — `untag asset` removes the tag, but re-running `tag pack` will re-apply it on the next cascade, since the schema only tracks *how* a tag was applied (inherited/explicit), not "explicitly excluded." Revisit if this comes up in practice.
 
+### Keeping a copy in the library
+
+Tagging an asset — one at a time, in bulk, or via a pack cascade — copies its file into `library_folder/assets/<Pack Name>/<relative_path>`, if it isn't there already. This is what makes a library folder actually self-contained: without it, moving or sharing the library (its own separate feature, see "Switch Library" below) would only carry the catalogue database and thumbnails, never usable files — the real assets would still be sitting only in the staging folder on the original machine. Untagging never removes the archived copy (tagging is what curates something *into* the library; removing a tag doesn't mean you've decided the opposite). `remove` (below) does delete it, along with everything else about that asset.
+
+CLI `tag asset`/`tag pack` report how many files got archived this way. There's no separate CLI command to archive without tagging — tagging *is* the trigger, by design.
+
 ## Thumbnails (2D)
 
 Renders a 256x256 PNG for every `texture`-type asset, named after its content hash — so identical content, wherever it's re-encountered, never gets rendered twice:
@@ -125,7 +131,7 @@ asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--
 
 ## Removing assets
 
-Removes one, many, or all assets from the catalogue — the database row, tags, import history, and rendered thumbnail. **Never touches the original files in the staging folder**; those stay exactly as shipped, same as everywhere else in this tool. Requires a filter (or `--all`) for the same reason `import` does — an easy fat-finger away from wiping the whole catalogue otherwise:
+Removes one, many, or all assets from the catalogue — the database row, tags, import history, rendered thumbnail, and any archived library copy. **Never touches the original files in the staging folder**; those stay exactly as shipped, same as everywhere else in this tool. Requires a filter (or `--all`) for the same reason `import` does — an easy fat-finger away from wiping the whole catalogue otherwise:
 
 ```
 asset-catalogue remove --asset-id <id> [--asset-id <id> ...] | --pack "Pack Name" | --type texture | --tag tag_name | --all [--yes]
@@ -161,11 +167,18 @@ No CLI setup required first. A library folder is required above everything else 
 
 **File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path together. **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
 
-Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset — add/remove tags directly from the grid instead of going through the CLI. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A) — selecting more than one asset switches the bottom panel to a "N assets selected" state (tag editing needs exactly one asset selected).
+Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A):
+
+- **Exactly one asset selected:** full tag editing (add/remove), and a **Show in Library Folder** button that opens the asset's archived copy directly in Explorer — enabled once it's actually been archived (i.e. after it's been tagged at least once), disabled otherwise.
+- **Two or more selected:** the panel switches to an "N assets selected" state — adding a tag applies it to every selected asset at once (as one background job, with a progress dialog, since that can mean several file copies); removing a tag is disabled here (which of several different assets' tags would it even apply to?).
+
+**Edit > Tag Pack...** cascades a tag onto an entire pack from a dropdown (defaults to whatever pack is currently filtered), same as the CLI's `tag pack` — the third way to select "how much" to tag, alongside one asset and a multi-selection.
+
+Any tag add — single, bulk, or pack-wide — also archives the affected asset(s) into the library folder if not already there (see "Keeping a copy in the library" above). Single-asset tagging archives quietly in the background (just a status-bar message); bulk/pack tagging shows it in the same progress dialog as the tag write, since it's a more deliberate, larger-scale action.
 
 **Ingest Pack...** is a toolbar button, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. One dialog handles both pack sources: **Browse Folder...** for an already-extracted pack inside the staging folder, or **Browse Zip...** for a `.zip` anywhere on disk (extracted into the staging folder first, using an editable destination folder name). Two browse buttons rather than one folder-or-file picker is a real OS/Qt limitation, not a design choice — a native picker is either a folder picker or a file picker, never both. Either way, one "Ingest" action runs it as a single background job, and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
 
-**Edit > Remove Selected...** (or the Delete key) removes whatever's selected in the grid — one, many, or all of it — from the catalogue database and thumbnails only; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
+**Edit > Remove Selected...** (or the Delete key) removes whatever's selected in the grid — one, many, or all of it — from the catalogue database, thumbnails, and any archived library copy; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
 
 **Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected). Both run on a background thread — the window stays responsive while Blender works, which matters since a full pack can take a while — and show a progress dialog until done.
 

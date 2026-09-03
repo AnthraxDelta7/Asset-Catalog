@@ -10,6 +10,7 @@ from asset_catalogue import (
     db,
     importing,
     ingest,
+    library_assets,
     packs,
     removal,
     settings,
@@ -44,6 +45,17 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"  (skipped {stats.skipped_engine_files} Unity/Unreal project file(s) "
             f"and {stats.skipped_engine_folders} project folder(s) -- not asset content)"
         )
+
+
+def _archive_asset_if_possible(conn: sqlite3.Connection, asset_id: int) -> Path | None:
+    """Copies a tagged asset's file into the library's assets/ folder, if a
+    staging folder is configured to copy it from. Silently skipped (not an
+    error) if not -- tagging should still succeed either way.
+    """
+    s = settings.load()
+    if not s.staging_folder:
+        return None
+    return library_assets.archive_asset(conn, Path(s.staging_folder), s.assets_dir(), asset_id)
 
 
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
@@ -165,6 +177,13 @@ def cmd_tag_pack(args: argparse.Namespace) -> None:
         f"Applied '{args.tag_name}' to {applied} asset(s) in '{args.pack_name}' "
         "(already-tagged assets left untouched)"
     )
+    # tag_pack cascades onto every asset currently in the pack, so
+    # afterward every asset in it is tagged one way or another -- archive
+    # all of them, not just the ones the cascade just added.
+    asset_ids = [row["id"] for row in conn.execute("SELECT id FROM assets WHERE pack_id = ?", (pack_id,))]
+    archived = sum(1 for asset_id in asset_ids if _archive_asset_if_possible(conn, asset_id))
+    if asset_ids:
+        print(f"Archived {archived}/{len(asset_ids)} asset(s) in '{args.pack_name}' to the library")
 
 
 def cmd_tag_asset(args: argparse.Namespace) -> None:
@@ -173,6 +192,9 @@ def cmd_tag_asset(args: argparse.Namespace) -> None:
     tag_id = tagging.get_or_create_tag(conn, args.tag_name, args.category)
     tagging.tag_asset(conn, asset_id, tag_id)
     print(f"Tagged asset {asset_id} with '{args.tag_name}' (explicit)")
+    archived_path = _archive_asset_if_possible(conn, asset_id)
+    if archived_path:
+        print(f"Archived to library: {archived_path}")
 
 
 def cmd_untag_asset(args: argparse.Namespace) -> None:
@@ -435,7 +457,9 @@ def cmd_remove(args: argparse.Namespace) -> None:
             return
 
     s = settings.load()
-    stats = removal.remove_assets(conn, s.thumbnail_dir(), [row["id"] for row in rows])
+    stats = removal.remove_assets(
+        conn, s.thumbnail_dir(), s.assets_dir(), [row["id"] for row in rows]
+    )
     print(f"Removed {stats.removed} asset(s) from the catalogue.")
 
 

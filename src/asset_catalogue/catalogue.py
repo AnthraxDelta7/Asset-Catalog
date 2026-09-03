@@ -9,6 +9,7 @@ from asset_catalogue import (
     blender_render,
     db,
     ingest,
+    library_assets,
     removal,
     settings,
     tagging,
@@ -24,6 +25,7 @@ class AssetSummary:
     asset_type: str
     thumbnail_status: str
     content_hash: str
+    relative_path: str
     tags: list[str] = field(default_factory=list)
 
 
@@ -34,17 +36,29 @@ class TagSummary:
     usage_count: int
 
 
+@dataclass
+class BulkTagStats:
+    tagged: int = 0
+    archived: int = 0
+    archive_failed: int = 0
+
+
 class Catalogue:
     """The only thing the UI is allowed to talk to -- never the filesystem
     or raw SQL directly. See asset-catalogue-seed.md section 3.
     """
 
     def __init__(
-        self, conn: sqlite3.Connection, staging_folder: Path | None, thumbnail_dir: Path
+        self,
+        conn: sqlite3.Connection,
+        staging_folder: Path | None,
+        thumbnail_dir: Path,
+        assets_dir: Path,
     ) -> None:
         self._conn = conn
         self._staging_folder = staging_folder
         self._thumbnail_dir = thumbnail_dir
+        self._assets_dir = assets_dir
 
     @classmethod
     def open(cls) -> Catalogue:
@@ -57,7 +71,7 @@ class Catalogue:
         Path(s.library_folder).mkdir(parents=True, exist_ok=True)
         conn = db.connect(s.db_path())
         staging_folder = Path(s.staging_folder) if s.staging_folder else None
-        return cls(conn, staging_folder, s.thumbnail_dir())
+        return cls(conn, staging_folder, s.thumbnail_dir(), s.assets_dir())
 
     def close(self) -> None:
         self._conn.close()
@@ -91,7 +105,8 @@ class Catalogue:
     ) -> list[AssetSummary]:
         query = (
             "SELECT assets.id, assets.filename, assets.asset_type, "
-            "assets.thumbnail_status, assets.content_hash, packs.name AS pack_name "
+            "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
+            "packs.name AS pack_name "
             "FROM assets JOIN packs ON packs.id = assets.pack_id"
         )
         clauses: list[str] = []
@@ -122,6 +137,7 @@ class Catalogue:
                 asset_type=row["asset_type"],
                 thumbnail_status=row["thumbnail_status"],
                 content_hash=row["content_hash"],
+                relative_path=row["relative_path"],
                 tags=self.get_asset_tags(row["id"]),
             )
             for row in rows
@@ -137,6 +153,10 @@ class Catalogue:
 
     def thumbnail_path_for(self, content_hash: str) -> Path | None:
         path = thumbnails.thumbnail_path(self._thumbnail_dir, content_hash)
+        return path if path.exists() else None
+
+    def library_asset_path_if_archived(self, pack_name: str, relative_path: str) -> Path | None:
+        path = library_assets.asset_library_path(self._assets_dir, pack_name, relative_path)
         return path if path.exists() else None
 
     def tag_asset(self, asset_id: int, tag_name: str, category: str | None = None) -> None:
@@ -228,7 +248,79 @@ class Catalogue:
     def remove_assets_bg(self, asset_ids: list[int]) -> removal.RemoveStats:
         conn = db.connect(settings.load().db_path())
         try:
-            return removal.remove_assets(conn, self._thumbnail_dir, asset_ids)
+            return removal.remove_assets(conn, self._thumbnail_dir, self._assets_dir, asset_ids)
+        finally:
+            conn.close()
+
+    def archive_asset_bg(self, asset_id: int) -> Path | None:
+        """Copies one asset's file into the library's assets/ folder, if not
+        already there. Meant to run quietly on a background thread after a
+        single-asset tag (see ui/main_window.py's fire-and-forget worker) --
+        a large file copy shouldn't block the window, but doesn't need the
+        modal progress dialog bulk operations use either.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return library_assets.archive_asset(conn, self._staging_folder, self._assets_dir, asset_id)
+        finally:
+            conn.close()
+
+    def bulk_tag_assets_bg(
+        self, asset_ids: list[int], tag_name: str, category: str | None = None
+    ) -> BulkTagStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        stats = BulkTagStats()
+        try:
+            tag_id = tagging.get_or_create_tag(conn, tag_name, category)
+            for asset_id in asset_ids:
+                tagging.tag_asset(conn, asset_id, tag_id)
+                stats.tagged += 1
+                archived_path = library_assets.archive_asset(
+                    conn, self._staging_folder, self._assets_dir, asset_id
+                )
+                if archived_path is not None:
+                    stats.archived += 1
+                else:
+                    stats.archive_failed += 1
+            return stats
+        finally:
+            conn.close()
+
+    def tag_pack_bg(
+        self, pack_name: str, tag_name: str, category: str | None = None
+    ) -> BulkTagStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        stats = BulkTagStats()
+        try:
+            pack_row = conn.execute("SELECT id FROM packs WHERE name = ?", (pack_name,)).fetchone()
+            if pack_row is None:
+                raise RuntimeError(f"No such pack: {pack_name}")
+            tag_id = tagging.get_or_create_tag(conn, tag_name, category)
+            # tag_pack cascades onto every asset currently in the pack, so
+            # afterward every asset in it is tagged one way or another --
+            # archive all of them, not just the ones the cascade just added.
+            stats.tagged = tagging.tag_pack(conn, pack_row["id"], tag_id)
+            asset_ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM assets WHERE pack_id = ?", (pack_row["id"],)
+                )
+            ]
+            for asset_id in asset_ids:
+                archived_path = library_assets.archive_asset(
+                    conn, self._staging_folder, self._assets_dir, asset_id
+                )
+                if archived_path is not None:
+                    stats.archived += 1
+                else:
+                    stats.archive_failed += 1
+            return stats
         finally:
             conn.close()
 

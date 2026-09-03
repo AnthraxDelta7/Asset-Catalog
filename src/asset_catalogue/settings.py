@@ -20,6 +20,9 @@ class Settings:
     def thumbnail_dir(self) -> Path:
         return Path(self.library_folder) / "thumbnails"
 
+    def assets_dir(self) -> Path:
+        return Path(self.library_folder) / "assets"
+
 
 def load() -> Settings:
     if not SETTINGS_PATH.exists():
