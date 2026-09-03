@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSplitter,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -398,11 +399,121 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class StagingBrowserDialog(QDialog):
+    """A small custom folder browser scoped to the staging folder, showing
+    subfolders AND .zip files side by side as selectable pack sources.
+
+    This exists because a native QFileDialog can't do this: it's either a
+    folder picker or a file picker, never both -- Directory mode's own
+    selection model treats files as inert even when they're shown in the
+    listing (verified rather than assumed: selectFile() on a .zip in
+    Directory mode reports it as "selected" programmatically, but that's
+    not the same as a real double-click doing anything sane in the actual
+    widget, which is the documented, known-flaky part). Building a small
+    dedicated browser sidesteps relying on that quirky, undocumented corner
+    of the native widget's behavior.
+    """
+
+    def __init__(self, staging_folder: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select Pack")
+        self.resize(480, 420)
+        self._staging_folder = staging_folder
+        self._current_dir = staging_folder
+
+        self.selected_relative_path: str | None = None
+        self.selected_is_zip: bool = False
+
+        layout = QVBoxLayout(self)
+
+        nav_row = QHBoxLayout()
+        self.up_button = QPushButton("Up")
+        self.up_button.clicked.connect(self._go_up)
+        self.location_label = QLabel()
+        self.location_label.setWordWrap(True)
+        nav_row.addWidget(self.up_button)
+        nav_row.addWidget(self.location_label, stretch=1)
+        layout.addLayout(nav_row)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
+        layout.addWidget(self.list_widget, stretch=1)
+
+        hint = QLabel(
+            "Double-click a folder to open it, or a .zip to select it directly. "
+            'Use "Select This Folder" to pick the folder you\'re currently browsing.'
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        button_row = QHBoxLayout()
+        select_folder_button = QPushButton("Select This Folder")
+        select_folder_button.clicked.connect(self._select_current_folder)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(select_folder_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        self._refresh_listing()
+
+    def _refresh_listing(self) -> None:
+        self.list_widget.clear()
+        relative = self._current_dir.relative_to(self._staging_folder)
+        self.location_label.setText(
+            "Staging (root)" if str(relative) == "." else f"Staging / {relative}"
+        )
+        self.up_button.setEnabled(self._current_dir != self._staging_folder)
+
+        style = self.style()
+        try:
+            entries = sorted(
+                self._current_dir.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except OSError:
+            entries = []
+
+        for entry in entries:
+            if entry.is_dir():
+                item = QListWidgetItem(style.standardIcon(QStyle.SP_DirIcon), entry.name)
+                item.setData(Qt.UserRole, ("folder", entry))
+                self.list_widget.addItem(item)
+            elif entry.is_file() and entry.suffix.lower() == ".zip":
+                item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
+                item.setData(Qt.UserRole, ("zip", entry))
+                self.list_widget.addItem(item)
+
+    def _go_up(self) -> None:
+        if self._current_dir == self._staging_folder:
+            return
+        self._current_dir = self._current_dir.parent
+        self._refresh_listing()
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        kind, path = item.data(Qt.UserRole)
+        if kind == "folder":
+            self._current_dir = path
+            self._refresh_listing()
+        else:
+            self.selected_relative_path = str(path.relative_to(self._staging_folder))
+            self.selected_is_zip = True
+            self.accept()
+
+    def _select_current_folder(self) -> None:
+        self.selected_relative_path = str(self._current_dir.relative_to(self._staging_folder))
+        self.selected_is_zip = False
+        self.accept()
+
+
 class IngestDialog(QDialog):
-    """One dialog for both pack sources -- an already-extracted folder inside
-    the staging folder, or a .zip anywhere on disk. Two browse buttons rather
-    than one is a real Qt/OS limitation, not a design choice: a native file
-    picker is either a folder picker or a file picker, never both at once.
+    """One dialog for both pack sources. "Browse Staging..." opens the
+    custom StagingBrowserDialog above, which shows folders and .zip files
+    together (a zip found there is auto-extracted at ingest time -- see
+    ingest.py's ingest_pack). "Browse Zip..." is for a zip that lives
+    *outside* the staging folder (e.g. still in Downloads) and needs to be
+    brought in -- a genuinely different case, since there's no
+    staging-relative path to derive a destination folder name from, so it
+    stays a native file picker with an editable destination field.
     """
 
     def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
@@ -426,8 +537,8 @@ class IngestDialog(QDialog):
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
         source_row = QHBoxLayout()
-        browse_folder_button = QPushButton("Browse Folder...")
-        browse_folder_button.clicked.connect(self._browse_folder)
+        browse_folder_button = QPushButton("Browse Staging...")
+        browse_folder_button.clicked.connect(self._browse_staging)
         browse_zip_button = QPushButton("Browse Zip...")
         browse_zip_button.clicked.connect(self._browse_zip)
         source_row.addWidget(self.source_edit)
@@ -451,9 +562,10 @@ class IngestDialog(QDialog):
         layout.addLayout(form)
 
         hint = QLabel(
-            "Browse Folder: pick an already-extracted pack inside the staging folder.\n"
-            "Browse Zip: pick a .zip anywhere on disk -- it's extracted into the staging "
-            "folder first, using the folder name above."
+            "Browse Staging: pick a folder or a .zip from inside the staging folder -- "
+            "either one, side by side.\n"
+            "Browse Zip: pick a .zip anywhere else on disk -- it's extracted into the "
+            "staging folder first, using the folder name above."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -471,29 +583,29 @@ class IngestDialog(QDialog):
     def zip_path(self) -> Path | None:
         return self._zip_path
 
-    def _browse_folder(self) -> None:
+    def _browse_staging(self) -> None:
         staging_folder = self._catalogue.staging_folder()
         if staging_folder is None:
             QMessageBox.warning(self, "Ingest Pack", "No staging folder configured.")
             return
-        chosen = QFileDialog.getExistingDirectory(self, "Select pack folder", str(staging_folder))
-        if not chosen:
+        browser = StagingBrowserDialog(staging_folder, self)
+        if browser.exec() != QDialog.Accepted or browser.selected_relative_path is None:
             return
-        chosen_path = Path(chosen)
-        try:
-            relative = chosen_path.relative_to(staging_folder)
-        except ValueError:
-            QMessageBox.warning(
-                self, "Ingest Pack", "The selected folder must be inside the staging folder."
-            )
-            return
+
+        relative_path = browser.selected_relative_path
+        # A .zip picked here is passed through as-is (e.g. "PackB.zip") --
+        # ingest_pack_bg already auto-detects and extracts a pack_folder_name
+        # that turns out to be a zip sitting in staging, the same mechanism
+        # that already backs plain `ingest` in the CLI. No special-casing
+        # needed here; this path is identical to a folder selection.
         self._source_kind = "folder"
         self._zip_path = None
-        self.source_edit.setText(str(relative))
-        self.dest_folder_edit.setText(str(relative))
+        self.source_edit.setText(relative_path)
+        self.dest_folder_edit.setText(relative_path)
         self.dest_folder_edit.setEnabled(False)
         if not self.pack_name_edit.text():
-            self.pack_name_edit.setText(chosen_path.name)
+            name = Path(relative_path)
+            self.pack_name_edit.setText(name.stem if browser.selected_is_zip else name.name)
 
     def _browse_zip(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(self, "Select zip file", "", "Zip archives (*.zip)")
