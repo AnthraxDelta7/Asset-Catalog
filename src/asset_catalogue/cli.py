@@ -46,6 +46,26 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"and {stats.skipped_engine_folders} project folder(s) -- not asset content)"
         )
     print(f"  (archived {stats.archived} asset(s) to the library)")
+    print(f"  (generated {stats.thumbnails_generated} thumbnail(s), {stats.thumbnails_failed} failed)")
+    if stats.blender_unavailable_reason:
+        print(f"  (3D thumbnails skipped: {stats.blender_unavailable_reason})")
+
+
+def _auto_generate_thumbnails(
+    conn: sqlite3.Connection,
+    stats: ingest.IngestStats,
+    staging_folder: Path,
+    thumbnail_dir: Path,
+    blender_path: str | None,
+    pack_id: int,
+    pack_name: str,
+) -> None:
+    thumb_stats = blender_render.generate_pack_thumbnails(
+        conn, staging_folder, thumbnail_dir, blender_path, pack_id, pack_name
+    )
+    stats.thumbnails_generated = thumb_stats.generated
+    stats.thumbnails_failed = thumb_stats.failed
+    stats.blender_unavailable_reason = thumb_stats.blender_unavailable_reason
 
 
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
@@ -126,6 +146,9 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(f"Updated pack metadata: {', '.join(updated_fields)}")
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     stats.archived = library_assets.archive_pack(conn, staging_folder, s.assets_dir(), pack_id)
+    _auto_generate_thumbnails(
+        conn, stats, staging_folder, s.thumbnail_dir(), s.blender_path, pack_id, args.pack_name
+    )
     _print_ingest_result(args.pack_name, stats)
 
 
@@ -158,6 +181,15 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
     stats.archived = library_assets.archive_pack(
         conn, Path(s.staging_folder), s.assets_dir(), pack_id
+    )
+    _auto_generate_thumbnails(
+        conn,
+        stats,
+        Path(s.staging_folder),
+        s.thumbnail_dir(),
+        s.blender_path,
+        pack_id,
+        args.pack_name,
     )
     _print_ingest_result(args.pack_name, stats)
 
@@ -236,23 +268,9 @@ def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
             "asset-catalogue settings set --staging-folder <path>"
         )
 
-    blender_exe = blender_render.find_blender(s.blender_path)
+    blender_exe, error = blender_render.resolve_blender(s.blender_path)
     if blender_exe is None:
-        raise SystemExit(
-            "Blender not found. Install it, or point at it with: "
-            "asset-catalogue settings set --blender-path <path to blender.exe>"
-        )
-
-    version = blender_render.get_blender_version(blender_exe)
-    if version is None:
-        raise SystemExit(f"Could not determine Blender's version from {blender_exe}")
-    if version < blender_render.MIN_BLENDER_VERSION:
-        min_version = ".".join(str(part) for part in blender_render.MIN_BLENDER_VERSION)
-        found_version = ".".join(str(part) for part in version)
-        raise SystemExit(
-            f"Blender {found_version} is older than the minimum supported "
-            f"{min_version} (found at {blender_exe})"
-        )
+        raise SystemExit(error)
 
     conn = _connect()
     stats = blender_render.generate_model_thumbnails(

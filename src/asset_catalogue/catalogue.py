@@ -170,19 +170,9 @@ class Catalogue:
     # run ingest/thumbnail generation without freezing the window.
 
     def resolve_blender(self) -> Path:
-        s = settings.load()
-        blender_exe = blender_render.find_blender(s.blender_path)
+        blender_exe, error = blender_render.resolve_blender(settings.load().blender_path)
         if blender_exe is None:
-            raise RuntimeError("Blender not found. Set its path in Settings, or install it.")
-        version = blender_render.get_blender_version(blender_exe)
-        if version is None:
-            raise RuntimeError(f"Could not determine Blender's version from {blender_exe}")
-        if version < blender_render.MIN_BLENDER_VERSION:
-            min_version = ".".join(str(part) for part in blender_render.MIN_BLENDER_VERSION)
-            found_version = ".".join(str(part) for part in version)
-            raise RuntimeError(
-                f"Blender {found_version} is older than the minimum supported {min_version}"
-            )
+            raise RuntimeError(error)
         return blender_exe
 
     def ingest_pack_bg(
@@ -216,9 +206,25 @@ class Catalogue:
             stats.archived = library_assets.archive_pack(
                 conn, self._staging_folder, self._assets_dir, pack_id
             )
+            self._auto_generate_thumbnails(conn, stats, pack_id, pack_name)
             return stats, updated_fields
         finally:
             conn.close()
+
+    def _auto_generate_thumbnails(
+        self, conn: sqlite3.Connection, stats: ingest.IngestStats, pack_id: int, pack_name: str
+    ) -> None:
+        thumb_stats = blender_render.generate_pack_thumbnails(
+            conn,
+            self._staging_folder,
+            self._thumbnail_dir,
+            settings.load().blender_path,
+            pack_id,
+            pack_name,
+        )
+        stats.thumbnails_generated = thumb_stats.generated
+        stats.thumbnails_failed = thumb_stats.failed
+        stats.blender_unavailable_reason = thumb_stats.blender_unavailable_reason
 
     def extract_and_ingest_pack_bg(
         self,
@@ -242,6 +248,7 @@ class Catalogue:
             stats.archived = library_assets.archive_pack(
                 conn, self._staging_folder, self._assets_dir, pack_id
             )
+            self._auto_generate_thumbnails(conn, stats, pack_id, pack_name)
             return stats, updated_fields
         finally:
             conn.close()

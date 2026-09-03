@@ -88,6 +88,9 @@ class IngestStats:
     skipped_engine_files: int = 0
     skipped_engine_folders: int = 0
     archived: int = 0
+    thumbnails_generated: int = 0
+    thumbnails_failed: int = 0
+    blender_unavailable_reason: str | None = None
 
 
 def get_or_create_pack(

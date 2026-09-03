@@ -54,6 +54,26 @@ def get_blender_version(blender_exe: Path) -> tuple[int, int, int] | None:
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
+def resolve_blender(blender_path_setting: str | None) -> tuple[Path | None, str | None]:
+    """Finds and version-checks Blender. Returns (blender_exe, error) -- on
+    failure blender_exe is None and error explains why, so a caller can
+    treat "Blender isn't available" as a soft skip rather than a hard error
+    (see generate_pack_thumbnails, and cli.py's cmd_thumbnail_generate_models
+    for the CLI's own hard-error use of the same checks).
+    """
+    blender_exe = find_blender(blender_path_setting)
+    if blender_exe is None:
+        return None, "Blender not found. Set its path in Settings, or install it."
+    version = get_blender_version(blender_exe)
+    if version is None:
+        return None, f"Could not determine Blender's version from {blender_exe}"
+    if version < MIN_BLENDER_VERSION:
+        min_version = ".".join(str(part) for part in MIN_BLENDER_VERSION)
+        found_version = ".".join(str(part) for part in version)
+        return None, f"Blender {found_version} is older than the minimum supported {min_version}"
+    return blender_exe, None
+
+
 @dataclass
 class ModelThumbnailStats:
     generated: int = 0
@@ -193,4 +213,57 @@ def generate_model_thumbnails(
     finally:
         job_list_path.unlink(missing_ok=True)
 
+    return stats
+
+
+@dataclass
+class AutoThumbnailStats:
+    generated: int = 0
+    failed: int = 0
+    blender_unavailable_reason: str | None = None
+
+
+def generate_pack_thumbnails(
+    conn: sqlite3.Connection,
+    staging_folder: Path,
+    thumbnail_dir: Path,
+    blender_path_setting: str | None,
+    pack_id: int,
+    pack_name: str,
+) -> AutoThumbnailStats:
+    """Generates thumbnails for every asset currently in a pack, dispatched
+    by type -- Pillow for textures, Blender for models. If the pack has no
+    model assets, Blender is never even checked for (avoids paying its
+    startup cost on packs that don't need it). If it does and Blender isn't
+    available, that's a soft skip (recorded in blender_unavailable_reason),
+    not an error -- 2D thumbnails still complete either way.
+    """
+    stats = AutoThumbnailStats()
+
+    texture_stats = thumbnails.generate_texture_thumbnails(
+        conn, staging_folder, thumbnail_dir, pack_name=pack_name
+    )
+    stats.generated += texture_stats.generated
+    stats.failed += texture_stats.failed
+
+    has_models = (
+        conn.execute(
+            "SELECT 1 FROM assets WHERE pack_id = ? AND asset_type = 'model' LIMIT 1",
+            (pack_id,),
+        ).fetchone()
+        is not None
+    )
+    if not has_models:
+        return stats
+
+    blender_exe, error = resolve_blender(blender_path_setting)
+    if blender_exe is None:
+        stats.blender_unavailable_reason = error
+        return stats
+
+    model_stats = generate_model_thumbnails(
+        conn, staging_folder, thumbnail_dir, blender_exe, pack_name=pack_name
+    )
+    stats.generated += model_stats.generated
+    stats.failed += model_stats.failed
     return stats

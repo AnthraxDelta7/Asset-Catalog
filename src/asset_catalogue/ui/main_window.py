@@ -909,6 +909,12 @@ class MainWindow(QMainWindow):
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
             message += f"\nArchived {stats.archived} asset(s) to the library"
+            message += (
+                f"\nGenerated {stats.thumbnails_generated} thumbnail(s), "
+                f"{stats.thumbnails_failed} failed"
+            )
+            if stats.blender_unavailable_reason:
+                message += f"\n3D thumbnails skipped: {stats.blender_unavailable_reason}"
             return message
 
         self._run_background_job(
