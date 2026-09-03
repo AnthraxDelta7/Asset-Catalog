@@ -550,10 +550,26 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Ingest")
         toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
 
-        ingest_action = toolbar.addAction("Ingest Pack...")
-        ingest_action.triggered.connect(self._open_ingest_dialog)
+        # A QAction on a toolbar renders as a flat QToolButton with barely
+        # any chrome until hovered -- easy to miss as a clickable button.
+        # A real QPushButton always shows a proper raised border/background.
+        ingest_button = QPushButton("Ingest Pack...")
+        ingest_button.setCursor(Qt.PointingHandCursor)
+        ingest_button.setStyleSheet(
+            "QPushButton {"
+            "  padding: 6px 18px;"
+            "  font-weight: 600;"
+            "  background-color: #2d6cdf;"
+            "  color: white;"
+            "  border: 1px solid #1f4fb0;"
+            "  border-radius: 4px;"
+            "}"
+            "QPushButton:hover { background-color: #3d7ae8; }"
+            "QPushButton:pressed { background-color: #1f4fb0; }"
+        )
+        ingest_button.clicked.connect(self._open_ingest_dialog)
+        toolbar.addWidget(ingest_button)
 
     def _update_window_title(self) -> None:
         library_folder = settings.load().library_folder or "no library configured"
@@ -650,6 +666,12 @@ class MainWindow(QMainWindow):
                 message += (
                     f"\nUnpacked {stats.nested_zips_extracted} nested zip file(s) "
                     "found inside the pack"
+                )
+            if stats.skipped_engine_files or stats.skipped_engine_folders:
+                message += (
+                    f"\nSkipped {stats.skipped_engine_files} Unity/Unreal project "
+                    f"file(s) and {stats.skipped_engine_folders} project folder(s) "
+                    "-- not asset content"
                 )
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"

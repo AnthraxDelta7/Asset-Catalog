@@ -35,6 +35,37 @@ ASSET_TYPE_BY_EXTENSION: dict[str, str] = {
     ".flac": "audio",
 }
 
+# Quality control: this catalogue is for raw 3D/2D/audio content, not
+# game-engine project data. A purchased pack sometimes bundles Unity/Unreal
+# project files alongside the actual usable assets (a sample scene, .meta
+# sidecars, serialized ScriptableObjects, etc.) -- those aren't reusable
+# outside their originating engine project, so they're excluded rather than
+# catalogued as generic "other" assets.
+ENGINE_PROJECT_EXTENSIONS: set[str] = {
+    # Unity
+    ".meta", ".unity", ".prefab", ".asset", ".mat", ".controller",
+    ".anim", ".mask", ".playable", ".signal", ".mixer", ".guiskin",
+    ".spriteatlas", ".asmdef", ".asmref", ".unitypackage", ".uxml", ".uss",
+    ".shadervariants", ".cs",
+    # Unreal
+    ".uasset", ".umap", ".uproject", ".uplugin", ".upk",
+}
+
+# Whole folders belonging to an engine project's build/cache machinery
+# (never real content) -- skipped entirely, not walked into. Matched
+# case-insensitively against the folder name only, not the full path.
+ENGINE_PROJECT_FOLDER_NAMES: set[str] = {
+    name.lower()
+    for name in (
+        # Unity
+        "Library", "Temp", "Obj", "Logs", "UserSettings", "ProjectSettings",
+        # Unreal
+        "Binaries", "Intermediate", "Saved", "DerivedDataCache",
+        # General VCS noise, commonly bundled by accident
+        ".git", ".svn", ".vs",
+    )
+}
+
 
 def classify(extension: str) -> str:
     return ASSET_TYPE_BY_EXTENSION.get(extension.lower(), "other")
@@ -54,6 +85,8 @@ class IngestStats:
     duplicate: int = 0
     total: int = 0
     nested_zips_extracted: int = 0
+    skipped_engine_files: int = 0
+    skipped_engine_folders: int = 0
 
 
 def get_or_create_pack(
@@ -136,9 +169,16 @@ def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> Inge
             if entry.is_dir():
                 if entry.name in zip_stems:
                     continue
+                if entry.name.lower() in ENGINE_PROJECT_FOLDER_NAMES:
+                    stats.skipped_engine_folders += 1
+                    continue
                 work_items.append((entry, zip_depth))
                 continue
             if not entry.is_file():
+                continue
+
+            if entry.suffix.lower() in ENGINE_PROJECT_EXTENSIONS:
+                stats.skipped_engine_files += 1
                 continue
 
             if entry.suffix.lower() == ".zip":

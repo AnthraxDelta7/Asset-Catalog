@@ -28,6 +28,8 @@ asset-catalogue ingest <pack_folder_name> --pack-name "Pack Name" --creator "Cre
 
 Every file is SHA-256 hashed. Identical content — whether re-scanning the same pack or the same file shipped in two different packs — is recognized and skipped, never duplicated.
 
+**Quality control:** this catalogue is for raw 3D/2D/audio content, not game-engine project data. A pack that bundles Unity or Unreal project files alongside the real content (`.meta` sidecars, `.prefab`/`.unity`/`.uasset`/`.uproject`, `.cs` scripts, etc. — see `ENGINE_PROJECT_EXTENSIONS` in `ingest.py`) has those skipped automatically, not catalogued as generic "other" assets. Whole engine build/cache folders (`Library/`, `ProjectSettings/`, `Binaries/`, `Intermediate/`, `Saved/`, `.git/`, etc.) are skipped entirely — never walked into at all. The ingest summary reports how many files/folders were skipped this way when it's non-zero.
+
 **Re-ingesting an existing pack with different metadata updates only what changed** (the delta) — e.g. re-running with a corrected `--creator` updates just that field; a `--licence` you already had recorded and don't re-specify this time is left alone, never blanked out. Only fields you actually pass and that differ from what's stored get overwritten.
 
 If a pack is a `.zip` (the common case for purchased packs) and it's already sitting inside the staging folder, plain `ingest` handles it transparently — no separate step:

@@ -39,6 +39,11 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"  (unpacked {stats.nested_zips_extracted} nested zip file(s) "
             "found inside the pack)"
         )
+    if stats.skipped_engine_files or stats.skipped_engine_folders:
+        print(
+            f"  (skipped {stats.skipped_engine_files} Unity/Unreal project file(s) "
+            f"and {stats.skipped_engine_folders} project folder(s) -- not asset content)"
+        )
 
 
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
