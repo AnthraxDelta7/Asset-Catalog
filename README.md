@@ -38,7 +38,7 @@ If a pack is a `.zip` (the common case for purchased packs) and it's already sit
 asset-catalogue ingest <pack_name.zip> --pack-name "Pack Name" --creator "Creator" --licence "CC0"
 ```
 
-If the given path resolves to a `.zip` file rather than a folder, it's extracted first (into a same-named sibling folder) and then ingested normally, same as any other pack.
+If the given path resolves to a `.zip` file rather than a folder, it's extracted first (into a same-named sibling folder) and then ingested normally, same as any other pack. **Re-running `ingest` against the same zip afterward — e.g. picking it again to catch new files — reuses the already-extracted folder instead of failing**: it only extracts when that destination doesn't already exist, so a second run against the same zip behaves exactly like re-ingesting the already-extracted folder directly (idempotent, deduping by content hash). Extraction still refuses to run on top of some *other*, unrelated non-empty folder that happens to share the zip's name (won't silently merge/overwrite a pack that isn't this zip's own prior extraction).
 
 For a zip that lives *outside* the staging folder (e.g. still in your Downloads folder), use `ingest-zip` instead, which brings it in:
 
@@ -46,7 +46,7 @@ For a zip that lives *outside* the staging folder (e.g. still in your Downloads 
 asset-catalogue ingest-zip <path\to\pack.zip> --pack-name "Pack Name" [--pack-folder folder_name] --creator "Creator" --licence "CC0"
 ```
 
-`<path\to\pack.zip>` can be anywhere on disk — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally. Both paths share the same extraction logic: refuses to extract into a destination that already has files in it (won't silently merge/overwrite an existing pack), and rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
+`<path\to\pack.zip>` can be anywhere on disk — it's extracted into a new subfolder of the staging folder (named after the zip file by default, or `--pack-folder`) and then ingested normally, with the same re-run behavior as above: a destination that already exists (from an earlier run of this same command) is ingested from as-is, not re-extracted. Extraction rejects any archive entry whose path would land outside the destination folder (zip-slip protection — this processes archives from arbitrary purchased packs, so that's a real risk worth guarding against, not just a theoretical one).
 
 **A `.zip` found anywhere *inside* a pack while ingesting — not just at the top level — is handled the same way**, automatically: extracted into a same-named sibling folder, its contents catalogued under that folder name, and this applies recursively (a zip inside a zip unpacks both). The original `.zip` is left in place, not deleted — only its contents get catalogued. Re-running ingest afterward is still fully idempotent: an already-extracted nested zip is recognized and re-walked for new content rather than re-extracted.
 
@@ -56,7 +56,9 @@ Ingest also copies each file into `library_folder/assets/<Pack Name>/<relative_p
 
 ### Thumbnails are generated automatically, dispatched by type
 
-Ingest also renders a thumbnail for every asset it catalogues — Pillow for `texture` assets, Blender for `model` assets, dispatched per-asset by `asset_type`, no separate step needed. If a pack has no `model` assets, Blender is never even checked for (skips the startup/version-check cost entirely for texture- or audio-only packs). If it does and Blender isn't available (not installed, not configured), that's a soft skip, not a failure — the ingest still succeeds, 2D thumbnails still render, and the summary says why 3D ones didn't (`ingest`/`ingest-zip` report generated/failed counts and the skip reason). The manual `thumbnail generate` / `thumbnail generate-models` commands below still exist for regenerating (`--force`), previewing corrections, or catching a pack ingested before this existed — ingest just means you don't need them for the common case anymore.
+Ingest also renders a thumbnail for every asset it catalogues — Pillow for `texture` and `audio` assets, Blender for `model` assets, dispatched per-asset by `asset_type`, no separate step needed. If a pack has no `model` assets, Blender is never even checked for (skips the startup/version-check cost entirely for texture- or audio-only packs). If it does and Blender isn't available (not installed, not configured), that's a soft skip, not a failure — the ingest still succeeds, 2D/audio thumbnails still render, and the summary says why 3D ones didn't (`ingest`/`ingest-zip` report generated/failed counts and the skip reason). The manual `thumbnail generate` / `thumbnail generate-audio` / `thumbnail generate-models` commands below still exist for regenerating (`--force`), previewing corrections, or catching a pack ingested before this existed — ingest just means you don't need them for the common case anymore.
+
+**The first time a pack ever gets a model thumbnail, only one model asset is actually rendered** — a calibration preview, not the whole batch. The rest are left `pending` rather than rendered up front. This is exactly the "Per-pack calibration" workflow below (render one, check it, adjust corrections, then render the rest), just triggered automatically instead of requiring a manual first step: if the pack turns out to need `up_axis`/`scale`/`material_fallback` corrections, only that one preview asset needs a corrected re-render, not the whole pack's worth. The ingest summary says so explicitly when it happens, with the exact follow-up command. Once a pack has at least one successfully-rendered model — from that preview, or from any prior run — later ingests into the same pack (adding more files) skip the preview step and render new assets normally; calibration is a once-per-pack concern, not once-per-ingest.
 
 ## Tagging
 
@@ -79,6 +81,13 @@ List the tag vocabulary and how many assets carry each tag:
 asset-catalogue tags
 ```
 
+Renaming or re-categorizing a tag changes it everywhere it's used at once (`asset_tags` references tags by id, not name, so every asset carrying it just sees the new name); deleting a tag removes it from the vocabulary and from every asset carrying it:
+
+```
+asset-catalogue tag rename <tag_name> <new_name> [--category ...] [--clear-category]
+asset-catalogue tag delete <tag_name> [--yes]
+```
+
 **Known limitation:** there's no way yet to explicitly exclude an asset from a pack-level tag — `untag asset` removes the tag, but re-running `tag pack` will re-apply it on the next cascade, since the schema only tracks *how* a tag was applied (inherited/explicit), not "explicitly excluded." Revisit if this comes up in practice.
 
 ## Thumbnails (2D)
@@ -90,6 +99,14 @@ asset-catalogue thumbnail generate [--pack "Pack Name"] [--force]
 ```
 
 Assets are retried on the next run if they previously failed (unreadable/corrupt file), but skipped once `thumbnail_status` is `done` — pass `--force` to re-render everything regardless of status. Model (3D) assets are untouched here; they wait on Blender integration (build order step 4).
+
+## Thumbnails (audio)
+
+```
+asset-catalogue thumbnail generate-audio [--pack "Pack Name"] [--force]
+```
+
+Same content-hash naming, same retry/`--force`/skip-if-done semantics as the 2D path above. `.wav` decodes with Python's stdlib `wave` module (zero new dependencies) and gets a real rendered waveform — peak amplitude per column, drawn as vertical bars, first channel only for multi-channel audio. `.mp3`/`.ogg`/`.flac` have no stdlib decoder; rather than add a decoding dependency (and, for mp3, likely a separate ffmpeg install) just for a thumbnail, they get a plain "audio file" placeholder icon instead — still visually distinct in the grid from other asset types, without pretending to show real waveform data it didn't actually decode. Revisit if real waveforms for those formats ever becomes worth a new dependency.
 
 ## Thumbnails (3D / Blender)
 
@@ -106,7 +123,7 @@ Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are
 
 ## Per-pack calibration
 
-Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7):
+Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7). A brand-new pack with model assets already gets this workflow's first step done automatically at ingest — see "Thumbnails are generated automatically" above:
 
 ```
 asset-catalogue pack set-corrections <pack_name> [--up-axis Y_UP|Z_UP] [--scale 1.0] [--material-fallback | --no-material-fallback]
@@ -123,13 +140,54 @@ asset-catalogue thumbnail generate-models --pack "Pack Name" --force   # re-rend
 
 **Note:** `scale` won't visibly change the thumbnail — the camera always reframes to fit the asset's bounding box, so a uniformly-scaled object still fills the same portion of frame. It's stored and applied to the imported object regardless (for correctness ahead of the eventual import step, where absolute scale will matter), just not something you can visually calibrate by eye the way `up_axis` and `material_fallback` are.
 
+## Editing, renaming, and removing a pack
+
+Creator/licence/source URL can be edited after ingest, not just set once at ingest time. Only fields you pass are touched — omit one to leave it as-is, or clear it explicitly:
+
+```
+asset-catalogue pack set-metadata <pack_name> [--creator ...] [--licence ...] [--source-url ...]
+asset-catalogue pack set-metadata <pack_name> [--clear-creator] [--clear-licence] [--clear-source-url]
+```
+
+Renaming a pack also moves its archived library folder (`library_folder/assets/<old name>/` → `.../<new name>/`) so already-archived copies and "Show in Library Folder" keep working under the new name instead of being silently orphaned under the old one:
+
+```
+asset-catalogue pack rename <pack_name> <new_name>
+```
+
+Removing a pack deletes every one of its assets (catalogue rows, thumbnails, archived copies — same as `remove --pack`) *and* the `packs` row and its entire archived library folder, which plain `remove --pack` never did (that only ever deleted the asset rows, leaving an empty pack entry and any stray library files behind):
+
+```
+asset-catalogue pack remove <pack_name> [--yes]
+```
+
+## Converting models to glTF
+
+On demand, per model asset (never automatic) — imports the asset in its original format via Blender, applies the pack's corrections (same ones used for thumbnails), and exports it as `.glb`. Same asset id, same tags/import history — only its file (`relative_path`, `extension`, `content_hash`, `file_size`) changes in place, and its thumbnail is regenerated immediately afterward so a broken conversion is obvious right away rather than discovered later:
+
+```
+asset-catalogue convert to-gltf --asset-id <id> [--asset-id <id> ...]
+```
+
+`--asset-id` is repeatable — pass several to convert them in one batch, via a single Blender process for the whole set (same batching rationale as thumbnail generation: startup dominates the per-asset cost). **Anything not a model asset, or already `.glb`, is silently skipped rather than treated as an error** — this is what lets you point it at a mixed, multi-format selection without pre-filtering it yourself.
+
+**The pre-conversion original is never deleted automatically.** It's left sitting in staging (and its library copy stays archived) until you explicitly decide the conversion is good or bad:
+
+```
+asset-catalogue convert revert --asset-id <id>     # undo: restore the original, discard the .glb
+asset-catalogue convert cleanup --asset-id <id>     # confirm: delete the original, keep the .glb
+asset-catalogue convert cleanup-all [--yes]         # confirm every pending conversion at once
+```
+
+Reverting restores the exact pre-conversion `relative_path`/`extension`/`content_hash`/`file_size` and re-archives the original to the library; cleanup deletes the pre-conversion original (staging + library copy) and leaves the `.glb` as the permanent version. Both are recorded per-asset in a `pending_conversions` table, so `has_pending_conversion`/`count_pending_conversions` can drive UI state — see the UI section below.
+
 ## Search (CLI)
 
 ```
-asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name] [--unused]
+asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name] [--format fbx] [--unused]
 ```
 
-`--unused` shows assets that have never been imported into any project.
+`--unused` shows assets that have never been imported into any project. `--format` filters by file extension (with or without the leading dot — `fbx` and `.fbx` are equivalent).
 
 ## Removing assets
 
@@ -169,20 +227,34 @@ No CLI setup required first. A library folder is required above everything else 
 
 **File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path together. **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
 
-Filter panel (type / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A):
+Filter panel (type / format / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset. **Format** lists whatever file extensions actually exist in the catalogue right now (e.g. `FBX`, `GLB`, `PNG`) — it updates immediately after a conversion changes an asset's extension, without resetting the other filters. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A):
 
-- **Exactly one asset selected:** full tag editing (add/remove), and a **Show in Library Folder** button that opens the asset's archived copy directly in Explorer — enabled once it's actually in the library (which happens automatically at ingest, not tagging), disabled otherwise (e.g. its source file went missing before ingest could copy it).
+- **Exactly one asset selected:** full tag editing (add/remove), and a **Show in Library Folder** button that opens the asset's archived copy directly in Explorer — enabled once it's actually in the library (which happens automatically at ingest, not tagging), disabled otherwise (e.g. its source file went missing before ingest could copy it). If that asset has a pending glTF conversion (see below), **Revert Conversion** and **Delete Pre-Conversion Original** buttons also appear here — the panel is where you review a converted `.glb` next to its regenerated thumbnail and decide whether to keep it.
 - **Two or more selected:** the panel switches to an "N assets selected" state — adding a tag applies it to every selected asset at once (as one background job, with a progress dialog); removing a tag is disabled here (which of several different assets' tags would it even apply to?).
 
 **Edit > Tag Pack...** cascades a tag onto an entire pack from a dropdown (defaults to whatever pack is currently filtered), same as the CLI's `tag pack` — the third way to select "how much" to tag, alongside one asset and a multi-selection.
 
-**Ingest Pack...** is a toolbar button, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. One dialog handles both pack sources: **Browse Staging...** opens a small custom browser scoped to the staging folder that lists subfolders *and* `.zip` files side by side, either one double-clickable as a pack source (a `.zip` picked this way is auto-extracted at ingest time, same as `ingest`'s zip auto-detection on the CLI). **Browse Zip...** is for a `.zip` that lives *outside* the staging folder (e.g. still in Downloads) — extracted into the staging folder first, using an editable destination folder name. Two browse buttons, and a custom browser rather than a native picker for the first one, are both real Qt/OS limitations, not a design choice: a native picker is either a folder picker or a file picker, never both — there's no stock dialog that shows folders and files together and lets either be the result. Either way, one "Ingest" action runs it as a single background job (which also archives every ingested asset into the library, reported in the completion message), and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
+**Ingest Pack...** is a toolbar button, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. One **Browse Folder/Zip...** button opens a small custom browser scoped to the staging folder, listing subfolders *and* `.zip` files side by side — either one double-clickable as a pack source (a `.zip` picked this way is auto-extracted at ingest time, same as `ingest`'s zip auto-detection on the CLI). Single-clicking an entry to highlight it, then pressing **Select**, works too, for either a folder or a `.zip` — picking that entry directly without entering it (a folder this way, not its contents); with nothing highlighted, Select picks whatever folder you're currently browsing. A custom browser rather than a native picker is a real Qt/OS limitation, not a design choice: a native picker is either a folder picker or a file picker, never both — there's no stock dialog that shows folders and files together and lets either be the result. Picking a source refreshes the suggested **Pack name** to match it, unless you've typed your own name first — re-picking a *different* source no longer leaves a stale name behind (a real bug, now fixed: it used to only fill the field once, the first time it was empty, so choosing another source afterward silently kept whatever was already there).
+
+Once accepted, ingest runs as a single background job (which also archives every ingested asset into the library, reported in the completion message), and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
+
+A separate **Browse Zip...** option (for a `.zip` living *outside* the staging folder, e.g. still in Downloads) used to exist alongside Browse Folder/Zip; it's been removed as a rarely-needed extra option in the UI — the CLI's `ingest-zip <path>` still covers that exact case (extracts anywhere on disk into staging, then ingests), it just isn't duplicated in the ingest dialog anymore.
 
 **Edit > Remove Selected...** (or the Delete key) removes whatever's selected in the grid — one, many, or all of it — from the catalogue database, thumbnails, and any archived library copy; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
 
-**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived) and Delete from Library. Multiple selected: just Delete (labeled with the count).
+**Edit > Clean Up Pre-Conversion Assets...** confirms every pending glTF conversion at once (see "Converting models to glTF" above) — permanently deletes each one's pre-conversion original (staging + library copy) while keeping the converted `.glb`, after a confirmation dialog stating the count. This is the bulk counterpart to the per-asset Revert/Delete buttons in the detail panel; it's a no-op with an info message if nothing is pending.
 
-Thumbnails now render automatically as part of ingest (dispatched by type — see "Thumbnails are generated automatically" above), so **Thumbnails > Generate 2D Thumbnails** / **Generate 3D Thumbnails via Blender** are for the manual cases: re-rendering after `--force`-worthy changes, previewing per-pack corrections, or catching a pack ingested before this existed. They run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected), on a background thread — the window stays responsive while Blender works — with a progress dialog until done.
+**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), and Delete from Library. Multiple selected: **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`) and Delete (labeled with the total count).
+
+**Right-click a pack in the Pack list** for **Edit Pack Metadata...** (name, creator, licence, source URL, and render corrections all in one dialog — the same fields as `pack set-metadata`/`rename`/`set-corrections` combined, pre-filled with the pack's current values; renaming moves its archived library folder to match, same as the CLI) and **Remove Pack '\<name\>'...** (deletes every asset in the pack, the pack entry itself, and its whole archived library folder, after a confirmation naming the asset count — the UI counterpart to `pack remove`). Right-clicking "All packs" shows no menu, since it isn't a real pack.
+
+**Right-click a tag in the Tags list** for **Edit Tag...** (rename and/or re-category — updates every asset carrying it at once) and **Delete Tag '\<name\>'...** (removes it from the vocabulary and from every asset carrying it, after a confirmation naming the usage count) — the UI counterparts to `tag rename`/`tag delete`. Right-clicking "All tags" shows no menu.
+
+Editing any of the above updates the affected filter lists (and tag usage counts / the Format list, where relevant) in place, without resetting whatever else you had filtered to.
+
+**What's intentionally *not* editable from the app:** fields the catalogue derives from the real file on disk (`relative_path`, `filename`, `extension`, `content_hash`, `file_size`, `asset_type`, `thumbnail_status`) — hand-editing those would desync the database from reality; the correct way to change them is to actually change the file (re-ingest, or **Convert to glTF**), not overwrite the record. Import history (`imports`) is an audit log, not metadata — it's meant to answer "what happened," so it's shown (`imports` / `list --unused`) but not edited; it's still cleared automatically for an asset that gets removed, same as its tags.
+
+Thumbnails now render automatically as part of ingest (dispatched by type — see "Thumbnails are generated automatically" above), so **Thumbnails > Generate 2D Thumbnails** / **Generate Audio Thumbnails** / **Generate 3D Thumbnails via Blender** are for the manual cases: re-rendering after `--force`-worthy changes, previewing per-pack corrections, or catching a pack ingested before this existed. They run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected), on a background thread — the window stays responsive while Blender works — with a progress dialog until done.
 
 Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem, raw SQL, or `ingest`/`thumbnails`/`blender_render` directly, per the seed doc's architecture rule (§3). Ingest and thumbnail generation from the UI go through `Catalogue.*_bg()` methods, which each open and close their own SQLite connection rather than sharing the main one — SQLite connections aren't safe to share across threads, and these run on a background `QThread`. The CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
 

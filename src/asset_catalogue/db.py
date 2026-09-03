@@ -47,6 +47,20 @@ CREATE TABLE IF NOT EXISTS imports (
     destination_path TEXT NOT NULL,
     timestamp TEXT NOT NULL
 );
+
+-- Tracks a model asset mid-conversion (e.g. to glTF): the pre-conversion
+-- file's original identity, kept around so the conversion can be reverted
+-- or, once confirmed good, cleaned up. See conversion.py.
+CREATE TABLE IF NOT EXISTS pending_conversions (
+    id INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL UNIQUE REFERENCES assets(id),
+    original_relative_path TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    original_extension TEXT NOT NULL,
+    original_content_hash TEXT NOT NULL,
+    original_file_size INTEGER NOT NULL,
+    converted_at TEXT NOT NULL
+);
 """
 
 

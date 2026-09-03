@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from asset_catalogue import thumbnails
+from asset_catalogue import audio_thumbnails, thumbnails
 
 # bpy.ops.wm.obj_import / bpy.ops.wm.stl_import (used by the render script)
 # were introduced in Blender 4.0, replacing the legacy import_scene.obj /
@@ -88,10 +88,15 @@ def build_job_list(
     pack_name: str | None,
     force: bool,
     asset_id: int | None = None,
+    asset_ids: list[int] | None = None,
 ) -> tuple[list[dict], int]:
-    # Targeting one asset directly is a calibration preview -- always
-    # re-render it regardless of prior status, same as --force.
-    effective_force = force or asset_id is not None
+    if asset_ids is not None and not asset_ids:
+        return [], 0
+
+    # Targeting specific asset(s) directly is a calibration preview / a
+    # post-conversion refresh -- always re-render them regardless of prior
+    # status, same as --force.
+    effective_force = force or asset_id is not None or asset_ids is not None
 
     query = (
         "SELECT assets.id, assets.relative_path, assets.content_hash, assets.extension, "
@@ -103,6 +108,10 @@ def build_job_list(
     if asset_id is not None:
         query += " AND assets.id = ?"
         params.append(asset_id)
+    if asset_ids is not None:
+        placeholders = ",".join("?" for _ in asset_ids)
+        query += f" AND assets.id IN ({placeholders})"
+        params.extend(asset_ids)
     if not effective_force:
         query += " AND assets.thumbnail_status != 'done'"
     if pack_name:
@@ -143,9 +152,10 @@ def generate_model_thumbnails(
     pack_name: str | None = None,
     force: bool = False,
     asset_id: int | None = None,
+    asset_ids: list[int] | None = None,
 ) -> ModelThumbnailStats:
     jobs, already_done = build_job_list(
-        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id
+        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids
     )
     stats = ModelThumbnailStats(already_done=already_done)
     if not jobs:
@@ -221,6 +231,12 @@ class AutoThumbnailStats:
     generated: int = 0
     failed: int = 0
     blender_unavailable_reason: str | None = None
+    # True if this pack has never had a successfully-rendered model
+    # thumbnail before -- only one model was rendered (as a calibration
+    # preview), and models_pending were deliberately left un-rendered. See
+    # generate_pack_thumbnails.
+    calibration_preview: bool = False
+    models_pending: int = 0
 
 
 def generate_pack_thumbnails(
@@ -232,11 +248,25 @@ def generate_pack_thumbnails(
     pack_name: str,
 ) -> AutoThumbnailStats:
     """Generates thumbnails for every asset currently in a pack, dispatched
-    by type -- Pillow for textures, Blender for models. If the pack has no
-    model assets, Blender is never even checked for (avoids paying its
-    startup cost on packs that don't need it). If it does and Blender isn't
-    available, that's a soft skip (recorded in blender_unavailable_reason),
-    not an error -- 2D thumbnails still complete either way.
+    by type -- Pillow for textures and audio, Blender for models. If the
+    pack has no model assets, Blender is never even checked for (avoids
+    paying its startup cost on packs that don't need it). If it does and
+    Blender isn't available, that's a soft skip (recorded in
+    blender_unavailable_reason), not an error -- 2D/audio thumbnails still
+    complete either way.
+
+    The first time a pack ever gets a model thumbnail, only ONE model asset
+    is actually rendered -- a calibration preview, exactly the existing
+    "render one asset, check it, adjust corrections, preview again" manual
+    workflow (see "Per-pack calibration" in the README), just triggered
+    automatically instead of requiring a first manual step. The rest of the
+    pack's models are left thumbnail_status='pending' rather than rendered
+    up front: if the preview turns out wrong (bad up_axis/scale/materials),
+    only that one asset needs a corrected re-render, not the whole pack's
+    worth. Once a pack has at least one successfully-rendered model (from
+    this preview, or any prior run), later ingests into the same pack skip
+    the preview step and render normally -- calibration is a once-per-pack
+    concern, not once-per-ingest.
     """
     stats = AutoThumbnailStats()
 
@@ -246,14 +276,19 @@ def generate_pack_thumbnails(
     stats.generated += texture_stats.generated
     stats.failed += texture_stats.failed
 
-    has_models = (
-        conn.execute(
-            "SELECT 1 FROM assets WHERE pack_id = ? AND asset_type = 'model' LIMIT 1",
-            (pack_id,),
-        ).fetchone()
-        is not None
+    audio_stats = audio_thumbnails.generate_audio_thumbnails(
+        conn, staging_folder, thumbnail_dir, pack_name=pack_name
     )
-    if not has_models:
+    stats.generated += audio_stats.generated
+    stats.failed += audio_stats.failed
+
+    model_ids = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM assets WHERE pack_id = ? AND asset_type = 'model'", (pack_id,)
+        )
+    ]
+    if not model_ids:
         return stats
 
     blender_exe, error = resolve_blender(blender_path_setting)
@@ -261,9 +296,28 @@ def generate_pack_thumbnails(
         stats.blender_unavailable_reason = error
         return stats
 
-    model_stats = generate_model_thumbnails(
-        conn, staging_folder, thumbnail_dir, blender_exe, pack_name=pack_name
+    already_calibrated = (
+        conn.execute(
+            "SELECT 1 FROM assets WHERE pack_id = ? AND asset_type = 'model' "
+            "AND thumbnail_status = 'done' LIMIT 1",
+            (pack_id,),
+        ).fetchone()
+        is not None
     )
-    stats.generated += model_stats.generated
-    stats.failed += model_stats.failed
+
+    if already_calibrated:
+        model_stats = generate_model_thumbnails(
+            conn, staging_folder, thumbnail_dir, blender_exe, pack_name=pack_name
+        )
+        stats.generated += model_stats.generated
+        stats.failed += model_stats.failed
+        return stats
+
+    preview_stats = generate_model_thumbnails(
+        conn, staging_folder, thumbnail_dir, blender_exe, asset_id=model_ids[0]
+    )
+    stats.generated += preview_stats.generated
+    stats.failed += preview_stats.failed
+    stats.calibration_preview = True
+    stats.models_pending = len(model_ids) - 1
     return stats

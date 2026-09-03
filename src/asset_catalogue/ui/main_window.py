@@ -9,6 +9,7 @@ from PySide6.QtGui import QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -31,15 +32,28 @@ from PySide6.QtWidgets import (
 )
 
 from asset_catalogue import blender_render, settings
-from asset_catalogue.catalogue import AssetSummary, Catalogue
+from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
 THUMBNAIL_ICON_SIZE = QSize(128, 128)
 
 
 class FilterPanel(QWidget):
-    def __init__(self, catalogue: Catalogue, on_change) -> None:
+    def __init__(
+        self,
+        catalogue: Catalogue,
+        on_change,
+        on_edit_pack,
+        on_remove_pack,
+        on_rename_tag,
+        on_delete_tag,
+    ) -> None:
         super().__init__()
+        self._catalogue = catalogue
         self._on_change = on_change
+        self._on_edit_pack = on_edit_pack
+        self._on_remove_pack = on_remove_pack
+        self._on_rename_tag = on_rename_tag
+        self._on_delete_tag = on_delete_tag
 
         layout = QVBoxLayout(self)
 
@@ -51,16 +65,26 @@ class FilterPanel(QWidget):
         self.type_combo.currentIndexChanged.connect(self._on_change)
         layout.addWidget(self.type_combo)
 
+        layout.addWidget(QLabel("Format"))
+        self.format_combo = QComboBox()
+        self._populate_format_combo(catalogue)
+        self.format_combo.currentIndexChanged.connect(self._on_change)
+        layout.addWidget(self.format_combo)
+
         layout.addWidget(QLabel("Pack"))
         self.pack_list = QListWidget()
         self.pack_list.addItem("All packs")
         self.pack_list.addItems(catalogue.list_packs())
         self.pack_list.setCurrentRow(0)
         self.pack_list.currentRowChanged.connect(self._on_change)
+        self.pack_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.pack_list.customContextMenuRequested.connect(self._show_pack_context_menu)
         layout.addWidget(self.pack_list, stretch=1)
 
         layout.addWidget(QLabel("Tags"))
         self.tag_list = QListWidget()
+        self.tag_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tag_list.customContextMenuRequested.connect(self._show_tag_context_menu)
         self.tag_list.addItem("All tags")
         for tag in catalogue.list_tags():
             label = f"{tag.name} ({tag.usage_count})"
@@ -73,12 +97,86 @@ class FilterPanel(QWidget):
         self.tag_list.currentRowChanged.connect(self._on_change)
         layout.addWidget(self.tag_list, stretch=1)
 
+    def _populate_format_combo(self, catalogue: Catalogue) -> None:
+        self.format_combo.addItem("All formats", None)
+        for extension in catalogue.list_asset_extensions():
+            self.format_combo.addItem(extension.lstrip(".").upper(), extension)
+
     def selected_type(self) -> str | None:
         return self.type_combo.currentData()
+
+    def selected_format(self) -> str | None:
+        return self.format_combo.currentData()
+
+    def refresh_formats(self, catalogue: Catalogue) -> None:
+        previous = self.selected_format()
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self._populate_format_combo(catalogue)
+        restore_index = self.format_combo.findData(previous)
+        self.format_combo.setCurrentIndex(restore_index if restore_index >= 0 else 0)
+        self.format_combo.blockSignals(False)
 
     def selected_pack(self) -> str | None:
         row = self.pack_list.currentRow()
         return None if row <= 0 else self.pack_list.item(row).text()
+
+    def refresh_packs(self, catalogue: Catalogue, select: str | None = None) -> None:
+        self._catalogue = catalogue
+        target = select if select is not None else self.selected_pack()
+        self.pack_list.blockSignals(True)
+        self.pack_list.clear()
+        self.pack_list.addItem("All packs")
+        self.pack_list.addItems(catalogue.list_packs())
+        restore_row = 0
+        if target is not None:
+            match = self.pack_list.findItems(target, Qt.MatchExactly)
+            if match:
+                restore_row = self.pack_list.row(match[0])
+        self.pack_list.setCurrentRow(restore_row)
+        self.pack_list.blockSignals(False)
+
+    def _show_pack_context_menu(self, pos) -> None:
+        menu = self._build_pack_context_menu(pos)
+        if menu is not None:
+            menu.exec(self.pack_list.viewport().mapToGlobal(pos))
+
+    def _build_pack_context_menu(self, pos) -> QMenu | None:
+        """Split from _show_pack_context_menu so its contents can be tested
+        without invoking exec() -- see the grid context menu's same split
+        in MainWindow for why (QMenu.exec is a C++-bound method that's
+        unreliable to mock directly)."""
+        item = self.pack_list.itemAt(pos)
+        if item is None or self.pack_list.row(item) <= 0:  # "All packs" row
+            return None
+        pack_name = item.text()
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit Pack Metadata...")
+        edit_action.triggered.connect(lambda: self._on_edit_pack(pack_name))
+        menu.addSeparator()
+        remove_action = menu.addAction(f"Remove Pack '{pack_name}'...")
+        remove_action.triggered.connect(lambda: self._on_remove_pack(pack_name))
+        return menu
+
+    def _show_tag_context_menu(self, pos) -> None:
+        menu = self._build_tag_context_menu(pos)
+        if menu is not None:
+            menu.exec(self.tag_list.viewport().mapToGlobal(pos))
+
+    def _build_tag_context_menu(self, pos) -> QMenu | None:
+        item = self.tag_list.itemAt(pos)
+        if item is None or self.tag_list.row(item) <= 0:  # "All tags" row
+            return None
+        tag_name = item.data(Qt.UserRole)
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit Tag...")
+        edit_action.triggered.connect(lambda: self._on_rename_tag(tag_name))
+        menu.addSeparator()
+        delete_action = menu.addAction(f"Delete Tag '{tag_name}'...")
+        delete_action.triggered.connect(lambda: self._on_delete_tag(tag_name))
+        return menu
 
     def selected_tag(self) -> str | None:
         row = self.tag_list.currentRow()
@@ -180,6 +278,8 @@ class DetailPanel(QWidget):
         on_untag_asset,
         on_bulk_tag_assets,
         on_show_in_library,
+        on_revert_conversion,
+        on_cleanup_conversion,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -187,6 +287,8 @@ class DetailPanel(QWidget):
         self._on_untag_asset = on_untag_asset
         self._on_bulk_tag_assets = on_bulk_tag_assets
         self._on_show_in_library = on_show_in_library
+        self._on_revert_conversion = on_revert_conversion
+        self._on_cleanup_conversion = on_cleanup_conversion
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -202,6 +304,20 @@ class DetailPanel(QWidget):
         self.show_in_library_button = QPushButton("Show in Library Folder")
         self.show_in_library_button.clicked.connect(self._show_in_library)
         layout.addWidget(self.show_in_library_button)
+
+        # Only shown for a single-selected asset with a pending conversion
+        # (see conversion.py) -- lets the user review a converted .glb next
+        # to its regenerated thumbnail and decide whether to keep it.
+        conversion_row = QHBoxLayout()
+        self.revert_conversion_button = QPushButton("Revert Conversion")
+        self.revert_conversion_button.clicked.connect(self._revert_conversion)
+        self.cleanup_conversion_button = QPushButton("Delete Pre-Conversion Original")
+        self.cleanup_conversion_button.clicked.connect(self._cleanup_conversion)
+        conversion_row.addWidget(self.revert_conversion_button)
+        conversion_row.addWidget(self.cleanup_conversion_button)
+        layout.addLayout(conversion_row)
+        self.revert_conversion_button.setVisible(False)
+        self.cleanup_conversion_button.setVisible(False)
 
         layout.addWidget(QLabel("Tags"))
         self.tag_list = QListWidget()
@@ -234,6 +350,8 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(False)
         self.add_button.setEnabled(False)
         self.show_in_library_button.setEnabled(False)
+        self.revert_conversion_button.setVisible(False)
+        self.cleanup_conversion_button.setVisible(False)
 
     def clear_selection(self) -> None:
         self._asset_id = None
@@ -256,6 +374,8 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(True)
         self.add_button.setEnabled(True)
         self.show_in_library_button.setEnabled(False)
+        self.revert_conversion_button.setVisible(False)
+        self.cleanup_conversion_button.setVisible(False)
 
     def show_asset(self, asset: AssetSummary) -> None:
         self._asset_id = asset.id
@@ -273,6 +393,9 @@ class DetailPanel(QWidget):
             asset.pack_name, asset.relative_path
         )
         self.show_in_library_button.setEnabled(archived is not None)
+        pending = self._catalogue.has_pending_conversion(asset.id)
+        self.revert_conversion_button.setVisible(pending)
+        self.cleanup_conversion_button.setVisible(pending)
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
@@ -294,6 +417,14 @@ class DetailPanel(QWidget):
         if self._current_asset is None:
             return
         self._on_show_in_library(self._current_asset.pack_name, self._current_asset.relative_path)
+
+    def _revert_conversion(self) -> None:
+        if self._asset_id is not None:
+            self._on_revert_conversion(self._asset_id)
+
+    def _cleanup_conversion(self) -> None:
+        if self._asset_id is not None:
+            self._on_cleanup_conversion(self._asset_id)
 
 
 def _browse_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
@@ -443,17 +574,19 @@ class StagingBrowserDialog(QDialog):
 
         hint = QLabel(
             "Double-click a folder to open it, or a .zip to select it directly. "
-            'Use "Select This Folder" to pick the folder you\'re currently browsing.'
+            "Single-click an entry and press Select to pick it without entering it "
+            "(a folder this way, not its contents); with nothing highlighted, Select "
+            "picks the folder you're currently browsing."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         button_row = QHBoxLayout()
-        select_folder_button = QPushButton("Select This Folder")
-        select_folder_button.clicked.connect(self._select_current_folder)
+        select_button = QPushButton("Select")
+        select_button.clicked.connect(self._select_current_folder)
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
-        button_row.addWidget(select_folder_button)
+        button_row.addWidget(select_button)
         button_row.addWidget(cancel_button)
         layout.addLayout(button_row)
 
@@ -502,30 +635,54 @@ class StagingBrowserDialog(QDialog):
             self.accept()
 
     def _select_current_folder(self) -> None:
+        # A single-clicked-but-not-entered list item (the natural first
+        # instinct in most file pickers -- highlight, then press a button)
+        # takes priority over "the folder currently being browsed": without
+        # this, single-clicking a .zip and pressing Select silently picked
+        # the current directory instead, ignoring the highlighted zip
+        # entirely -- the real cause of "the name doesn't auto-fill for a
+        # zip" (the zip was never actually selected in the first place).
+        item = self.list_widget.currentItem()
+        if item is not None:
+            kind, path = item.data(Qt.UserRole)
+            self.selected_relative_path = str(path.relative_to(self._staging_folder))
+            self.selected_is_zip = kind == "zip"
+            self.accept()
+            return
         self.selected_relative_path = str(self._current_dir.relative_to(self._staging_folder))
         self.selected_is_zip = False
         self.accept()
 
 
 class IngestDialog(QDialog):
-    """One dialog for both pack sources. "Browse Staging..." opens the
-    custom StagingBrowserDialog above, which shows folders and .zip files
-    together (a zip found there is auto-extracted at ingest time -- see
-    ingest.py's ingest_pack). "Browse Zip..." is for a zip that lives
-    *outside* the staging folder (e.g. still in Downloads) and needs to be
-    brought in -- a genuinely different case, since there's no
-    staging-relative path to derive a destination folder name from, so it
-    stays a native file picker with an editable destination field.
+    """One "Browse Folder/Zip..." button opens the custom StagingBrowserDialog
+    above, which shows subfolders and .zip files inside the staging folder
+    together -- either one selectable directly, a zip picked this way
+    auto-extracted at ingest time (see ingest.py's ingest_pack). There used
+    to be a second "Browse Zip..." button for a zip living *outside* the
+    staging folder (e.g. still in Downloads); removed since it was a rarely
+    needed extra option in practice (the CLI's `ingest-zip` still covers
+    that case) and its separate "Extract to" field was easy to mix up with
+    this one. Picking a new source always refreshes the suggested pack
+    name to match it, unless you've typed your own -- see _pack_name_auto.
     """
 
     def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._catalogue = catalogue
         self.setWindowTitle("Ingest Pack")
-        self.resize(480, 300)
+        self.resize(480, 260)
 
-        self._source_kind: str | None = None  # "folder" or "zip"
-        self._zip_path: Path | None = None
+        self._selected_relative_path: str | None = None
+        # True until the user actually types into Pack name themselves --
+        # while True, picking a new source keeps the suggested name in sync
+        # with it; once the user edits it manually, later source picks stop
+        # overwriting their choice. Previously this only ever checked "is
+        # the field currently empty", so re-picking a different source
+        # after an earlier pick (which had already filled it in) silently
+        # left the old name in place -- the reported "doesn't copy the name
+        # into the pack field" bug.
+        self._pack_name_auto = True
 
         self.pack_folder_name: str = ""
         self.pack_name: str = ""
@@ -539,20 +696,14 @@ class IngestDialog(QDialog):
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
         source_row = QHBoxLayout()
-        browse_folder_button = QPushButton("Browse Staging...")
-        browse_folder_button.clicked.connect(self._browse_staging)
-        browse_zip_button = QPushButton("Browse Zip...")
-        browse_zip_button.clicked.connect(self._browse_zip)
+        browse_button = QPushButton("Browse Folder/Zip...")
+        browse_button.clicked.connect(self._browse_staging)
         source_row.addWidget(self.source_edit)
-        source_row.addWidget(browse_folder_button)
-        source_row.addWidget(browse_zip_button)
+        source_row.addWidget(browse_button)
         form.addRow("Pack source:", source_row)
 
-        self.dest_folder_edit = QLineEdit()
-        self.dest_folder_edit.setEnabled(False)
-        form.addRow("Extract to (folder name):", self.dest_folder_edit)
-
         self.pack_name_edit = QLineEdit()
+        self.pack_name_edit.textEdited.connect(self._on_pack_name_edited)
         form.addRow("Pack name:", self.pack_name_edit)
         self.creator_edit = QLineEdit()
         form.addRow("Creator:", self.creator_edit)
@@ -564,10 +715,8 @@ class IngestDialog(QDialog):
         layout.addLayout(form)
 
         hint = QLabel(
-            "Browse Staging: pick a folder or a .zip from inside the staging folder -- "
-            "either one, side by side.\n"
-            "Browse Zip: pick a .zip anywhere else on disk -- it's extracted into the "
-            "staging folder first, using the folder name above."
+            "Pick a folder or a .zip from inside the staging folder -- either one, "
+            "side by side. A .zip is extracted automatically at ingest time."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -578,12 +727,8 @@ class IngestDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def is_zip_source(self) -> bool:
-        return self._source_kind == "zip"
-
-    @property
-    def zip_path(self) -> Path | None:
-        return self._zip_path
+    def _on_pack_name_edited(self, _text: str) -> None:
+        self._pack_name_auto = False
 
     def _browse_staging(self) -> None:
         staging_folder = self._catalogue.staging_folder()
@@ -600,38 +745,20 @@ class IngestDialog(QDialog):
         # that turns out to be a zip sitting in staging, the same mechanism
         # that already backs plain `ingest` in the CLI. No special-casing
         # needed here; this path is identical to a folder selection.
-        self._source_kind = "folder"
-        self._zip_path = None
+        self._selected_relative_path = relative_path
         self.source_edit.setText(relative_path)
-        self.dest_folder_edit.setText(relative_path)
-        self.dest_folder_edit.setEnabled(False)
-        if not self.pack_name_edit.text():
+        if self._pack_name_auto:
             name = Path(relative_path)
             self.pack_name_edit.setText(name.stem if browser.selected_is_zip else name.name)
 
-    def _browse_zip(self) -> None:
-        chosen, _ = QFileDialog.getOpenFileName(self, "Select zip file", "", "Zip archives (*.zip)")
-        if not chosen:
-            return
-        path = Path(chosen)
-        self._source_kind = "zip"
-        self._zip_path = path
-        self.source_edit.setText(str(path))
-        self.dest_folder_edit.setEnabled(True)
-        if not self.dest_folder_edit.text():
-            self.dest_folder_edit.setText(path.stem)
-        if not self.pack_name_edit.text():
-            self.pack_name_edit.setText(path.stem)
-
     def _on_accept(self) -> None:
         pack_name = self.pack_name_edit.text().strip()
-        dest_folder = self.dest_folder_edit.text().strip()
-        if self._source_kind is None or not dest_folder or not pack_name:
+        if self._selected_relative_path is None or not pack_name:
             QMessageBox.warning(
                 self, "Ingest Pack", "Pick a pack folder or zip file, and enter a pack name."
             )
             return
-        self.pack_folder_name = dest_folder
+        self.pack_folder_name = self._selected_relative_path
         self.pack_name = pack_name
         self.creator = self.creator_edit.text().strip() or None
         self.licence = self.licence_edit.text().strip() or None
@@ -693,6 +820,150 @@ class TagPackDialog(QDialog):
         self.accept()
 
 
+class PackEditDialog(QDialog):
+    """Everything about a pack that's stored in the database and editable
+    after the fact -- name, creator/licence/source URL, and render
+    corrections -- in one form, rather than a separate dialog per field.
+    Renaming moves the pack's archived library folder to match (see
+    packs.rename_pack); corrections here fully replace whatever was set via
+    the CLI's 'pack set-corrections', same "edit form, not a delta patch"
+    semantics as the other fields.
+    """
+
+    def __init__(self, detail: PackDetail, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Pack -- {detail.name}")
+        self.resize(420, 320)
+        self._pack_id = detail.id
+
+        self.new_name: str = detail.name
+        self.creator: str | None = detail.creator
+        self.licence: str | None = detail.licence
+        self.source_url: str | None = detail.source_url
+        self.corrections: dict = {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit(detail.name)
+        form.addRow("Name:", self.name_edit)
+        self.creator_edit = QLineEdit(detail.creator or "")
+        form.addRow("Creator:", self.creator_edit)
+        self.licence_edit = QLineEdit(detail.licence or "")
+        form.addRow("Licence:", self.licence_edit)
+        self.source_url_edit = QLineEdit(detail.source_url or "")
+        form.addRow("Source URL:", self.source_url_edit)
+
+        layout.addLayout(form)
+        layout.addWidget(QLabel(f"{detail.asset_count} asset(s) in this pack."))
+
+        corrections_label = QLabel("Render corrections (applied to Blender thumbnails/conversions):")
+        corrections_label.setWordWrap(True)
+        layout.addWidget(corrections_label)
+        corrections_form = QFormLayout()
+
+        self.up_axis_combo = QComboBox()
+        self.up_axis_combo.addItem("(default)", None)
+        self.up_axis_combo.addItem("Y_UP", "Y_UP")
+        self.up_axis_combo.addItem("Z_UP", "Z_UP")
+        current_up_axis = detail.corrections.get("up_axis")
+        index = self.up_axis_combo.findData(current_up_axis)
+        self.up_axis_combo.setCurrentIndex(index if index >= 0 else 0)
+        corrections_form.addRow("Up axis:", self.up_axis_combo)
+
+        self.scale_edit = QLineEdit()
+        if "scale" in detail.corrections:
+            self.scale_edit.setText(str(detail.corrections["scale"]))
+        self.scale_edit.setPlaceholderText("(default) e.g. 1.0")
+        corrections_form.addRow("Scale:", self.scale_edit)
+
+        self.material_fallback_check = QCheckBox("Replace materials with a flat gray fallback")
+        self.material_fallback_check.setChecked(bool(detail.corrections.get("material_fallback")))
+        corrections_form.addRow("", self.material_fallback_check)
+
+        layout.addLayout(corrections_form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Save")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def pack_id(self) -> int:
+        return self._pack_id
+
+    def _on_accept(self) -> None:
+        new_name = self.name_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, "Edit Pack", "Pack name can't be blank.")
+            return
+
+        scale_text = self.scale_edit.text().strip()
+        scale_value: float | None = None
+        if scale_text:
+            try:
+                scale_value = float(scale_text)
+            except ValueError:
+                QMessageBox.warning(self, "Edit Pack", "Scale must be a number.")
+                return
+
+        corrections: dict = {}
+        up_axis = self.up_axis_combo.currentData()
+        if up_axis:
+            corrections["up_axis"] = up_axis
+        if scale_value is not None:
+            corrections["scale"] = scale_value
+        corrections["material_fallback"] = self.material_fallback_check.isChecked()
+
+        self.new_name = new_name
+        self.creator = self.creator_edit.text().strip() or None
+        self.licence = self.licence_edit.text().strip() or None
+        self.source_url = self.source_url_edit.text().strip() or None
+        self.corrections = corrections
+        self.accept()
+
+
+class TagEditDialog(QDialog):
+    def __init__(self, tag: TagSummary, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Tag -- {tag.name}")
+        self.resize(360, 140)
+        self._tag_id = tag.id
+
+        self.new_name: str = tag.name
+        self.new_category: str | None = tag.category
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(tag.name)
+        form.addRow("Name:", self.name_edit)
+        self.category_edit = QLineEdit(tag.category or "")
+        form.addRow("Category (optional):", self.category_edit)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel(f"Used by {tag.usage_count} asset(s) -- renaming keeps them tagged."))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Save")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def tag_id(self) -> int:
+        return self._tag_id
+
+    def _on_accept(self) -> None:
+        new_name = self.name_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, "Edit Tag", "Tag name can't be blank.")
+            return
+        self.new_name = new_name
+        self.new_category = self.category_edit.text().strip() or None
+        self.accept()
+
+
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -723,7 +994,14 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_toolbar()
 
-        self.filter_panel = FilterPanel(catalogue, self._refresh_grid)
+        self.filter_panel = FilterPanel(
+            catalogue,
+            self._refresh_grid,
+            self._edit_pack,
+            self._remove_pack,
+            self._rename_tag,
+            self._delete_tag,
+        )
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
         self.grid.customContextMenuRequested.connect(self._show_grid_context_menu)
@@ -733,6 +1011,8 @@ class MainWindow(QMainWindow):
             self._handle_untag_asset,
             self._handle_bulk_tag_assets,
             self._show_in_library_folder,
+            self._handle_revert_conversion,
+            self._handle_cleanup_conversion,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -774,6 +1054,9 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         tag_pack_action = edit_menu.addAction("Tag Pack...")
         tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
+        edit_menu.addSeparator()
+        cleanup_conversions_action = edit_menu.addAction("Clean Up Pre-Conversion Assets...")
+        cleanup_conversions_action.triggered.connect(self._cleanup_all_pending_conversions)
 
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
         gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
@@ -782,6 +1065,8 @@ class MainWindow(QMainWindow):
             "Generate 3D Thumbnails via Blender (current pack filter)"
         )
         gen_3d_action.triggered.connect(self._generate_model_thumbnails)
+        gen_audio_action = thumbnails_menu.addAction("Generate Audio Thumbnails (current pack filter)")
+        gen_audio_action.triggered.connect(self._generate_audio_thumbnails)
 
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Ingest")
@@ -856,7 +1141,14 @@ class MainWindow(QMainWindow):
 
     def _rebuild_filter_panel(self) -> None:
         old_filter_panel = self.filter_panel
-        self.filter_panel = FilterPanel(self._catalogue, self._refresh_grid)
+        self.filter_panel = FilterPanel(
+            self._catalogue,
+            self._refresh_grid,
+            self._edit_pack,
+            self._remove_pack,
+            self._rename_tag,
+            self._delete_tag,
+        )
         main_splitter = self.centralWidget()
         main_splitter.replaceWidget(0, self.filter_panel)
         old_filter_panel.setParent(None)
@@ -874,23 +1166,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        if dialog.is_zip_source():
-            job = lambda: self._catalogue.extract_and_ingest_pack_bg(
-                dialog.zip_path,
-                dialog.pack_folder_name,
-                dialog.pack_name,
-                dialog.creator,
-                dialog.licence,
-                dialog.source_url,
-            )
-        else:
-            job = lambda: self._catalogue.ingest_pack_bg(
-                dialog.pack_folder_name,
-                dialog.pack_name,
-                dialog.creator,
-                dialog.licence,
-                dialog.source_url,
-            )
+        job = lambda: self._catalogue.ingest_pack_bg(
+            dialog.pack_folder_name,
+            dialog.pack_name,
+            dialog.creator,
+            dialog.licence,
+            dialog.source_url,
+        )
 
         def format_result(result: tuple) -> str:
             stats, updated_fields = result
@@ -918,6 +1200,13 @@ class MainWindow(QMainWindow):
             )
             if stats.blender_unavailable_reason:
                 message += f"\n3D thumbnails skipped: {stats.blender_unavailable_reason}"
+            if stats.calibration_preview:
+                message += (
+                    f"\nRendered 1 model as a calibration preview -- check it, adjust "
+                    f"render corrections in Edit Pack Metadata if needed, then use "
+                    f"Thumbnails > Generate 3D Thumbnails to render the remaining "
+                    f"{stats.models_pending} model(s)"
+                )
             return message
 
         self._run_background_job(
@@ -934,6 +1223,18 @@ class MainWindow(QMainWindow):
             "Generating 2D thumbnails...",
             lambda stats: (
                 f"Thumbnails: {stats.generated} generated, "
+                f"{stats.already_done} already done, {stats.failed} failed"
+            ),
+            self._refresh_grid,
+        )
+
+    def _generate_audio_thumbnails(self) -> None:
+        pack = self.filter_panel.selected_pack()
+        self._run_background_job(
+            lambda: self._catalogue.generate_audio_thumbnails_bg(pack=pack),
+            "Generating audio thumbnails...",
+            lambda stats: (
+                f"Audio thumbnails: {stats.generated} generated, "
                 f"{stats.already_done} already done, {stats.failed} failed"
             ),
             self._refresh_grid,
@@ -990,6 +1291,105 @@ class MainWindow(QMainWindow):
             self._on_tags_changed,
         )
 
+    def _convert_asset_to_gltf(self, asset_id: int) -> None:
+        try:
+            blender_exe = self._catalogue.resolve_blender()
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Asset Catalogue", str(exc))
+            return
+
+        def format_result(result) -> str:
+            if not result.ok:
+                return f"Conversion failed: {result.error}"
+            return (
+                "Converted to .glb and regenerated its thumbnail. The pre-conversion "
+                "original is kept until you Revert or Delete it in the detail panel."
+            )
+
+        self._run_background_job(
+            lambda: self._catalogue.convert_asset_to_gltf_bg(asset_id),
+            "Converting to .glb via Blender...",
+            format_result,
+            self._on_conversion_changed,
+        )
+
+    def _convert_assets_to_gltf(self, asset_ids: list[int]) -> None:
+        try:
+            blender_exe = self._catalogue.resolve_blender()
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Asset Catalogue", str(exc))
+            return
+
+        def format_result(result) -> str:
+            message = f"Converted {result.converted} to .glb (thumbnails regenerated)."
+            if result.skipped:
+                message += f"\nSkipped {result.skipped} (not a model asset, or already .glb)."
+            if result.failed:
+                message += f"\nFailed {result.failed}:"
+                for error_message in result.errors:
+                    message += f"\n  {error_message}"
+            return message
+
+        self._run_background_job(
+            lambda: self._catalogue.convert_assets_to_gltf_bg(asset_ids),
+            f"Converting {len(asset_ids)} asset(s) to .glb via Blender...",
+            format_result,
+            self._on_conversion_changed,
+        )
+
+    def _handle_revert_conversion(self, asset_id: int) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Revert Conversion",
+            "Restore the pre-conversion original and discard the converted .glb?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.revert_conversion_bg(asset_id),
+            "Reverting conversion...",
+            lambda reverted: "Reverted to the pre-conversion original." if reverted else "Nothing to revert.",
+            self._on_conversion_changed,
+        )
+
+    def _handle_cleanup_conversion(self, asset_id: int) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Delete Pre-Conversion Original",
+            "Permanently delete the pre-conversion original? The converted .glb is kept.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.cleanup_pending_conversion_bg(asset_id),
+            "Deleting pre-conversion original...",
+            lambda cleaned: "Deleted the pre-conversion original." if cleaned else "Nothing to clean up.",
+            self._refresh_grid,
+        )
+
+    def _cleanup_all_pending_conversions(self) -> None:
+        pending_count = self._catalogue.count_pending_conversions()
+        if pending_count == 0:
+            QMessageBox.information(self, "Asset Catalogue", "No pending conversions to clean up.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Clean Up Pre-Conversion Assets",
+            f"Permanently delete the pre-conversion original for {pending_count} asset(s)? "
+            "The converted .glb files are kept.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.cleanup_all_pending_conversions_bg(),
+            "Cleaning up pre-conversion originals...",
+            lambda count: f"Deleted {count} pre-conversion original(s).",
+            self._refresh_grid,
+        )
+
     def _show_in_library_folder(self, pack_name: str, relative_path: str) -> None:
         path = self._catalogue.library_asset_path_if_archived(pack_name, relative_path)
         if path is None:
@@ -1043,6 +1443,7 @@ class MainWindow(QMainWindow):
             pack=self.filter_panel.selected_pack(),
             asset_type=self.filter_panel.selected_type(),
             tag=self.filter_panel.selected_tag(),
+            extension=self.filter_panel.selected_format(),
         )
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)
@@ -1098,6 +1499,29 @@ class MainWindow(QMainWindow):
                     )
                     is not None
                 )
+                if asset.asset_type == "model" and not asset.relative_path.lower().endswith(".glb"):
+                    convert_action = menu.addAction("Convert to glTF (.glb)...")
+                    convert_action.triggered.connect(
+                        lambda: self._convert_asset_to_gltf(asset.id)
+                    )
+                    convert_action.setEnabled(
+                        not self._catalogue.has_pending_conversion(asset.id)
+                    )
+                menu.addSeparator()
+        else:
+            selected_ids = {item.data(Qt.UserRole) for item in selected}
+            eligible_ids = [
+                asset.id
+                for asset in self._current_assets
+                if asset.id in selected_ids
+                and asset.asset_type == "model"
+                and not asset.relative_path.lower().endswith(".glb")
+            ]
+            if eligible_ids:
+                convert_action = menu.addAction(f"Convert {len(eligible_ids)} to glTF (.glb)...")
+                convert_action.triggered.connect(
+                    lambda: self._convert_assets_to_gltf(eligible_ids)
+                )
                 menu.addSeparator()
 
         remove_label = "Delete from Library" if len(selected) == 1 else f"Delete {len(selected)} from Library"
@@ -1132,6 +1556,99 @@ class MainWindow(QMainWindow):
     def _on_tags_changed(self) -> None:
         self.filter_panel.refresh_tags(self._catalogue)
         self._refresh_grid()
+
+    def _on_conversion_changed(self) -> None:
+        # Conversion (and reverting one) changes an asset's extension --
+        # keep the Format filter's choices in sync (e.g. a first .glb
+        # appearing) without resetting the pack/type/tag filters the way a
+        # full _rebuild_filter_panel would.
+        self.filter_panel.refresh_formats(self._catalogue)
+        self._refresh_grid()
+
+    def _on_pack_changed(self, select_pack: str | None = None) -> None:
+        # Renaming or removing a pack can change the pack list itself, tag
+        # usage counts, and which formats still exist -- refresh all three
+        # in place rather than a full _rebuild_filter_panel (which would
+        # also reset the type/format/tag filters the user may still want).
+        # select_pack keeps a rename's new name selected instead of falling
+        # back to "All packs" just because the old name vanished.
+        self.filter_panel.refresh_packs(self._catalogue, select=select_pack)
+        self.filter_panel.refresh_tags(self._catalogue)
+        self.filter_panel.refresh_formats(self._catalogue)
+        self._refresh_grid()
+
+    def _edit_pack(self, pack_name: str) -> None:
+        detail = self._catalogue.get_pack_detail(pack_name)
+        if detail is None:
+            return
+        dialog = PackEditDialog(detail, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        def format_result(_result) -> str:
+            return f"Updated '{dialog.new_name}'."
+
+        self._run_background_job(
+            lambda: self._catalogue.update_pack_bg(
+                dialog.pack_id, dialog.new_name, dialog.creator, dialog.licence,
+                dialog.source_url, dialog.corrections,
+            ),
+            "Saving pack...",
+            format_result,
+            lambda: self._on_pack_changed(select_pack=dialog.new_name),
+        )
+
+    def _remove_pack(self, pack_name: str) -> None:
+        detail = self._catalogue.get_pack_detail(pack_name)
+        if detail is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Remove Pack",
+            f"Remove '{pack_name}' and all {detail.asset_count} of its asset(s) from the "
+            "catalogue?\n\nThis deletes the catalogue entries, thumbnails, and the pack's "
+            "entire archived library copy. The original files in your staging folder are "
+            "untouched.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._run_background_job(
+            lambda: self._catalogue.remove_pack_bg(detail.id),
+            f"Removing '{pack_name}'...",
+            lambda stats: f"Removed '{pack_name}' ({stats.removed_assets} asset(s)).",
+            self._on_pack_changed,
+        )
+
+    def _rename_tag(self, tag_name: str) -> None:
+        tag = next((t for t in self._catalogue.list_tags() if t.name == tag_name), None)
+        if tag is None:
+            return
+        dialog = TagEditDialog(tag, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            self._catalogue.rename_tag(dialog.tag_id, dialog.new_name, dialog.new_category)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Edit Tag", str(exc))
+            return
+        self._on_tags_changed()
+
+    def _delete_tag(self, tag_name: str) -> None:
+        tag = next((t for t in self._catalogue.list_tags() if t.name == tag_name), None)
+        if tag is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Tag",
+            f"Delete '{tag_name}' from the tag vocabulary? It will be removed from all "
+            f"{tag.usage_count} asset(s) currently carrying it.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._catalogue.delete_tag(tag.id)
+        self._on_tags_changed()
 
 
 def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:

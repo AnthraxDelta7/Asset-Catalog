@@ -91,6 +91,8 @@ class IngestStats:
     thumbnails_generated: int = 0
     thumbnails_failed: int = 0
     blender_unavailable_reason: str | None = None
+    calibration_preview: bool = False
+    models_pending: int = 0
 
 
 def get_or_create_pack(

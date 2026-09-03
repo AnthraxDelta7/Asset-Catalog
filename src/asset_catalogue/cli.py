@@ -6,7 +6,9 @@ from pathlib import Path
 
 from asset_catalogue import (
     archives,
+    audio_thumbnails,
     blender_render,
+    conversion,
     db,
     importing,
     ingest,
@@ -49,6 +51,12 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
     print(f"  (generated {stats.thumbnails_generated} thumbnail(s), {stats.thumbnails_failed} failed)")
     if stats.blender_unavailable_reason:
         print(f"  (3D thumbnails skipped: {stats.blender_unavailable_reason})")
+    if stats.calibration_preview:
+        print(
+            f"  (rendered 1 model as a calibration preview -- check it, adjust "
+            f"'pack set-corrections' if needed, then run 'thumbnail generate-models "
+            f"--pack \"{pack_name}\"' to render the remaining {stats.models_pending} model(s))"
+        )
 
 
 def _auto_generate_thumbnails(
@@ -66,6 +74,8 @@ def _auto_generate_thumbnails(
     stats.thumbnails_generated = thumb_stats.generated
     stats.thumbnails_failed = thumb_stats.failed
     stats.blender_unavailable_reason = thumb_stats.blender_unavailable_reason
+    stats.calibration_preview = thumb_stats.calibration_preview
+    stats.models_pending = thumb_stats.models_pending
 
 
 def _get_pack_id(conn: sqlite3.Connection, pack_name: str) -> int:
@@ -127,11 +137,17 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     if source_path.is_file() and source_path.suffix.lower() == ".zip":
         pack_folder = source_path.stem
         pack_root = staging_folder / pack_folder
-        try:
-            archives.extract_zip(source_path, pack_root)
-        except (FileExistsError, archives.UnsafeZipError) as exc:
-            raise SystemExit(str(exc)) from exc
-        print(f"Extracted '{source_path.name}' to {pack_root}")
+        # Re-running against the same zip after an earlier ingest already
+        # extracted it is a normal re-ingest, not a clobber attempt -- only
+        # extract if the destination isn't already there.
+        if pack_root.exists() and any(pack_root.iterdir()):
+            print(f"'{pack_root}' already exists -- ingesting from it as-is (not re-extracting)")
+        else:
+            try:
+                archives.extract_zip(source_path, pack_root)
+            except (FileExistsError, archives.UnsafeZipError) as exc:
+                raise SystemExit(str(exc)) from exc
+            print(f"Extracted '{source_path.name}' to {pack_root}")
     else:
         pack_folder = args.pack_folder
         pack_root = source_path
@@ -166,11 +182,17 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
     pack_folder = args.pack_folder or zip_path.stem
     pack_root = Path(s.staging_folder) / pack_folder
 
-    try:
-        archives.extract_zip(zip_path, pack_root)
-    except (FileExistsError, archives.UnsafeZipError) as exc:
-        raise SystemExit(str(exc)) from exc
-    print(f"Extracted '{zip_path.name}' to {pack_root}")
+    # Re-running against a destination that's already there (e.g.
+    # re-ingesting the same external zip) is a normal re-ingest, not a
+    # clobber attempt -- only extract if it's not already extracted.
+    if pack_root.exists() and any(pack_root.iterdir()):
+        print(f"'{pack_root}' already exists -- ingesting from it as-is (not re-extracting)")
+    else:
+        try:
+            archives.extract_zip(zip_path, pack_root)
+        except (FileExistsError, archives.UnsafeZipError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Extracted '{zip_path.name}' to {pack_root}")
 
     conn = _connect()
     pack_id, updated_fields = ingest.get_or_create_pack(
@@ -224,6 +246,32 @@ def cmd_untag_asset(args: argparse.Namespace) -> None:
         print(f"Asset {asset_id} did not have tag '{args.tag_name}'")
 
 
+def cmd_tag_rename(args: argparse.Namespace) -> None:
+    conn = _connect()
+    tag_id = _get_tag_id(conn, args.tag_name)
+    row = conn.execute("SELECT category FROM tags WHERE id = ?", (tag_id,)).fetchone()
+    category = row["category"] if args.category is None else args.category
+    if args.clear_category:
+        category = None
+    try:
+        tagging.rename_tag(conn, tag_id, args.new_name, category)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    print(f"Renamed '{args.tag_name}' to '{args.new_name}'")
+
+
+def cmd_tag_delete(args: argparse.Namespace) -> None:
+    conn = _connect()
+    tag_id = _get_tag_id(conn, args.tag_name)
+    if not args.yes:
+        answer = input(f"Delete tag '{args.tag_name}' from the vocabulary? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+    removed_from = tagging.delete_tag(conn, tag_id)
+    print(f"Deleted '{args.tag_name}' (removed from {removed_from} asset(s))")
+
+
 def cmd_tags(args: argparse.Namespace) -> None:
     conn = _connect()
     rows = conn.execute(
@@ -260,6 +308,27 @@ def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_thumbnail_generate_audio(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    conn = _connect()
+    stats = audio_thumbnails.generate_audio_thumbnails(
+        conn,
+        Path(s.staging_folder),
+        s.thumbnail_dir(),
+        pack_name=args.pack,
+        force=args.force,
+    )
+    print(
+        f"Audio thumbnails: {stats.generated} generated, "
+        f"{stats.already_done} already done, {stats.failed} failed"
+    )
+
+
 def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
     s = settings.load()
     if not s.staging_folder:
@@ -286,6 +355,122 @@ def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
         f"Model thumbnails: {stats.generated} generated, "
         f"{stats.already_done} already done, {stats.failed} failed"
     )
+
+
+def cmd_convert_to_gltf(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    blender_exe, error = blender_render.resolve_blender(s.blender_path)
+    if blender_exe is None:
+        raise SystemExit(error)
+
+    conn = _connect()
+
+    if len(args.asset_id) == 1:
+        asset_id = args.asset_id[0]
+        _get_asset_id(conn, asset_id)
+        result = conversion.convert_asset_to_gltf(
+            conn, Path(s.staging_folder), s.assets_dir(), blender_exe, asset_id
+        )
+        if not result.ok:
+            raise SystemExit(f"Conversion failed: {result.error}")
+        blender_render.generate_model_thumbnails(
+            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe, asset_id=asset_id
+        )
+        print(
+            f"Converted asset {asset_id} to .glb. The pre-conversion original is kept "
+            "until you revert or clean it up: "
+            f"asset-catalogue convert revert --asset-id {asset_id} / "
+            f"asset-catalogue convert cleanup --asset-id {asset_id}"
+        )
+        return
+
+    for asset_id in args.asset_id:
+        _get_asset_id(conn, asset_id)
+    result = conversion.convert_assets_to_gltf(
+        conn, Path(s.staging_folder), s.assets_dir(), blender_exe, args.asset_id
+    )
+    if result.converted_asset_ids:
+        blender_render.generate_model_thumbnails(
+            conn,
+            Path(s.staging_folder),
+            s.thumbnail_dir(),
+            blender_exe,
+            asset_ids=result.converted_asset_ids,
+        )
+    print(
+        f"Converted {result.converted}, skipped {result.skipped} (not a model, or already "
+        f".glb), failed {result.failed}"
+    )
+    for error_message in result.errors:
+        print(f"  {error_message}")
+
+
+def cmd_convert_revert(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    conn = _connect()
+    _get_asset_id(conn, args.asset_id)
+    reverted = conversion.revert_conversion(
+        conn, Path(s.staging_folder), s.assets_dir(), args.asset_id
+    )
+    if not reverted:
+        raise SystemExit(f"Asset {args.asset_id} has no pending conversion to revert.")
+    blender_exe, error = blender_render.resolve_blender(s.blender_path)
+    if blender_exe is not None:
+        blender_render.generate_model_thumbnails(
+            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe, asset_id=args.asset_id
+        )
+    print(f"Reverted asset {args.asset_id} to its pre-conversion original.")
+
+
+def cmd_convert_cleanup(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    conn = _connect()
+    _get_asset_id(conn, args.asset_id)
+    cleaned = conversion.cleanup_pending_conversion(
+        conn, Path(s.staging_folder), s.assets_dir(), args.asset_id
+    )
+    if not cleaned:
+        raise SystemExit(f"Asset {args.asset_id} has no pending conversion to clean up.")
+    print(f"Deleted the pre-conversion original for asset {args.asset_id}.")
+
+
+def cmd_convert_cleanup_all(args: argparse.Namespace) -> None:
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    conn = _connect()
+    pending_ids = conversion.list_pending_conversion_asset_ids(conn)
+    if not pending_ids:
+        print("No pending conversions to clean up.")
+        return
+
+    print(f"About to delete {len(pending_ids)} pre-conversion original(s): {pending_ids}")
+    if not args.yes:
+        answer = input("Continue? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    count = conversion.cleanup_all_pending_conversions(conn, Path(s.staging_folder), s.assets_dir())
+    print(f"Deleted {count} pre-conversion original(s).")
 
 
 def cmd_pack_show_corrections(args: argparse.Namespace) -> None:
@@ -325,6 +510,61 @@ def cmd_pack_set_corrections(args: argparse.Namespace) -> None:
         "Re-render to see the effect: asset-catalogue thumbnail generate-models "
         f"--pack \"{args.pack_name}\" --force"
     )
+
+
+def cmd_pack_rename(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+    s = settings.load()
+    try:
+        packs.rename_pack(conn, s.assets_dir(), pack_id, args.new_name)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    print(f"Renamed '{args.pack_name}' to '{args.new_name}'")
+
+
+def cmd_pack_set_metadata(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+    row = conn.execute(
+        "SELECT creator, licence, source_url FROM packs WHERE id = ?", (pack_id,)
+    ).fetchone()
+
+    creator = args.creator if args.creator is not None else row["creator"]
+    licence = args.licence if args.licence is not None else row["licence"]
+    source_url = args.source_url if args.source_url is not None else row["source_url"]
+    if args.clear_creator:
+        creator = None
+    if args.clear_licence:
+        licence = None
+    if args.clear_source_url:
+        source_url = None
+
+    packs.set_metadata(conn, pack_id, creator, licence, source_url)
+    print(f"Metadata for '{args.pack_name}': creator={creator}, licence={licence}, source_url={source_url}")
+
+
+def cmd_pack_remove(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+    asset_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM assets WHERE pack_id = ?", (pack_id,)
+    ).fetchone()["c"]
+
+    print(
+        f"About to remove '{args.pack_name}' and all {asset_count} of its asset(s) "
+        "(catalogue entries, thumbnails, and its archived library copy). Source files "
+        "in staging are untouched."
+    )
+    if not args.yes:
+        answer = input("Continue? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    s = settings.load()
+    stats = removal.remove_pack(conn, s.thumbnail_dir(), s.assets_dir(), pack_id)
+    print(f"Removed '{args.pack_name}' ({stats.removed_assets} asset(s)).")
 
 
 def cmd_import(args: argparse.Namespace) -> None:
@@ -487,6 +727,10 @@ def cmd_list(args: argparse.Namespace) -> None:
     if args.type:
         clauses.append("assets.asset_type = ?")
         params.append(args.type)
+    if args.format:
+        extension = args.format if args.format.startswith(".") else f".{args.format}"
+        clauses.append("assets.extension = ?")
+        params.append(extension.lower())
     if args.unused:
         clauses.append("NOT EXISTS (SELECT 1 FROM imports WHERE imports.asset_id = assets.id)")
     if clauses:
@@ -557,12 +801,13 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--pack")
     list_parser.add_argument("--type")
     list_parser.add_argument("--tag")
+    list_parser.add_argument("--format", help="File extension, with or without the dot (e.g. fbx, .glb)")
     list_parser.add_argument(
         "--unused", action="store_true", help="Only show assets never imported into any project"
     )
     list_parser.set_defaults(func=cmd_list)
 
-    tag_parser = subparsers.add_parser("tag", help="Apply a tag to a pack or an asset")
+    tag_parser = subparsers.add_parser("tag", help="Apply a tag to a pack or an asset, or rename/delete a tag")
     tag_sub = tag_parser.add_subparsers(dest="tag_command", required=True)
 
     tag_pack_parser = tag_sub.add_parser(
@@ -578,6 +823,24 @@ def build_parser() -> argparse.ArgumentParser:
     tag_asset_parser.add_argument("tag_name")
     tag_asset_parser.add_argument("--category")
     tag_asset_parser.set_defaults(func=cmd_tag_asset)
+
+    tag_rename_parser = tag_sub.add_parser(
+        "rename", help="Rename a tag (and/or change its category) everywhere it's used"
+    )
+    tag_rename_parser.add_argument("tag_name")
+    tag_rename_parser.add_argument("new_name")
+    tag_rename_parser.add_argument("--category")
+    tag_rename_parser.add_argument(
+        "--clear-category", action="store_true", help="Remove the tag's category"
+    )
+    tag_rename_parser.set_defaults(func=cmd_tag_rename)
+
+    tag_delete_parser = tag_sub.add_parser(
+        "delete", help="Delete a tag from the vocabulary and every asset carrying it"
+    )
+    tag_delete_parser.add_argument("tag_name")
+    tag_delete_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    tag_delete_parser.set_defaults(func=cmd_tag_delete)
 
     untag_parser = subparsers.add_parser("untag", help="Remove a tag from an asset")
     untag_sub = untag_parser.add_subparsers(dest="untag_command", required=True)
@@ -617,7 +880,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     thumbnail_generate_models_parser.set_defaults(func=cmd_thumbnail_generate_models)
 
-    pack_parser = subparsers.add_parser("pack", help="View or set per-pack render corrections")
+    thumbnail_generate_audio_parser = thumbnail_sub.add_parser(
+        "generate-audio", help="Generate thumbnails for audio assets"
+    )
+    thumbnail_generate_audio_parser.add_argument("--pack")
+    thumbnail_generate_audio_parser.add_argument(
+        "--force", action="store_true", help="Re-render even assets already marked done"
+    )
+    thumbnail_generate_audio_parser.set_defaults(func=cmd_thumbnail_generate_audio)
+
+    convert_parser = subparsers.add_parser(
+        "convert", help="Convert model assets to .glb via Blender, with rollback"
+    )
+    convert_sub = convert_parser.add_subparsers(dest="convert_command", required=True)
+
+    convert_to_gltf_parser = convert_sub.add_parser(
+        "to-gltf",
+        help="Convert one or more model assets to .glb (keeps each original until you decide)",
+    )
+    convert_to_gltf_parser.add_argument(
+        "--asset-id",
+        type=int,
+        action="append",
+        required=True,
+        help="Repeatable; assets that aren't models or are already .glb are skipped",
+    )
+    convert_to_gltf_parser.set_defaults(func=cmd_convert_to_gltf)
+
+    convert_revert_parser = convert_sub.add_parser(
+        "revert", help="Undo a conversion, restoring the pre-conversion original"
+    )
+    convert_revert_parser.add_argument("--asset-id", type=int, required=True)
+    convert_revert_parser.set_defaults(func=cmd_convert_revert)
+
+    convert_cleanup_parser = convert_sub.add_parser(
+        "cleanup", help="Confirm a conversion is good and delete its pre-conversion original"
+    )
+    convert_cleanup_parser.add_argument("--asset-id", type=int, required=True)
+    convert_cleanup_parser.set_defaults(func=cmd_convert_cleanup)
+
+    convert_cleanup_all_parser = convert_sub.add_parser(
+        "cleanup-all", help="Delete all pending pre-conversion originals"
+    )
+    convert_cleanup_all_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt"
+    )
+    convert_cleanup_all_parser.set_defaults(func=cmd_convert_cleanup_all)
+
+    pack_parser = subparsers.add_parser(
+        "pack", help="View/set per-pack render corrections, metadata, rename, or remove a pack"
+    )
     pack_sub = pack_parser.add_subparsers(dest="pack_command", required=True)
 
     show_corrections_parser = pack_sub.add_parser(
@@ -645,6 +957,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--clear", action="store_true", help="Remove all corrections for this pack"
     )
     set_corrections_parser.set_defaults(func=cmd_pack_set_corrections)
+
+    set_metadata_parser = pack_sub.add_parser(
+        "set-metadata", help="Edit a pack's creator/licence/source URL after the fact"
+    )
+    set_metadata_parser.add_argument("pack_name")
+    set_metadata_parser.add_argument("--creator")
+    set_metadata_parser.add_argument("--licence")
+    set_metadata_parser.add_argument("--source-url")
+    set_metadata_parser.add_argument("--clear-creator", action="store_true")
+    set_metadata_parser.add_argument("--clear-licence", action="store_true")
+    set_metadata_parser.add_argument("--clear-source-url", action="store_true")
+    set_metadata_parser.set_defaults(func=cmd_pack_set_metadata)
+
+    pack_rename_parser = pack_sub.add_parser(
+        "rename", help="Rename a pack (moves its archived library folder to match)"
+    )
+    pack_rename_parser.add_argument("pack_name")
+    pack_rename_parser.add_argument("new_name")
+    pack_rename_parser.set_defaults(func=cmd_pack_rename)
+
+    pack_remove_parser = pack_sub.add_parser(
+        "remove", help="Remove an entire pack and all of its assets from the catalogue"
+    )
+    pack_remove_parser.add_argument("pack_name")
+    pack_remove_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    pack_remove_parser.set_defaults(func=cmd_pack_remove)
 
     import_parser = subparsers.add_parser(
         "import", help="Copy selected assets into a target project and record it"

@@ -54,3 +54,32 @@ def untag_asset(conn: sqlite3.Connection, asset_id: int, tag_id: int) -> bool:
     )
     conn.commit()
     return cursor.rowcount > 0
+
+
+def rename_tag(conn: sqlite3.Connection, tag_id: int, new_name: str, new_category: str | None) -> None:
+    """Renames a tag and/or changes its category in place -- every asset
+    currently carrying it (inherited or explicit) is unaffected other than
+    seeing the new name, since asset_tags references tags by id, not name.
+    """
+    collision = conn.execute(
+        "SELECT id FROM tags WHERE name = ? AND id != ?", (new_name, tag_id)
+    ).fetchone()
+    if collision is not None:
+        raise ValueError(f"A tag named '{new_name}' already exists")
+    conn.execute(
+        "UPDATE tags SET name = ?, category = ? WHERE id = ?",
+        (new_name, new_category or None, tag_id),
+    )
+    conn.commit()
+
+
+def delete_tag(conn: sqlite3.Connection, tag_id: int) -> int:
+    """Removes a tag from the vocabulary entirely -- every asset_tags row
+    referencing it too (both inherited and explicit), not just one asset.
+    Returns how many assets lost the tag.
+    """
+    cursor = conn.execute("DELETE FROM asset_tags WHERE tag_id = ?", (tag_id,))
+    removed_from = cursor.rowcount
+    conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+    conn.commit()
+    return removed_from

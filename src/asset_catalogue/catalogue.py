@@ -6,10 +6,13 @@ from pathlib import Path
 
 from asset_catalogue import (
     archives,
+    audio_thumbnails,
     blender_render,
+    conversion,
     db,
     ingest,
     library_assets,
+    packs,
     removal,
     settings,
     tagging,
@@ -31,9 +34,21 @@ class AssetSummary:
 
 @dataclass
 class TagSummary:
+    id: int
     name: str
     category: str | None
     usage_count: int
+
+
+@dataclass
+class PackDetail:
+    id: int
+    name: str
+    creator: str | None
+    licence: str | None
+    source_url: str | None
+    corrections: dict
+    asset_count: int
 
 
 class Catalogue:
@@ -82,19 +97,57 @@ class Catalogue:
         ).fetchall()
         return [row["asset_type"] for row in rows]
 
+    def list_asset_extensions(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT extension FROM assets ORDER BY extension"
+        ).fetchall()
+        return [row["extension"] for row in rows]
+
     def list_tags(self) -> list[TagSummary]:
         rows = self._conn.execute(
-            "SELECT tags.name, tags.category, COUNT(asset_tags.asset_id) AS usage_count "
+            "SELECT tags.id, tags.name, tags.category, COUNT(asset_tags.asset_id) AS usage_count "
             "FROM tags LEFT JOIN asset_tags ON asset_tags.tag_id = tags.id "
             "GROUP BY tags.id ORDER BY tags.name"
         ).fetchall()
-        return [TagSummary(row["name"], row["category"], row["usage_count"]) for row in rows]
+        return [
+            TagSummary(row["id"], row["name"], row["category"], row["usage_count"])
+            for row in rows
+        ]
+
+    def rename_tag(self, tag_id: int, new_name: str, new_category: str | None = None) -> None:
+        tagging.rename_tag(self._conn, tag_id, new_name, new_category)
+
+    def delete_tag(self, tag_id: int) -> int:
+        return tagging.delete_tag(self._conn, tag_id)
+
+    def get_pack_detail(self, pack_name: str) -> PackDetail | None:
+        row = self._conn.execute(
+            "SELECT id, name, creator, licence, source_url, corrections "
+            "FROM packs WHERE name = ?",
+            (pack_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        asset_count = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM assets WHERE pack_id = ?", (row["id"],)
+        ).fetchone()["c"]
+        corrections = packs.get_corrections(self._conn, row["id"])
+        return PackDetail(
+            id=row["id"],
+            name=row["name"],
+            creator=row["creator"],
+            licence=row["licence"],
+            source_url=row["source_url"],
+            corrections=corrections,
+            asset_count=asset_count,
+        )
 
     def list_assets(
         self,
         pack: str | None = None,
         asset_type: str | None = None,
         tag: str | None = None,
+        extension: str | None = None,
     ) -> list[AssetSummary]:
         query = (
             "SELECT assets.id, assets.filename, assets.asset_type, "
@@ -117,6 +170,9 @@ class Catalogue:
         if asset_type:
             clauses.append("assets.asset_type = ?")
             params.append(asset_type)
+        if extension:
+            clauses.append("assets.extension = ?")
+            params.append(extension)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY packs.name, assets.relative_path"
@@ -151,6 +207,12 @@ class Catalogue:
     def library_asset_path_if_archived(self, pack_name: str, relative_path: str) -> Path | None:
         path = library_assets.asset_library_path(self._assets_dir, pack_name, relative_path)
         return path if path.exists() else None
+
+    def has_pending_conversion(self, asset_id: int) -> bool:
+        return conversion.has_pending_conversion(self._conn, asset_id)
+
+    def count_pending_conversions(self) -> int:
+        return len(conversion.list_pending_conversion_asset_ids(self._conn))
 
     def tag_asset(self, asset_id: int, tag_name: str, category: str | None = None) -> None:
         tag_id = tagging.get_or_create_tag(self._conn, tag_name, category)
@@ -193,7 +255,14 @@ class Catalogue:
             pack_folder_name = pack_root.stem
             zip_path = pack_root
             pack_root = self._staging_folder / pack_folder_name
-            archives.extract_zip(zip_path, pack_root)
+            # Re-selecting the same zip after an earlier ingest already
+            # extracted it (e.g. re-running ingest to pick up new files) is
+            # a normal, expected case, not a clobber attempt -- only
+            # extract if the destination isn't already there, and ingest
+            # from whatever's on disk either way (same idempotent-merge
+            # behavior as picking the already-extracted folder directly).
+            if not (pack_root.exists() and any(pack_root.iterdir())):
+                archives.extract_zip(zip_path, pack_root)
         elif not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
 
@@ -225,33 +294,8 @@ class Catalogue:
         stats.thumbnails_generated = thumb_stats.generated
         stats.thumbnails_failed = thumb_stats.failed
         stats.blender_unavailable_reason = thumb_stats.blender_unavailable_reason
-
-    def extract_and_ingest_pack_bg(
-        self,
-        zip_path: Path,
-        pack_folder_name: str,
-        pack_name: str,
-        creator: str | None,
-        licence: str | None,
-        source_url: str | None,
-    ) -> tuple[ingest.IngestStats, list[str]]:
-        if self._staging_folder is None:
-            raise RuntimeError("No staging folder configured.")
-        pack_root = self._staging_folder / pack_folder_name
-        archives.extract_zip(zip_path, pack_root)
-        conn = db.connect(settings.load().db_path())
-        try:
-            pack_id, updated_fields = ingest.get_or_create_pack(
-                conn, pack_name, pack_folder_name, creator, licence, source_url
-            )
-            stats = ingest.ingest_pack(conn, pack_root, pack_id)
-            stats.archived = library_assets.archive_pack(
-                conn, self._staging_folder, self._assets_dir, pack_id
-            )
-            self._auto_generate_thumbnails(conn, stats, pack_id, pack_name)
-            return stats, updated_fields
-        finally:
-            conn.close()
+        stats.calibration_preview = thumb_stats.calibration_preview
+        stats.models_pending = thumb_stats.models_pending
 
     def remove_assets_bg(self, asset_ids: list[int]) -> removal.RemoveStats:
         conn = db.connect(settings.load().db_path())
@@ -260,12 +304,40 @@ class Catalogue:
         finally:
             conn.close()
 
+    def remove_pack_bg(self, pack_id: int) -> removal.RemovePackStats:
+        conn = db.connect(settings.load().db_path())
+        try:
+            return removal.remove_pack(conn, self._thumbnail_dir, self._assets_dir, pack_id)
+        finally:
+            conn.close()
+
+    def update_pack_bg(
+        self,
+        pack_id: int,
+        name: str,
+        creator: str | None,
+        licence: str | None,
+        source_url: str | None,
+        corrections: dict,
+    ) -> None:
+        """Renames (if changed, moving the archived library folder to
+        match), updates creator/licence/source_url, and replaces the render
+        corrections -- one call for the whole "Edit Pack" dialog's fields.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            packs.rename_pack(conn, self._assets_dir, pack_id, name)
+            packs.set_metadata(conn, pack_id, creator, licence, source_url)
+            packs.set_corrections(conn, pack_id, corrections)
+        finally:
+            conn.close()
+
     def bulk_tag_assets_bg(
         self, asset_ids: list[int], tag_name: str, category: str | None = None
     ) -> int:
         """Tags every given asset with the same tag. Returns how many were
         tagged. Assets are archived to the library at ingest time, not here
-        -- see ingest_pack_bg/extract_and_ingest_pack_bg.
+        -- see ingest_pack_bg.
         """
         conn = db.connect(settings.load().db_path())
         try:
@@ -297,6 +369,99 @@ class Catalogue:
             return thumbnails.generate_texture_thumbnails(
                 conn, self._staging_folder, self._thumbnail_dir, pack_name=pack, force=force
             )
+        finally:
+            conn.close()
+
+    def generate_audio_thumbnails_bg(
+        self, pack: str | None = None, force: bool = False
+    ) -> thumbnails.ThumbnailStats:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return audio_thumbnails.generate_audio_thumbnails(
+                conn, self._staging_folder, self._thumbnail_dir, pack_name=pack, force=force
+            )
+        finally:
+            conn.close()
+
+    def convert_asset_to_gltf_bg(self, asset_id: int) -> conversion.ConversionResult:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        blender_exe = self.resolve_blender()
+        conn = db.connect(settings.load().db_path())
+        try:
+            result = conversion.convert_asset_to_gltf(
+                conn, self._staging_folder, self._assets_dir, blender_exe, asset_id
+            )
+            if result.ok:
+                blender_render.generate_model_thumbnails(
+                    conn, self._staging_folder, self._thumbnail_dir, blender_exe, asset_id=asset_id
+                )
+            return result
+        finally:
+            conn.close()
+
+    def convert_assets_to_gltf_bg(self, asset_ids: list[int]) -> conversion.ConversionBatchResult:
+        """Batch counterpart to convert_asset_to_gltf_bg -- non-model assets
+        and ones already .glb are silently skipped (result.skipped), so a
+        caller can pass a raw multi-selection straight through.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        blender_exe = self.resolve_blender()
+        conn = db.connect(settings.load().db_path())
+        try:
+            result = conversion.convert_assets_to_gltf(
+                conn, self._staging_folder, self._assets_dir, blender_exe, asset_ids
+            )
+            if result.converted_asset_ids:
+                blender_render.generate_model_thumbnails(
+                    conn,
+                    self._staging_folder,
+                    self._thumbnail_dir,
+                    blender_exe,
+                    asset_ids=result.converted_asset_ids,
+                )
+            return result
+        finally:
+            conn.close()
+
+    def revert_conversion_bg(self, asset_id: int) -> bool:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            reverted = conversion.revert_conversion(conn, self._staging_folder, self._assets_dir, asset_id)
+            if reverted:
+                row = conn.execute("SELECT asset_type FROM assets WHERE id = ?", (asset_id,)).fetchone()
+                if row and row["asset_type"] == "model":
+                    try:
+                        blender_exe = self.resolve_blender()
+                        blender_render.generate_model_thumbnails(
+                            conn, self._staging_folder, self._thumbnail_dir, blender_exe, asset_id=asset_id
+                        )
+                    except RuntimeError:
+                        pass  # blender unavailable -- thumbnail just stays 'pending'
+            return reverted
+        finally:
+            conn.close()
+
+    def cleanup_pending_conversion_bg(self, asset_id: int) -> bool:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return conversion.cleanup_pending_conversion(conn, self._staging_folder, self._assets_dir, asset_id)
+        finally:
+            conn.close()
+
+    def cleanup_all_pending_conversions_bg(self) -> int:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return conversion.cleanup_all_pending_conversions(conn, self._staging_folder, self._assets_dir)
         finally:
             conn.close()
 

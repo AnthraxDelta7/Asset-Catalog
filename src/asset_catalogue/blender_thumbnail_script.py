@@ -8,37 +8,22 @@ imported directly. See blender_render.py for the host-side half of this.
 import json
 import math
 import sys
+from pathlib import Path
 
 import bpy
 import mathutils
+
+# Blender does NOT add a --python script's own directory to sys.path
+# automatically (verified -- ModuleNotFoundError without this), unlike
+# plain CPython running a script directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from blender_common import IMPORTERS, apply_corrections, clear_imported_objects, get_job_list_path
 
 RESOLUTION = 256
 WORLD_COLOR = (0.05, 0.05, 0.06)  # neutral dark gray/charcoal
 CAMERA_DIRECTION = mathutils.Vector((1, -1, 0.7)).normalized()
 CAMERA_DISTANCE_FACTOR = 3.2  # empirical fit for the default ~40deg camera FOV
-FALLBACK_MATERIAL_NAME = "AssetCatalogueFallback"
-
-IMPORTERS = {
-    ".obj": lambda path: bpy.ops.wm.obj_import(filepath=path),
-    ".fbx": lambda path: bpy.ops.import_scene.fbx(filepath=path),
-    ".gltf": lambda path: bpy.ops.import_scene.gltf(filepath=path),
-    ".glb": lambda path: bpy.ops.import_scene.gltf(filepath=path),
-    ".stl": lambda path: bpy.ops.wm.stl_import(filepath=path),
-    ".blend": lambda path: _import_blend(path),
-}
-
-
-def _import_blend(path: str) -> None:
-    with bpy.data.libraries.load(path, link=False) as (data_from, data_to):
-        data_to.objects = data_from.objects
-    for obj in data_to.objects:
-        if obj is not None:
-            bpy.context.collection.objects.link(obj)
-
-
-def get_job_list_path() -> str:
-    argv = sys.argv
-    return argv[argv.index("--") + 1]
 
 
 def setup_scene_once() -> None:
@@ -67,46 +52,6 @@ def setup_scene_once() -> None:
     scene.render.resolution_y = RESOLUTION
     scene.render.image_settings.file_format = "PNG"
     scene.render.film_transparent = False
-
-
-def clear_imported_objects() -> None:
-    for obj in list(bpy.data.objects):
-        if obj.name not in ("Camera", "Light"):
-            bpy.data.objects.remove(obj, do_unlink=True)
-    bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
-
-
-def apply_corrections(corrections: dict) -> list:
-    imported = [
-        obj for obj in bpy.data.objects if obj.name not in ("Camera", "Light")
-    ]
-
-    if corrections.get("up_axis") == "Y_UP":
-        for obj in imported:
-            if obj.parent is None:
-                obj.rotation_euler.x += math.radians(90)
-
-    scale = corrections.get("scale")
-    if scale and scale != 1.0:
-        for obj in imported:
-            if obj.parent is None:
-                obj.scale = tuple(s * scale for s in obj.scale)
-
-    if corrections.get("material_fallback"):
-        material = bpy.data.materials.get(FALLBACK_MATERIAL_NAME)
-        if material is None:
-            material = bpy.data.materials.new(FALLBACK_MATERIAL_NAME)
-            material.use_nodes = True
-            bsdf = material.node_tree.nodes.get("Principled BSDF")
-            if bsdf is not None:
-                bsdf.inputs["Base Color"].default_value = (0.6, 0.6, 0.6, 1.0)
-        for obj in imported:
-            if obj.type == "MESH":
-                obj.data.materials.clear()
-                obj.data.materials.append(material)
-
-    bpy.context.view_layer.update()
-    return [obj for obj in imported if obj.type == "MESH"]
 
 
 def frame_and_render(mesh_objects: list, output_path: str) -> bool:
@@ -156,7 +101,7 @@ def main() -> None:
     setup_scene_once()
 
     for job in jobs:
-        clear_imported_objects()
+        clear_imported_objects(keep=("Camera", "Light"))
         asset_id = job["asset_id"]
         extension = job["extension"].lower()
         importer = IMPORTERS.get(extension)

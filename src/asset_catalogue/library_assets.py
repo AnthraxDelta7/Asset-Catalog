@@ -9,8 +9,12 @@ def _sanitize_folder_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_")
 
 
+def pack_library_folder(assets_dir: Path, pack_name: str) -> Path:
+    return assets_dir / _sanitize_folder_name(pack_name)
+
+
 def asset_library_path(assets_dir: Path, pack_name: str, relative_path: str) -> Path:
-    return assets_dir / _sanitize_folder_name(pack_name) / relative_path
+    return pack_library_folder(assets_dir, pack_name) / relative_path
 
 
 def archive_asset(
