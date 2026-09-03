@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -119,6 +120,7 @@ class ThumbnailGrid(QListWidget):
         )
         # Ctrl/Shift-click and Ctrl+A ("select all") for bulk removal.
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def set_assets(self, assets: list[AssetSummary], catalogue: Catalogue) -> None:
         # Rebuilding the item list can make Qt pick its own new "current"
@@ -724,6 +726,7 @@ class MainWindow(QMainWindow):
         self.filter_panel = FilterPanel(catalogue, self._refresh_grid)
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
+        self.grid.customContextMenuRequested.connect(self._show_grid_context_menu)
         self.detail_panel = DetailPanel(
             catalogue,
             self._handle_tag_asset,
@@ -993,12 +996,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Asset Catalogue",
-                "This asset hasn't been archived to the library yet -- archiving "
-                "happens automatically the first time it's tagged.",
+                "This asset hasn't been archived to the library yet -- that "
+                "normally happens automatically as part of ingest.",
             )
             return
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", f"/select,{path}"])
+            # Passing ["explorer", f"/select,{path}"] as an argv list is the
+            # well-known broken version of this: explorer's own command-line
+            # parsing for /select expects the path to be independently
+            # quoted (/select,"C:\path") when it contains spaces, not
+            # bundled as one already-quoted argv element the way Python's
+            # list-based Popen would build it. Passing a single pre-built
+            # command-line string instead (Windows-only Popen behavior) gets
+            # the quoting right.
+            subprocess.Popen(f'explorer /select,"{path}"')
         else:
             QMessageBox.information(self, "Asset Catalogue", f"Library copy is at:\n{path}")
 
@@ -1052,6 +1063,48 @@ class MainWindow(QMainWindow):
             self.detail_panel.show_multi_selection(asset_ids)
         else:
             self.detail_panel.clear_selection()
+
+    def _show_grid_context_menu(self, pos) -> None:
+        item = self.grid.itemAt(pos)
+        # Right-clicking something outside the current selection replaces
+        # it with just that item first, matching the usual file-manager
+        # convention, rather than acting on a stale selection.
+        if item is not None and item not in self.grid.selectedItems():
+            self.grid.setCurrentItem(item)
+
+        menu = self._build_grid_context_menu()
+        if menu is not None:
+            menu.exec(self.grid.viewport().mapToGlobal(pos))
+
+    def _build_grid_context_menu(self) -> QMenu | None:
+        """Split out from _show_grid_context_menu so the menu's contents can
+        be tested without invoking exec() (which blocks on real user input)."""
+        selected = self.grid.selectedItems()
+        if not selected:
+            return None
+
+        menu = QMenu(self)
+        if len(selected) == 1:
+            asset_id = selected[0].data(Qt.UserRole)
+            asset = next((a for a in self._current_assets if a.id == asset_id), None)
+            if asset is not None:
+                show_action = menu.addAction("Show in Library Folder")
+                show_action.triggered.connect(
+                    lambda: self._show_in_library_folder(asset.pack_name, asset.relative_path)
+                )
+                show_action.setEnabled(
+                    self._catalogue.library_asset_path_if_archived(
+                        asset.pack_name, asset.relative_path
+                    )
+                    is not None
+                )
+                menu.addSeparator()
+
+        remove_label = "Delete from Library" if len(selected) == 1 else f"Delete {len(selected)} from Library"
+        remove_action = menu.addAction(remove_label)
+        remove_action.triggered.connect(self._remove_selected_assets)
+
+        return menu
 
     def _remove_selected_assets(self) -> None:
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
