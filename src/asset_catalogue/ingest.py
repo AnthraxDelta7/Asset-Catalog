@@ -87,6 +87,7 @@ class IngestStats:
     nested_zips_extracted: int = 0
     skipped_engine_files: int = 0
     skipped_engine_folders: int = 0
+    archived: int = 0
 
 
 def get_or_create_pack(

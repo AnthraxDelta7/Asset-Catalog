@@ -603,7 +603,6 @@ class MainWindow(QMainWindow):
         self._current_assets: list[AssetSummary] = []
         self._selected_asset_id: int | None = None
         self._active_worker: _BackgroundWorker | None = None
-        self._background_workers: set[_BackgroundWorker] = set()
         self.resize(1100, 700)
         self._update_window_title()
 
@@ -797,6 +796,7 @@ class MainWindow(QMainWindow):
                 )
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
+            message += f"\nArchived {stats.archived} asset(s) to the library"
             return message
 
         self._run_background_job(
@@ -843,87 +843,31 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        def format_result(stats) -> str:
-            message = (
-                f"Applied '{dialog.tag_name}' to {stats.tagged} asset(s) in '{dialog.pack_name}', "
-                f"archived {stats.archived} to the library"
-            )
-            if stats.archive_failed:
-                message += (
-                    f" ({stats.archive_failed} could not be archived -- source file missing)"
-                )
-            return message
-
         self._run_background_job(
             lambda: self._catalogue.tag_pack_bg(dialog.pack_name, dialog.tag_name, dialog.category),
             f"Tagging pack '{dialog.pack_name}'...",
-            format_result,
+            lambda applied: (
+                f"Applied '{dialog.tag_name}' to {applied} asset(s) in '{dialog.pack_name}' "
+                "(already-tagged assets left untouched)"
+            ),
             self._on_tags_changed,
         )
 
     def _handle_tag_asset(self, asset_id: int, tag_name: str) -> None:
         self._catalogue.tag_asset(asset_id, tag_name)
         self._on_tags_changed()
-        self._archive_asset_fire_and_forget(asset_id)
 
     def _handle_untag_asset(self, asset_id: int, tag_name: str) -> None:
         self._catalogue.untag_asset(asset_id, tag_name)
         self._on_tags_changed()
 
     def _handle_bulk_tag_assets(self, asset_ids: list[int], tag_name: str) -> None:
-        def format_result(stats) -> str:
-            message = (
-                f"Tagged {stats.tagged} asset(s) with '{tag_name}', "
-                f"archived {stats.archived} to the library"
-            )
-            if stats.archive_failed:
-                message += (
-                    f" ({stats.archive_failed} could not be archived -- source file missing)"
-                )
-            return message
-
         self._run_background_job(
             lambda: self._catalogue.bulk_tag_assets_bg(asset_ids, tag_name),
             f"Tagging {len(asset_ids)} asset(s)...",
-            format_result,
+            lambda tagged: f"Tagged {tagged} asset(s) with '{tag_name}'",
             self._on_tags_changed,
         )
-
-    def _archive_asset_fire_and_forget(self, asset_id: int) -> None:
-        """Archives one asset in the background with only a status-bar
-        message, not the modal progress dialog _run_background_job uses --
-        this fires after every single-asset tag, so a popup for each one
-        would be constant noise. Multiple can run concurrently (rapid
-        tagging), so each worker is tracked in a set rather than the single
-        _active_worker slot the modal jobs use.
-        """
-        worker = _BackgroundWorker(lambda: self._catalogue.archive_asset_bg(asset_id))
-
-        def cleanup() -> None:
-            self._background_workers.discard(worker)
-
-        def on_ok(path) -> None:
-            if path is not None:
-                self.statusBar().showMessage(f"Archived to library: {path.name}", 4000)
-                # The archive finished after the grid's own post-tag refresh
-                # already ran (and found nothing archived yet) -- if this is
-                # still the asset on screen, refresh its "Show in Library
-                # Folder" state now rather than leaving it stuck disabled
-                # until some unrelated action happens to refresh it.
-                if self._selected_asset_id == asset_id:
-                    asset = next((a for a in self._current_assets if a.id == asset_id), None)
-                    if asset is not None:
-                        self.detail_panel.show_asset(asset)
-
-        def on_fail(message: str) -> None:
-            self.statusBar().showMessage(f"Could not archive asset: {message}", 5000)
-
-        worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
-        worker.failed.connect(on_fail, Qt.QueuedConnection)
-        worker.finished.connect(cleanup)
-        worker.finished.connect(worker.deleteLater)
-        self._background_workers.add(worker)
-        worker.start()
 
     def _show_in_library_folder(self, pack_name: str, relative_path: str) -> None:
         path = self._catalogue.library_asset_path_if_archived(pack_name, relative_path)

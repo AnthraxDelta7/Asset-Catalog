@@ -44,3 +44,16 @@ def archive_asset(
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     return destination
+
+
+def archive_pack(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path, pack_id: int) -> int:
+    """Archives every asset currently in a pack. Returns how many succeeded
+    (an asset already archived counts as a success, not a no-op)."""
+    asset_ids = [
+        row["id"] for row in conn.execute("SELECT id FROM assets WHERE pack_id = ?", (pack_id,))
+    ]
+    return sum(
+        1
+        for asset_id in asset_ids
+        if archive_asset(conn, staging_folder, assets_dir, asset_id) is not None
+    )
