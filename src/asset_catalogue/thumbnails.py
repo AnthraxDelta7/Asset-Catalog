@@ -3,10 +3,12 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image, UnidentifiedImageError
 
 THUMBNAIL_SIZE = (256, 256)
+ProgressCallback = Callable[[str], None]
 
 
 def thumbnail_path(thumbnail_dir: Path, content_hash: str) -> Path:
@@ -35,9 +37,11 @@ def generate_texture_thumbnails(
     thumbnail_dir: Path,
     pack_name: str | None = None,
     force: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> ThumbnailStats:
+    report = on_progress or (lambda _text: None)
     query = (
-        "SELECT assets.id, assets.relative_path, assets.content_hash, "
+        "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
         "packs.pack_folder FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'texture'"
     )
@@ -63,6 +67,7 @@ def generate_texture_thumbnails(
             stats.already_done += 1
             continue
 
+        report(f"Rendering thumbnail for {row['filename']}...")
         source = staging_folder / row["pack_folder"] / row["relative_path"]
         try:
             render_2d_thumbnail(source, dest)

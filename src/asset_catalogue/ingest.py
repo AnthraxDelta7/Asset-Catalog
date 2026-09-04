@@ -5,8 +5,11 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from asset_catalogue import archives
+
+ProgressCallback = Callable[[str], None]
 
 HASH_CHUNK_SIZE = 1024 * 1024
 
@@ -93,6 +96,7 @@ class IngestStats:
     blender_unavailable_reason: str | None = None
     calibration_preview: bool = False
     models_pending: int = 0
+    preview_asset_id: int | None = None
 
 
 def get_or_create_pack(
@@ -148,7 +152,12 @@ def get_or_create_pack(
     return cursor.lastrowid, []
 
 
-def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> IngestStats:
+def ingest_pack(
+    conn: sqlite3.Connection,
+    pack_root: Path,
+    pack_id: int,
+    on_progress: ProgressCallback | None = None,
+) -> IngestStats:
     """Walks pack_root and catalogues every file as an asset.
 
     A .zip found anywhere in the walk -- not just at pack_root itself -- is
@@ -158,6 +167,7 @@ def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> Inge
     rglob(): files created by an extraction mid-walk need to be picked up
     within the same pass, so this uses an explicit work queue instead.
     """
+    report = on_progress or (lambda _text: None)
     stats = IngestStats()
     work_items: list[tuple[Path, int]] = [(pack_root, 0)]
 
@@ -199,6 +209,7 @@ def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> Inge
                     # re-walk it for anything new, don't re-extract.
                     pass
                 else:
+                    report(f"Extracting {entry.name}...")
                     archives.extract_zip(entry, extracted_dir)
                     stats.nested_zips_extracted += 1
                 work_items.append((extracted_dir, zip_depth + 1))
@@ -206,6 +217,7 @@ def ingest_pack(conn: sqlite3.Connection, pack_root: Path, pack_id: int) -> Inge
 
             stats.total += 1
             relative_path = entry.relative_to(pack_root).as_posix()
+            report(f"Hashing {entry.name}...")
             content_hash = hash_file(entry)
             extension = entry.suffix.lower()
             cursor = conn.execute(

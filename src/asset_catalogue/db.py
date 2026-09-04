@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS asset_tags (
     PRIMARY KEY (asset_id, tag_id)
 );
 
-CREATE TABLE IF NOT EXISTS imports (
+CREATE TABLE IF NOT EXISTS exports (
     id INTEGER PRIMARY KEY,
     asset_id INTEGER NOT NULL REFERENCES assets(id),
     project_identifier TEXT NOT NULL,
@@ -83,5 +83,19 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+
+    # One-time migration: "imports" was renamed to "exports" to match the
+    # export-to-project feature's new name. ALTER TABLE ... RENAME TO is a
+    # cheap metadata-only operation in SQLite -- no rows are touched, no
+    # separate migration tooling needed. Guarded so it only ever runs once
+    # per database, and never on a database created fresh (which already
+    # gets "exports" straight from SCHEMA below).
+    existing_tables = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "imports" in existing_tables and "exports" not in existing_tables:
+        conn.execute("ALTER TABLE imports RENAME TO exports")
+        conn.commit()
+
     conn.executescript(SCHEMA)
     return conn

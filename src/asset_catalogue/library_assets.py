@@ -3,6 +3,9 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from pathlib import Path
+from typing import Callable
+
+ProgressCallback = Callable[[str], None]
 
 
 def _sanitize_folder_name(name: str) -> str:
@@ -50,14 +53,22 @@ def archive_asset(
     return destination
 
 
-def archive_pack(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path, pack_id: int) -> int:
+def archive_pack(
+    conn: sqlite3.Connection,
+    staging_folder: Path,
+    assets_dir: Path,
+    pack_id: int,
+    on_progress: ProgressCallback | None = None,
+) -> int:
     """Archives every asset currently in a pack. Returns how many succeeded
     (an asset already archived counts as a success, not a no-op)."""
-    asset_ids = [
-        row["id"] for row in conn.execute("SELECT id FROM assets WHERE pack_id = ?", (pack_id,))
-    ]
-    return sum(
-        1
-        for asset_id in asset_ids
-        if archive_asset(conn, staging_folder, assets_dir, asset_id) is not None
-    )
+    report = on_progress or (lambda _text: None)
+    rows = conn.execute(
+        "SELECT id, filename FROM assets WHERE pack_id = ?", (pack_id,)
+    ).fetchall()
+    archived = 0
+    for row in rows:
+        report(f"Archiving {row['filename']} to library...")
+        if archive_asset(conn, staging_folder, assets_dir, row["id"]) is not None:
+            archived += 1
+    return archived

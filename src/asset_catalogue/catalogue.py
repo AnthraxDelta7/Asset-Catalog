@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from asset_catalogue import (
     archives,
@@ -10,7 +11,7 @@ from asset_catalogue import (
     blender_render,
     conversion,
     db,
-    importing,
+    exporting,
     ingest,
     library_assets,
     packs,
@@ -201,6 +202,27 @@ class Catalogue:
             for row in rows
         ]
 
+    def get_asset(self, asset_id: int) -> AssetSummary | None:
+        row = self._conn.execute(
+            "SELECT assets.id, assets.filename, assets.asset_type, "
+            "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
+            "packs.name AS pack_name "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AssetSummary(
+            id=row["id"],
+            filename=row["filename"],
+            pack_name=row["pack_name"],
+            asset_type=row["asset_type"],
+            thumbnail_status=row["thumbnail_status"],
+            content_hash=row["content_hash"],
+            relative_path=row["relative_path"],
+            tags=self.get_asset_tags(row["id"]),
+        )
+
     def get_asset_tags(self, asset_id: int) -> list[str]:
         rows = self._conn.execute(
             "SELECT tags.name FROM tags JOIN asset_tags ON asset_tags.tag_id = tags.id "
@@ -253,6 +275,7 @@ class Catalogue:
         creator: str | None,
         licence: str | None,
         source_url: str | None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> tuple[ingest.IngestStats, list[str]]:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
@@ -280,17 +303,22 @@ class Catalogue:
             pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
-            stats = ingest.ingest_pack(conn, pack_root, pack_id)
+            stats = ingest.ingest_pack(conn, pack_root, pack_id, on_progress=on_progress)
             stats.archived = library_assets.archive_pack(
-                conn, self._staging_folder, self._assets_dir, pack_id
+                conn, self._staging_folder, self._assets_dir, pack_id, on_progress=on_progress
             )
-            self._auto_generate_thumbnails(conn, stats, pack_id, pack_name)
+            self._auto_generate_thumbnails(conn, stats, pack_id, pack_name, on_progress)
             return stats, updated_fields
         finally:
             conn.close()
 
     def _auto_generate_thumbnails(
-        self, conn: sqlite3.Connection, stats: ingest.IngestStats, pack_id: int, pack_name: str
+        self,
+        conn: sqlite3.Connection,
+        stats: ingest.IngestStats,
+        pack_id: int,
+        pack_name: str,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         thumb_stats = blender_render.generate_pack_thumbnails(
             conn,
@@ -299,24 +327,34 @@ class Catalogue:
             settings.load().blender_path,
             pack_id,
             pack_name,
+            on_progress=on_progress,
         )
         stats.thumbnails_generated = thumb_stats.generated
         stats.thumbnails_failed = thumb_stats.failed
         stats.blender_unavailable_reason = thumb_stats.blender_unavailable_reason
         stats.calibration_preview = thumb_stats.calibration_preview
         stats.models_pending = thumb_stats.models_pending
+        stats.preview_asset_id = thumb_stats.preview_asset_id
 
-    def remove_assets_bg(self, asset_ids: list[int]) -> removal.RemoveStats:
+    def remove_assets_bg(
+        self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
+    ) -> removal.RemoveStats:
         conn = db.connect(settings.load().db_path())
         try:
-            return removal.remove_assets(conn, self._thumbnail_dir, self._assets_dir, asset_ids)
+            return removal.remove_assets(
+                conn, self._thumbnail_dir, self._assets_dir, asset_ids, on_progress=on_progress
+            )
         finally:
             conn.close()
 
-    def remove_pack_bg(self, pack_id: int) -> removal.RemovePackStats:
+    def remove_pack_bg(
+        self, pack_id: int, on_progress: Callable[[str], None] | None = None
+    ) -> removal.RemovePackStats:
         conn = db.connect(settings.load().db_path())
         try:
-            return removal.remove_pack(conn, self._thumbnail_dir, self._assets_dir, pack_id)
+            return removal.remove_pack(
+                conn, self._thumbnail_dir, self._assets_dir, pack_id, on_progress=on_progress
+            )
         finally:
             conn.close()
 
@@ -338,6 +376,38 @@ class Catalogue:
             packs.rename_pack(conn, self._assets_dir, pack_id, name)
             packs.set_metadata(conn, pack_id, creator, licence, source_url)
             packs.set_corrections(conn, pack_id, corrections)
+        finally:
+            conn.close()
+
+    def set_pack_corrections_bg(self, pack_id: int, corrections: dict) -> None:
+        conn = db.connect(settings.load().db_path())
+        try:
+            packs.set_corrections(conn, pack_id, corrections)
+        finally:
+            conn.close()
+
+    def regenerate_model_thumbnail_bg(
+        self, asset_id: int, on_progress: Callable[[str], None] | None = None
+    ) -> blender_render.ModelThumbnailStats:
+        """Re-renders a single model asset's thumbnail regardless of its
+        current thumbnail_status -- used to preview render corrections
+        (up_axis/scale/material_fallback) against one asset at a time, e.g.
+        the post-ingest calibration review, without touching the rest of
+        the pack.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        blender_exe = self.resolve_blender()
+        conn = db.connect(settings.load().db_path())
+        try:
+            return blender_render.generate_model_thumbnails(
+                conn,
+                self._staging_folder,
+                self._thumbnail_dir,
+                blender_exe,
+                asset_id=asset_id,
+                on_progress=on_progress,
+            )
         finally:
             conn.close()
 
@@ -374,28 +444,33 @@ class Catalogue:
         finally:
             conn.close()
 
-    def import_assets_bg(
-        self, asset_ids: list[int], project_root: Path, dest_subfolder: str = "imported_assets"
-    ) -> importing.ImportStats:
-        """Copies the given assets into a target project (rebuilding each
+    def export_assets_bg(
+        self,
+        asset_ids: list[int],
+        project_root: Path,
+        dest_subfolder: str = "exported_assets",
+        on_progress: Callable[[str], None] | None = None,
+    ) -> exporting.ExportStats:
+        """Copies the given assets out to a target project (rebuilding each
         asset's relative path under a per-pack subfolder, not flattened)
-        and records every copy in the imports table. project_root is
+        and records every copy in the exports table. project_root is
         resolved to an absolute path for the recorded project_identifier,
-        matching the CLI's import command exactly.
+        matching the CLI's export command exactly.
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         conn = db.connect(settings.load().db_path())
         try:
-            assets = importing.select_assets(conn, asset_ids=asset_ids)
+            assets = exporting.select_assets(conn, asset_ids=asset_ids)
             project_identifier = str(Path(project_root).resolve())
-            return importing.import_assets(
+            return exporting.export_assets(
                 conn,
                 self._staging_folder,
                 Path(project_root),
                 project_identifier,
                 dest_subfolder,
                 assets,
+                on_progress=on_progress,
             )
         finally:
             conn.close()
@@ -412,49 +487,79 @@ class Catalogue:
             conn.close()
 
     def generate_2d_thumbnails_bg(
-        self, pack: str | None = None, force: bool = False
+        self,
+        pack: str | None = None,
+        force: bool = False,
+        on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         conn = db.connect(settings.load().db_path())
         try:
             return thumbnails.generate_texture_thumbnails(
-                conn, self._staging_folder, self._thumbnail_dir, pack_name=pack, force=force
+                conn,
+                self._staging_folder,
+                self._thumbnail_dir,
+                pack_name=pack,
+                force=force,
+                on_progress=on_progress,
             )
         finally:
             conn.close()
 
     def generate_audio_thumbnails_bg(
-        self, pack: str | None = None, force: bool = False
+        self,
+        pack: str | None = None,
+        force: bool = False,
+        on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         conn = db.connect(settings.load().db_path())
         try:
             return audio_thumbnails.generate_audio_thumbnails(
-                conn, self._staging_folder, self._thumbnail_dir, pack_name=pack, force=force
+                conn,
+                self._staging_folder,
+                self._thumbnail_dir,
+                pack_name=pack,
+                force=force,
+                on_progress=on_progress,
             )
         finally:
             conn.close()
 
-    def convert_asset_to_gltf_bg(self, asset_id: int) -> conversion.ConversionResult:
+    def convert_asset_to_gltf_bg(
+        self, asset_id: int, on_progress: Callable[[str], None] | None = None
+    ) -> conversion.ConversionResult:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         blender_exe = self.resolve_blender()
         conn = db.connect(settings.load().db_path())
         try:
             result = conversion.convert_asset_to_gltf(
-                conn, self._staging_folder, self._assets_dir, blender_exe, asset_id
+                conn,
+                self._staging_folder,
+                self._assets_dir,
+                blender_exe,
+                asset_id,
+                on_progress=on_progress,
             )
             if result.ok:
                 blender_render.generate_model_thumbnails(
-                    conn, self._staging_folder, self._thumbnail_dir, blender_exe, asset_id=asset_id
+                    conn,
+                    self._staging_folder,
+                    self._thumbnail_dir,
+                    blender_exe,
+                    asset_id=asset_id,
+                    on_progress=on_progress,
                 )
             return result
         finally:
             conn.close()
 
-    def convert_assets_to_gltf_bg(self, asset_ids: list[int]) -> conversion.ConversionBatchResult:
+    def convert_assets_to_gltf_bg(
+        self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
+    ) -> conversion.ConversionBatchResult:
         """Batch counterpart to convert_asset_to_gltf_bg -- non-model assets
         and ones already .glb are silently skipped (result.skipped), so a
         caller can pass a raw multi-selection straight through.
@@ -465,7 +570,12 @@ class Catalogue:
         conn = db.connect(settings.load().db_path())
         try:
             result = conversion.convert_assets_to_gltf(
-                conn, self._staging_folder, self._assets_dir, blender_exe, asset_ids
+                conn,
+                self._staging_folder,
+                self._assets_dir,
+                blender_exe,
+                asset_ids,
+                on_progress=on_progress,
             )
             if result.converted_asset_ids:
                 blender_render.generate_model_thumbnails(
@@ -474,12 +584,15 @@ class Catalogue:
                     self._thumbnail_dir,
                     blender_exe,
                     asset_ids=result.converted_asset_ids,
+                    on_progress=on_progress,
                 )
             return result
         finally:
             conn.close()
 
-    def revert_conversion_bg(self, asset_id: int) -> bool:
+    def revert_conversion_bg(
+        self, asset_id: int, on_progress: Callable[[str], None] | None = None
+    ) -> bool:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         conn = db.connect(settings.load().db_path())
@@ -491,7 +604,12 @@ class Catalogue:
                     try:
                         blender_exe = self.resolve_blender()
                         blender_render.generate_model_thumbnails(
-                            conn, self._staging_folder, self._thumbnail_dir, blender_exe, asset_id=asset_id
+                            conn,
+                            self._staging_folder,
+                            self._thumbnail_dir,
+                            blender_exe,
+                            asset_id=asset_id,
+                            on_progress=on_progress,
                         )
                     except RuntimeError:
                         pass  # blender unavailable -- thumbnail just stays 'pending'
@@ -518,7 +636,11 @@ class Catalogue:
             conn.close()
 
     def generate_model_thumbnails_bg(
-        self, blender_exe: Path, pack: str | None = None, force: bool = False
+        self,
+        blender_exe: Path,
+        pack: str | None = None,
+        force: bool = False,
+        on_progress: Callable[[str], None] | None = None,
     ) -> blender_render.ModelThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
@@ -531,6 +653,7 @@ class Catalogue:
                 blender_exe,
                 pack_name=pack,
                 force=force,
+                on_progress=on_progress,
             )
         finally:
             conn.close()

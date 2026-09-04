@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-Standalone tool for cataloguing, tagging, previewing and importing game assets. Design rationale lives in [asset-catalogue-seed.md](asset-catalogue-seed.md); this file tracks day-to-day usage as commands land.
+Standalone tool for cataloguing, tagging, previewing and exporting game assets. Design rationale lives in [asset-catalogue-seed.md](asset-catalogue-seed.md); this file tracks day-to-day usage as commands land.
 
 ## Setup
 
@@ -189,11 +189,11 @@ Reverting restores the exact pre-conversion `relative_path`/`extension`/`content
 asset-catalogue list [--pack "Pack Name"] [--type model|texture|audio|other] [--tag tag_name] [--format fbx] [--search text] [--unused]
 ```
 
-`--unused` shows assets that have never been imported into any project. `--format` filters by file extension (with or without the leading dot — `fbx` and `.fbx` are equivalent). `--search` matches anywhere in the filename, case-insensitive; a literal `%` or `_` in the search text is matched literally, not treated as a SQL wildcard.
+`--unused` shows assets that have never been exported into any project. `--format` filters by file extension (with or without the leading dot — `fbx` and `.fbx` are equivalent). `--search` matches anywhere in the filename, case-insensitive; a literal `%` or `_` in the search text is matched literally, not treated as a SQL wildcard.
 
 ## Removing assets
 
-Removes one, many, or all assets from the catalogue — the database row, tags, import history, rendered thumbnail, and any archived library copy. **Never touches the original files in the staging folder**; those stay exactly as shipped, same as everywhere else in this tool. Requires a filter (or `--all`) for the same reason `import` does — an easy fat-finger away from wiping the whole catalogue otherwise:
+Removes one, many, or all assets from the catalogue — the database row, tags, export history, rendered thumbnail, and any archived library copy. **Never touches the original files in the staging folder**; those stay exactly as shipped, same as everywhere else in this tool. Requires a filter (or `--all`) for the same reason `export` does — an easy fat-finger away from wiping the whole catalogue otherwise:
 
 ```
 asset-catalogue remove --asset-id <id> [--asset-id <id> ...] | --pack "Pack Name" | --type texture | --tag tag_name | --all [--yes]
@@ -201,27 +201,25 @@ asset-catalogue remove --asset-id <id> [--asset-id <id> ...] | --pack "Pack Name
 
 Prints what's about to be removed and asks for confirmation unless `--yes` is passed.
 
-## Import
+## Export
 
-Copies selected assets into a target project, rebuilding each asset's relative folder structure under a per-pack subfolder (default `imported_assets/<Pack Name>/...`, not dumped flat) rather than symlinking — see the design note below for why. Requires at least one selection filter, or `--all` to import the entire catalogue on purpose (a bare `import <project>` with nothing else is refused, since it's an easy fat-finger away from copying everything):
-
-```
-asset-catalogue import <project_root> [--pack "Pack Name"] [--type texture] [--tag tag_name] [--asset-id ID] [--all] [--dest-subfolder imported_assets]
-```
-
-If `<project_root>` contains a `project.godot`, that's reported; if not, the tool proceeds anyway (Godot is one possible destination, not the only one this tool targets). Every import is recorded — asset, target project (by resolved absolute path), and timestamp — which is what makes these queries possible:
+Copies selected assets out to a target project, rebuilding each asset's relative folder structure under a per-pack subfolder (default `exported_assets/<Pack Name>/...`, not dumped flat) rather than symlinking — see the design note below for why. Requires at least one selection filter, or `--all` to export the entire catalogue on purpose (a bare `export <project>` with nothing else is refused, since it's an easy fat-finger away from copying everything):
 
 ```
-asset-catalogue imports [--project <project_root>] [--asset-id ID]
+asset-catalogue export <project_root> [--pack "Pack Name"] [--type texture] [--tag tag_name] [--asset-id ID] [--all] [--dest-subfolder exported_assets]
 ```
 
-`imports` with no filter is the full history; `--project` shows what's already in one project; `--asset-id` shows every project a given asset has been imported into.
+Every export is recorded — asset, target project (by resolved absolute path), and timestamp — which is what makes these queries possible:
+
+```
+asset-catalogue exports [--project <project_root>] [--asset-id ID]
+```
+
+`exports` with no filter is the full history; `--project` shows what's already in one project; `--asset-id` shows every project a given asset has been exported into.
 
 **Design note (copy vs symlink):** copy was chosen deliberately over symlink — simpler, safer, and avoids Windows' symlink creation normally needing Developer Mode or admin rights. The trade-off is real: a symlinked project would auto-pick-up pack updates and use less disk, but at the cost of the project silently breaking if the library folder isn't present at build/package time. Not revisited unless it becomes a real pain point.
 
-### Godot export (optional, off by default)
-
-`asset-catalogue settings set` has no Godot-specific flags — this lives only in the UI's Settings dialog, since it's a UI convenience, not a new import mechanism (the CLI's `import` above already works against any project folder, Godot or not, and is unaffected by this toggle either way). **Off by default**, so cataloguing raw STLs or feeding a different pipeline never shows any Godot-specific UI. Turning it on in Settings adds exactly one behavior: the *first* Import remembers whatever project folder you picked (there, or in the Import dialog itself), and every later Import reuses it automatically instead of asking again — until you clear or change it in Settings. Turning it back off (or clearing the remembered path) goes right back to a plain per-import folder picker.
+**This used to be called "Import"** — renamed because "Ingest" (bring assets *into* the catalogue) and "Import to Project" (send assets *out* to a project) read as near-synonyms despite being opposite directions, which was genuinely confusing. "Export" pairs cleanly with "Ingest" instead (in / out). This was a full rename, CLI included: the old `import`/`imports` subcommands and the `imports` database table are gone, along with the old Godot-specific "remember one project, locked once set" toggle (`settings.json`'s old `godot_project_path`/`godot_export_enabled`) — replaced by the always-on, engine-agnostic recent-projects list described in the UI section below. An existing `catalogue.db` migrates its `imports` table to `exports` automatically and losslessly the next time it's opened (a plain `ALTER TABLE ... RENAME TO`, no rows touched); an existing `settings.json` carrying the old Godot setting has its remembered project folder carried forward into the new list the first time settings are loaded.
 
 ## UI
 
@@ -231,7 +229,7 @@ asset-catalogue-ui
 
 No CLI setup required first. A library folder is required above everything else — the app checks on startup and won't open the main window without one, looping back to a **Settings** dialog (folder/file browse buttons, Blender "Auto-detect") until either a library actually opens or you quit. A path that's merely unconfigured is prompted for silently; a path that's configured but broken (bad permissions, points at a file, etc.) shows the actual error in the dialog rather than crashing. The window title always shows which library is currently open.
 
-**File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path, plus **Enable Godot export** and its remembered project folder (see "Godot export" above) — the project-folder row is only enabled while the checkbox is checked. **Leaving Blender path blank is a valid, working choice** (it's re-detected on demand every time it's actually needed, never cached in settings) but used to just look unconfigured with nothing in the field — it now shows the auto-detected path as greyed placeholder text when one is found, so a blank field reads as "auto-detecting, and here's what it found" rather than "nothing set up." **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
+**File > Settings...** reopens that same dialog anytime, for staging folder / library folder / Blender path. **Leaving Blender path blank is a valid, working choice** (it's re-detected on demand every time it's actually needed, never cached in settings) but used to just look unconfigured with nothing in the field — it now shows the auto-detected path as greyed placeholder text when one is found, so a blank field reads as "auto-detecting, and here's what it found" rather than "nothing set up." **File > Switch Library...** is the faster, more deliberate path for just swapping libraries (a personal one vs. a shared one, say) — it browses directly to a folder and confirms before switching, telling you plainly whether it found an *existing* library there or would be creating a *new, empty* one, so a wrong folder pick doesn't silently start a fresh catalogue by accident. Either path live-switches the whole catalogue (closes the old DB connection, opens the new one, rebuilds the pack/tag/type lists) without restarting the app.
 
 Filter panel (search / type / format / pack / tag) on the left, a thumbnail grid in the middle, and a tagging panel at the bottom for the selected asset. **Search** filters live as you type, matching anywhere in the filename (case-insensitive) — same matching as the CLI's `list --search`. **Format** lists whatever file extensions actually exist in the catalogue right now (e.g. `FBX`, `GLB`, `PNG`) — it updates immediately after a conversion changes an asset's extension, without resetting the other filters. The grid supports multi-select (Ctrl/Shift-click, or **Edit > Select All** / Ctrl+A):
 
@@ -240,11 +238,15 @@ Filter panel (search / type / format / pack / tag) on the left, a thumbnail grid
 
 **The Pack: line is a link** — clicking the pack name filters the grid down to just that pack (selects it in the Pack list on the left), a quick way to jump from "this one asset looks off" to "let me see the whole pack it came from."
 
+**The Export button** (bottom-right of the detail panel, for either a single asset or a multi-selection) is a smart shortcut for "send this to a project" that gets faster the more you use it. The first time, it reads **Export to Project...** and clicking it opens the same dialog as **Tools > Export Selected to Project...**. After any successful export (from this button, that dialog, or the right-click menu), it remembers the project folder and relabels itself **Export to `<project name>`** — clicking it again re-exports the current selection straight there, no dialog. Its dropdown arrow lists every recently used project (newest first, one click each) plus a **Browse for Project...** entry that always reopens the full dialog, so picking a new destination is never more than one extra click away even once the button has a memory.
+
 **Tools > Tag Pack...** cascades a tag onto an entire pack from a dropdown (defaults to whatever pack is currently filtered), same as the CLI's `tag pack` — the third way to select "how much" to tag, alongside one asset and a multi-selection.
 
 **Ingest Pack...** is a toolbar button, not tucked in a menu — ingest is the most common action, so it's the first thing visible under the menu bar. One **Browse Folder/Zip...** button opens a small custom browser scoped to the staging folder, listing subfolders *and* `.zip` files side by side — either one double-clickable as a pack source (a `.zip` picked this way is auto-extracted at ingest time, same as `ingest`'s zip auto-detection on the CLI). Single-clicking an entry to highlight it, then pressing **Select**, works too, for either a folder or a `.zip` — picking that entry directly without entering it (a folder this way, not its contents); with nothing highlighted, Select picks whatever folder you're currently browsing. A custom browser rather than a native picker is a real Qt/OS limitation, not a design choice: a native picker is either a folder picker or a file picker, never both — there's no stock dialog that shows folders and files together and lets either be the result. Picking a source refreshes the suggested **Pack name** to match it, unless you've typed your own name first — re-picking a *different* source no longer leaves a stale name behind (a real bug, now fixed: it used to only fill the field once, the first time it was empty, so choosing another source afterward silently kept whatever was already there).
 
-Once accepted, ingest runs as a single background job (which also archives every ingested asset into the library, reported in the completion message), and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
+Once accepted, ingest runs as a single background job (which also archives every ingested asset into the library, reported in the completion message), with a live progress feed of what's happening file by file (see "Background jobs show a live progress feed" below) — and re-ingesting an existing pack with different metadata only updates the fields that changed (same delta behavior as the CLI).
+
+**When ingest triggers a pack's first-ever calibration preview** (see "Thumbnails are generated automatically" above), a **Calibration Preview** dialog opens instead of just reporting it in the completion message: the rendered preview thumbnail, the same up axis/scale/material fallback fields as Edit Pack Metadata, a **Re-render Preview** button to try corrections against just that one asset as many times as needed, then **Render Remaining N Model(s)** to render the rest of the pack once it looks right, **Skip for Now** to leave them `pending` (same as closing the dialog), or **Cancel Import (Remove This Pack)** to undo the ingest entirely — the catalogue entries, thumbnails, and archived library copies it just created (never the original files in staging, same guarantee as `pack remove`).
 
 A separate **Browse Zip...** option (for a `.zip` living *outside* the staging folder, e.g. still in Downloads) used to exist alongside Browse Folder/Zip; it's been removed as a rarely-needed extra option in the UI — the CLI's `ingest-zip <path>` still covers that exact case (extracts anywhere on disk into staging, then ingests), it just isn't duplicated in the ingest dialog anymore.
 
@@ -252,10 +254,10 @@ A separate **Browse Zip...** option (for a `.zip` living *outside* the staging f
 
 - **Edit > Select All** (Ctrl+A) and **Edit > Remove Selected...** (Delete key) — pure catalogue-editing, scoped to the current grid selection. Remove deletes the catalogue database rows, thumbnails, and any archived library copy for whatever's selected — one, many, or all of it; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
 - **Tools > Convert Selected to glTF (.glb)...** — the menu-bar equivalent of the grid's right-click Convert action (below), for when you don't want to right-click: converts whatever's selected and eligible (model assets not already `.glb`; anything else in the selection is silently skipped, same as the CLI's multi `--asset-id`), dispatching to the single- or batch-conversion path depending on how many end up eligible.
-- **Tools > Import Selected to Project...** copies whatever's selected into a target project — the UI counterpart to the CLI's `import`, operating on the current grid selection instead of a `--pack`/`--type`/`--tag` filter. The dialog asks for a project folder and destination subfolder (default `imported_assets`), *unless* Godot export is enabled and a project is already remembered, in which case the folder field shows up locked to that path (change it in Settings instead) — see "Godot export" above.
+- **Tools > Export Selected to Project...** copies whatever's selected out to a target project — the UI counterpart to the CLI's `export`, operating on the current grid selection instead of a `--pack`/`--type`/`--tag` filter. The dialog asks for a project folder (pre-filled with the most recently used one, if any — always editable) and destination subfolder (default `exported_assets`). For repeat exports to the same project, the detail panel's **Export** button (described above) skips this dialog entirely.
 - **Tools > Tag Pack...** (described above) and **Tools > Clean Up Pre-Conversion Assets...** — confirms every pending glTF conversion at once (see "Converting models to glTF" above), permanently deleting each one's pre-conversion original (staging + library copy) while keeping the converted `.glb`, after a confirmation dialog stating the count. This is the bulk counterpart to the per-asset Revert/Delete buttons in the detail panel; it's a no-op with an info message if nothing is pending.
 
-**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Import to Project...**, and Delete from Library. Multiple selected: **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Import N to Project...**, and Delete (labeled with the total count).
+**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Export to Project...**, and Delete from Library. Multiple selected: **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Export N to Project...**, and Delete (labeled with the total count).
 
 **Right-click a pack in the Pack list** for **Edit Pack Metadata...** (name, creator, licence, source URL, and render corrections all in one dialog — the same fields as `pack set-metadata`/`rename`/`set-corrections` combined, pre-filled with the pack's current values; renaming moves its archived library folder to match, same as the CLI) and **Remove Pack '\<name\>'...** (deletes every asset in the pack, the pack entry itself, and its whole archived library folder, after a confirmation naming the asset count — the UI counterpart to `pack remove`). Right-clicking "All packs" shows no menu, since it isn't a real pack.
 
@@ -263,9 +265,13 @@ A separate **Browse Zip...** option (for a `.zip` living *outside* the staging f
 
 Editing any of the above updates the affected filter lists (and tag usage counts / the Format list, where relevant) in place, without resetting whatever else you had filtered to.
 
-**What's intentionally *not* editable from the app:** fields the catalogue derives from the real file on disk (`relative_path`, `filename`, `extension`, `content_hash`, `file_size`, `asset_type`, `thumbnail_status`) — hand-editing those would desync the database from reality; the correct way to change them is to actually change the file (re-ingest, or **Convert to glTF**), not overwrite the record. Import history (`imports`) is an audit log, not metadata — it's meant to answer "what happened," so it's shown (`imports` / `list --unused`) but not edited; it's still cleared automatically for an asset that gets removed, same as its tags.
+**What's intentionally *not* editable from the app:** fields the catalogue derives from the real file on disk (`relative_path`, `filename`, `extension`, `content_hash`, `file_size`, `asset_type`, `thumbnail_status`) — hand-editing those would desync the database from reality; the correct way to change them is to actually change the file (re-ingest, or **Convert to glTF**), not overwrite the record. Export history (`exports`) is an audit log, not metadata — it's meant to answer "what happened," so it's shown (`exports` / `list --unused`) but not edited; it's still cleared automatically for an asset that gets removed, same as its tags.
 
-Thumbnails now render automatically as part of ingest (dispatched by type — see "Thumbnails are generated automatically" above), so **Thumbnails > Generate 2D Thumbnails** / **Generate Audio Thumbnails** / **Generate 3D Thumbnails via Blender** are for the manual cases: re-rendering after `--force`-worthy changes, previewing per-pack corrections, or catching a pack ingested before this existed. They run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected), on a background thread — the window stays responsive while Blender works — with a progress dialog until done.
+Thumbnails now render automatically as part of ingest (dispatched by type — see "Thumbnails are generated automatically" above), so **Thumbnails > Generate 2D Thumbnails** / **Generate Audio Thumbnails** / **Generate 3D Thumbnails via Blender** are for the manual cases: re-rendering after `--force`-worthy changes, previewing per-pack corrections, or catching a pack ingested before this existed. They run against whatever pack is currently selected in the filter panel (or all packs, if "All packs" is selected), on a background thread — the window stays responsive while Blender works.
+
+### Background jobs show a live progress feed
+
+Every background job (ingest, exporting, removing, converting, and all three thumbnail-generation commands) shows a small modal window with an indeterminate progress bar and a live-appending text log underneath it, describing what's happening to which file as it happens (e.g. "Hashing dragon.fbx...", "Archiving dragon.fbx to library...", "Rendered thumbnail for dragon.fbx (3/12)") rather than just a bare spinner — useful for seeing that a long-running job (especially Blender-based ones) is actually making progress, and roughly how far along it is, rather than wondering whether it's hung.
 
 Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem, raw SQL, or `ingest`/`thumbnails`/`blender_render` directly, per the seed doc's architecture rule (§3). Ingest and thumbnail generation from the UI go through `Catalogue.*_bg()` methods, which each open and close their own SQLite connection rather than sharing the main one — SQLite connections aren't safe to share across threads, and these run on a background `QThread`. The CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
 
@@ -279,9 +285,9 @@ Build order from the seed doc, tracked here:
 - [x] Blender thumbnails
 - [x] Qt UI (filter panel, thumbnail grid, tagging panel)
 - [x] Per-pack calibration
-- [x] Import + tracking
+- [x] Export + tracking
 
-All seven build-order steps from the seed doc are now done, and every one of them (ingest, tagging, calibration, and now import) is also reachable from the UI, not just the CLI — the UI is a full front end, not just a browsing/tagging viewer.
+All seven build-order steps from the seed doc are now done, and every one of them (ingest, tagging, calibration, and now export) is also reachable from the UI, not just the CLI — the UI is a full front end, not just a browsing/tagging viewer.
 
 ## License
 

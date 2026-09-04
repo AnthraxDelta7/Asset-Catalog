@@ -25,10 +25,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressDialog,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -263,16 +265,31 @@ class ThumbnailGrid(QListWidget):
         self.setCurrentItem(None)
 
     def _load_thumbnail(self, asset: AssetSummary, catalogue: Catalogue) -> QPixmap:
+        # Scale to the icon's PHYSICAL pixel size (logical size * the
+        # screen's device pixel ratio), then tag the result with that same
+        # ratio via setDevicePixelRatio -- without this, a 128x128-pixel
+        # image gets stretched by Qt to fill a 128-*logical*-pixel icon
+        # slot on any scaled/HiDPI display (e.g. Windows' common 125%/150%
+        # scaling), which is what actually causes visible blur: the source
+        # thumbnails are rendered at 256x256, plenty of real resolution for
+        # this, the blur was purely from Qt not being told about the ratio.
+        dpr = self.devicePixelRatioF()
+        physical_size = QSize(
+            round(THUMBNAIL_ICON_SIZE.width() * dpr), round(THUMBNAIL_ICON_SIZE.height() * dpr)
+        )
         path = catalogue.thumbnail_path_for(asset.content_hash)
         if path is not None:
             pixmap = QPixmap(str(path))
             if not pixmap.isNull():
-                return pixmap.scaled(
-                    THUMBNAIL_ICON_SIZE,
+                scaled = pixmap.scaled(
+                    physical_size,
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
                 )
-        placeholder = QPixmap(THUMBNAIL_ICON_SIZE)
+                scaled.setDevicePixelRatio(dpr)
+                return scaled
+        placeholder = QPixmap(physical_size)
+        placeholder.setDevicePixelRatio(dpr)
         placeholder.fill(Qt.darkGray)
         return placeholder
 
@@ -303,6 +320,8 @@ class DetailPanel(QWidget):
         on_revert_conversion,
         on_cleanup_conversion,
         on_filter_by_pack,
+        on_export_browse,
+        on_quick_export,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -314,6 +333,8 @@ class DetailPanel(QWidget):
         self._on_revert_conversion = on_revert_conversion
         self._on_cleanup_conversion = on_cleanup_conversion
         self._on_filter_by_pack = on_filter_by_pack
+        self._on_export_browse = on_export_browse
+        self._on_quick_export = on_quick_export
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -382,6 +403,22 @@ class DetailPanel(QWidget):
         add_row.addWidget(self.add_button)
         layout.addLayout(add_row)
 
+        # A "smart" export button, right-aligned at the bottom of the panel:
+        # a plain click exports the current selection straight to the most
+        # recently used project (no dialog), and its own dropdown arrow
+        # lists every other recent project plus a "Browse for Project..."
+        # entry for picking a new one -- see _update_export_button, which
+        # rebuilds the label/menu from Settings.recent_export_projects.
+        export_row = QHBoxLayout()
+        export_row.addStretch(1)
+        self.export_button = QToolButton()
+        self.export_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.export_button.clicked.connect(self._on_export_button_clicked)
+        self.export_menu = QMenu(self.export_button)
+        self.export_button.setMenu(self.export_menu)
+        export_row.addWidget(self.export_button)
+        layout.addLayout(export_row)
+
         self._set_idle_state()
 
     def refresh_tag_completer(self) -> None:
@@ -392,6 +429,40 @@ class DetailPanel(QWidget):
         self._catalogue = catalogue
         self.refresh_tag_completer()
 
+    def refresh_export_button(self) -> None:
+        """Called by MainWindow after any successful export (however it was
+        triggered) so the button's label/menu reflect the latest recent-
+        projects list immediately, without waiting for the selection to
+        change.
+        """
+        self._update_export_button(self.export_button.isEnabled())
+
+    def _update_export_button(self, enabled: bool) -> None:
+        self.export_button.setEnabled(enabled)
+        recent_projects = settings.load().recent_export_projects
+        self.export_menu.clear()
+        if recent_projects:
+            for path in recent_projects:
+                label = Path(path).name or path
+                action = self.export_menu.addAction(f"Export to {label}")
+                action.setToolTip(path)
+                action.triggered.connect(lambda checked=False, p=path: self._on_quick_export(p))
+            self.export_menu.addSeparator()
+        browse_action = self.export_menu.addAction("Browse for Project...")
+        browse_action.triggered.connect(lambda checked=False: self._on_export_browse())
+
+        if recent_projects:
+            self.export_button.setText(f"Export to {Path(recent_projects[0]).name}")
+        else:
+            self.export_button.setText("Export to Project...")
+
+    def _on_export_button_clicked(self) -> None:
+        recent_projects = settings.load().recent_export_projects
+        if recent_projects:
+            self._on_quick_export(recent_projects[0])
+        else:
+            self._on_export_browse()
+
     def _set_idle_state(self) -> None:
         self.tag_list.setEnabled(False)
         self.remove_button.setEnabled(False)
@@ -400,6 +471,7 @@ class DetailPanel(QWidget):
         self.show_in_library_button.setEnabled(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
+        self._update_export_button(False)
 
     def clear_selection(self) -> None:
         self._asset_id = None
@@ -444,6 +516,7 @@ class DetailPanel(QWidget):
         self.show_in_library_button.setEnabled(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
+        self._update_export_button(True)
 
     def show_asset(self, asset: AssetSummary) -> None:
         self._asset_id = asset.id
@@ -465,6 +538,7 @@ class DetailPanel(QWidget):
         pending = self._catalogue.has_pending_conversion(asset.id)
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
+        self._update_export_button(True)
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
@@ -561,33 +635,14 @@ class SettingsDialog(QDialog):
         blender_row.addWidget(blender_auto)
         form.addRow("Blender path:", blender_row)
 
-        self.godot_enabled_check = QCheckBox("Enable Godot export")
-        self.godot_enabled_check.setChecked(s.godot_export_enabled)
-        self.godot_enabled_check.toggled.connect(self._on_godot_enabled_toggled)
-        form.addRow("", self.godot_enabled_check)
-
-        self.godot_project_edit = QLineEdit(s.godot_project_path or "")
-        godot_browse_button = QPushButton("Browse...")
-        godot_browse_button.clicked.connect(self._browse_godot_project)
-        godot_clear_button = QPushButton("Clear")
-        godot_clear_button.clicked.connect(lambda: self.godot_project_edit.clear())
-        self.godot_project_row = QHBoxLayout()
-        self.godot_project_row.addWidget(self.godot_project_edit)
-        self.godot_project_row.addWidget(godot_browse_button)
-        self.godot_project_row.addWidget(godot_clear_button)
-        form.addRow("Godot project folder:", self.godot_project_row)
-        self._on_godot_enabled_toggled(s.godot_export_enabled)
-
         layout.addLayout(form)
 
         hint = QLabel(
             "Staging folder: where unprocessed packs sit before ingest.\n"
             "Library folder: portable -- holds catalogue.db and thumbnails/. Point at an "
             "existing one (copied from another machine, a shared drive) to pick it up as-is.\n"
-            "Godot export: off by default so cataloguing STLs or another pipeline never "
-            "shows Godot-specific UI. Once enabled, the first Import remembers whatever "
-            "project folder you pick here or in that dialog -- every later Import reuses "
-            "it automatically until you clear or change it here."
+            "Export to Project remembers your recently used project folders on its own -- "
+            "nothing to configure here."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -625,20 +680,6 @@ class SettingsDialog(QDialog):
             return
         self.blender_edit.setText(str(found))
 
-    def _on_godot_enabled_toggled(self, checked: bool) -> None:
-        self.godot_project_edit.setEnabled(checked)
-        for i in range(self.godot_project_row.count()):
-            widget = self.godot_project_row.itemAt(i).widget()
-            if widget is not None:
-                widget.setEnabled(checked)
-
-    def _browse_godot_project(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Select Godot project folder", self.godot_project_edit.text()
-        )
-        if chosen:
-            self.godot_project_edit.setText(chosen)
-
     def _on_accept(self) -> None:
         if not self.staging_edit.text().strip() or not self.library_edit.text().strip():
             QMessageBox.warning(self, "Settings", "Staging folder and library folder are both required.")
@@ -647,8 +688,6 @@ class SettingsDialog(QDialog):
         s.staging_folder = self.staging_edit.text().strip()
         s.library_folder = self.library_edit.text().strip()
         s.blender_path = self.blender_edit.text().strip() or None
-        s.godot_export_enabled = self.godot_enabled_check.isChecked()
-        s.godot_project_path = self.godot_project_edit.text().strip() or None
         settings.save(s)
         self.accept()
 
@@ -941,6 +980,57 @@ class TagPackDialog(QDialog):
         self.accept()
 
 
+class CorrectionsFormWidget(QWidget):
+    """The up_axis/scale/material_fallback render-correction fields, shared
+    by PackEditDialog and the post-ingest calibration review dialog so both
+    edit the exact same fields the same way.
+    """
+
+    def __init__(self, initial: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self.up_axis_combo = QComboBox()
+        self.up_axis_combo.addItem("(default)", None)
+        self.up_axis_combo.addItem("Y_UP", "Y_UP")
+        self.up_axis_combo.addItem("Z_UP", "Z_UP")
+        index = self.up_axis_combo.findData(initial.get("up_axis"))
+        self.up_axis_combo.setCurrentIndex(index if index >= 0 else 0)
+        form.addRow("Up axis:", self.up_axis_combo)
+
+        self.scale_edit = QLineEdit()
+        if "scale" in initial:
+            self.scale_edit.setText(str(initial["scale"]))
+        self.scale_edit.setPlaceholderText("(default) e.g. 1.0")
+        form.addRow("Scale:", self.scale_edit)
+
+        self.material_fallback_check = QCheckBox("Replace materials with a flat gray fallback")
+        self.material_fallback_check.setChecked(bool(initial.get("material_fallback")))
+        form.addRow("", self.material_fallback_check)
+
+    def read(self) -> tuple[dict | None, str | None]:
+        """Returns (corrections, error) -- corrections is None and error is
+        a human-readable message if the scale field doesn't parse.
+        """
+        scale_text = self.scale_edit.text().strip()
+        scale_value: float | None = None
+        if scale_text:
+            try:
+                scale_value = float(scale_text)
+            except ValueError:
+                return None, "Scale must be a number."
+
+        corrections: dict = {}
+        up_axis = self.up_axis_combo.currentData()
+        if up_axis:
+            corrections["up_axis"] = up_axis
+        if scale_value is not None:
+            corrections["scale"] = scale_value
+        corrections["material_fallback"] = self.material_fallback_check.isChecked()
+        return corrections, None
+
+
 class PackEditDialog(QDialog):
     """Everything about a pack that's stored in the database and editable
     after the fact -- name, creator/licence/source URL, and render
@@ -981,28 +1071,9 @@ class PackEditDialog(QDialog):
         corrections_label = QLabel("Render corrections (applied to Blender thumbnails/conversions):")
         corrections_label.setWordWrap(True)
         layout.addWidget(corrections_label)
-        corrections_form = QFormLayout()
 
-        self.up_axis_combo = QComboBox()
-        self.up_axis_combo.addItem("(default)", None)
-        self.up_axis_combo.addItem("Y_UP", "Y_UP")
-        self.up_axis_combo.addItem("Z_UP", "Z_UP")
-        current_up_axis = detail.corrections.get("up_axis")
-        index = self.up_axis_combo.findData(current_up_axis)
-        self.up_axis_combo.setCurrentIndex(index if index >= 0 else 0)
-        corrections_form.addRow("Up axis:", self.up_axis_combo)
-
-        self.scale_edit = QLineEdit()
-        if "scale" in detail.corrections:
-            self.scale_edit.setText(str(detail.corrections["scale"]))
-        self.scale_edit.setPlaceholderText("(default) e.g. 1.0")
-        corrections_form.addRow("Scale:", self.scale_edit)
-
-        self.material_fallback_check = QCheckBox("Replace materials with a flat gray fallback")
-        self.material_fallback_check.setChecked(bool(detail.corrections.get("material_fallback")))
-        corrections_form.addRow("", self.material_fallback_check)
-
-        layout.addLayout(corrections_form)
+        self.corrections_widget = CorrectionsFormWidget(detail.corrections)
+        layout.addWidget(self.corrections_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Save")
@@ -1020,22 +1091,10 @@ class PackEditDialog(QDialog):
             QMessageBox.warning(self, "Edit Pack", "Pack name can't be blank.")
             return
 
-        scale_text = self.scale_edit.text().strip()
-        scale_value: float | None = None
-        if scale_text:
-            try:
-                scale_value = float(scale_text)
-            except ValueError:
-                QMessageBox.warning(self, "Edit Pack", "Scale must be a number.")
-                return
-
-        corrections: dict = {}
-        up_axis = self.up_axis_combo.currentData()
-        if up_axis:
-            corrections["up_axis"] = up_axis
-        if scale_value is not None:
-            corrections["scale"] = scale_value
-        corrections["material_fallback"] = self.material_fallback_check.isChecked()
+        corrections, error = self.corrections_widget.read()
+        if error:
+            QMessageBox.warning(self, "Edit Pack", error)
+            return
 
         self.new_name = new_name
         self.creator = self.creator_edit.text().strip() or None
@@ -1085,33 +1144,31 @@ class TagEditDialog(QDialog):
         self.accept()
 
 
-class ImportDialog(QDialog):
-    """Copies the current grid selection into a target project. Godot
-    export (off by default -- see Settings) changes exactly one thing:
-    once a project folder has been picked once, it's shown here locked
-    (read-only) and reused for every later import automatically, instead
-    of asking again each time. Turning Godot export off, or clearing/
-    changing the remembered path in Settings, goes right back to a plain
-    per-import folder picker -- nothing here is Godot-specific beyond that
-    one convenience, so a non-Godot pipeline never has to think about it.
+class ExportDialog(QDialog):
+    """Copies the current grid selection out to a target project. Pre-fills
+    the project folder with the most recently used one, if any (see
+    Settings.recent_export_projects) -- always editable, never locked;
+    unlike the retired Godot-specific version of this dialog, there's no
+    opt-in toggle and no read-only trap. The DetailPanel's Export button
+    (see below) is the fast path for one-click re-use of a recent project
+    without opening this dialog at all; this dialog is for picking a
+    different one, or setting a non-default destination subfolder.
     """
 
     def __init__(self, asset_count: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Import to Project")
-        self.resize(460, 220)
+        self.setWindowTitle("Export to Project")
+        self.resize(460, 180)
         self.project_root: Path | None = None
-        self.dest_subfolder: str = "imported_assets"
+        self.dest_subfolder: str = "exported_assets"
 
-        s = settings.load()
-        self._godot_enabled = s.godot_export_enabled
-        self._godot_locked = s.godot_export_enabled and bool(s.godot_project_path)
+        recent_projects = settings.load().recent_export_projects
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Import {asset_count} asset(s) into:"))
+        layout.addWidget(QLabel(f"Export {asset_count} asset(s) into:"))
 
         form = QFormLayout()
-        self.project_edit = QLineEdit()
+        self.project_edit = QLineEdit(recent_projects[0] if recent_projects else "")
         self.browse_button = QPushButton("Browse...")
         self.browse_button.clicked.connect(self._browse_project)
         project_row = QHBoxLayout()
@@ -1119,30 +1176,12 @@ class ImportDialog(QDialog):
         project_row.addWidget(self.browse_button)
         form.addRow("Project folder:", project_row)
 
-        self.dest_subfolder_edit = QLineEdit("imported_assets")
+        self.dest_subfolder_edit = QLineEdit("exported_assets")
         form.addRow("Destination subfolder:", self.dest_subfolder_edit)
         layout.addLayout(form)
 
-        if self._godot_locked:
-            self.project_edit.setText(s.godot_project_path)
-            self.project_edit.setReadOnly(True)
-            self.browse_button.setEnabled(False)
-            hint = QLabel(
-                "Using your configured Godot project. Change or clear it in "
-                "File > Settings if you need a different destination."
-            )
-            hint.setWordWrap(True)
-            layout.addWidget(hint)
-        elif self._godot_enabled:
-            hint = QLabel(
-                "Godot export is enabled but no project is set yet -- pick one below; "
-                "it'll be remembered for every future import until changed in Settings."
-            )
-            hint.setWordWrap(True)
-            layout.addWidget(hint)
-
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Import")
+        buttons.button(QDialogButtonBox.Ok).setText("Export")
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1157,28 +1196,22 @@ class ImportDialog(QDialog):
     def _on_accept(self) -> None:
         text = self.project_edit.text().strip()
         if not text:
-            QMessageBox.warning(self, "Import to Project", "Pick a project folder.")
+            QMessageBox.warning(self, "Export to Project", "Pick a project folder.")
             return
         project_root = Path(text)
         if not project_root.is_dir():
-            QMessageBox.warning(self, "Import to Project", f"Folder not found: {project_root}")
+            QMessageBox.warning(self, "Export to Project", f"Folder not found: {project_root}")
             return
 
-        if self._godot_enabled and not self._godot_locked:
-            # First time defining it (Godot export was just turned on with
-            # nothing set yet) -- remember it for every future import.
-            s = settings.load()
-            s.godot_project_path = str(project_root)
-            settings.save(s)
-
         self.project_root = project_root
-        self.dest_subfolder = self.dest_subfolder_edit.text().strip() or "imported_assets"
+        self.dest_subfolder = self.dest_subfolder_edit.text().strip() or "exported_assets"
         self.accept()
 
 
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)
 
     def __init__(self, fn) -> None:
         super().__init__()
@@ -1186,11 +1219,235 @@ class _BackgroundWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = self._fn()
+            result = self._fn(self.progress.emit)
         except Exception as exc:  # noqa: BLE001 -- reported to the UI, not swallowed
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result)
+
+
+class ProgressLogDialog(QDialog):
+    """Modal dialog shown during a background job: an indeterminate progress
+    bar plus a live-appending text feed of what's happening, file by file --
+    replaces a bare spinner so a long ingest/thumbnail/import/removal run
+    isn't just a frozen-looking window.
+    """
+
+    def __init__(self, title: str, initial_text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(520, 320)
+
+        layout = QVBoxLayout(self)
+        self._bar = QProgressBar(self)
+        self._bar.setRange(0, 0)
+        layout.addWidget(self._bar)
+
+        self._log = QPlainTextEdit(self)
+        self._log.setReadOnly(True)
+        layout.addWidget(self._log)
+
+        if initial_text:
+            self.append(initial_text)
+
+    def append(self, text: str) -> None:
+        self._log.appendPlainText(text)
+        scrollbar = self._log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+
+class CalibrationReviewDialog(QDialog):
+    """Shown right after a pack's first-ever model ingest, when exactly one
+    model was rendered as a calibration preview (see
+    blender_render.generate_pack_thumbnails) and the rest were deliberately
+    left un-rendered. Lets the user check the preview, adjust render
+    corrections and re-render it in place as many times as needed, then
+    choose how to proceed with the remaining models -- rather than just
+    reporting the situation in a text message and requiring a separate trip
+    through Edit Pack Metadata plus a menu action to act on it.
+
+    self.result_action is one of "render_all", "skip", or "cancelled" once
+    the dialog closes -- callers should treat a rejected/closed-via-X dialog
+    the same as "skip" (nothing further needs undoing; the pack was already
+    fully ingested before this dialog ever opened).
+    """
+
+    def __init__(
+        self,
+        catalogue: Catalogue,
+        pack_id: int,
+        pack_name: str,
+        preview_asset_id: int,
+        models_pending: int,
+        corrections: dict,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self._pack_id = pack_id
+        self._pack_name = pack_name
+        self._preview_asset_id = preview_asset_id
+        self._models_pending = models_pending
+        self._worker: _BackgroundWorker | None = None
+        self.result_action = "skip"
+        self.corrections = dict(corrections)
+
+        self.setWindowTitle(f"Calibration Preview -- {pack_name}")
+        self.resize(440, 620)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "This pack's models haven't been rendered before, so only one was "
+            "rendered as a preview. Check it below -- if the orientation, scale, "
+            "or materials look wrong, adjust the corrections and re-render before "
+            f"rendering the remaining {models_pending} model(s)."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._preview_label = QLabel()
+        self._preview_label.setAlignment(Qt.AlignCenter)
+        self._preview_label.setMinimumHeight(256)
+        self._preview_label.setStyleSheet("background: #202020;")
+        layout.addWidget(self._preview_label)
+        self._reload_preview()
+
+        self.corrections_widget = CorrectionsFormWidget(corrections)
+        layout.addWidget(self.corrections_widget)
+
+        self._rerender_button = QPushButton("Re-render Preview")
+        self._rerender_button.clicked.connect(self._on_rerender)
+        layout.addWidget(self._rerender_button)
+
+        proceed_row = QHBoxLayout()
+        self._render_all_button = QPushButton(f"Render Remaining {models_pending} Model(s)")
+        self._render_all_button.clicked.connect(self._on_render_all)
+        proceed_row.addWidget(self._render_all_button)
+
+        skip_button = QPushButton("Skip for Now")
+        skip_button.clicked.connect(self._on_skip)
+        proceed_row.addWidget(skip_button)
+        layout.addLayout(proceed_row)
+
+        cancel_button = QPushButton("Cancel Import (Remove This Pack)")
+        cancel_button.clicked.connect(self._on_cancel_import)
+        layout.addWidget(cancel_button)
+
+    def _reload_preview(self) -> None:
+        asset = self._catalogue.get_asset(self._preview_asset_id)
+        path = self._catalogue.thumbnail_path_for(asset.content_hash) if asset else None
+        if path is not None:
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                dpr = self.devicePixelRatioF()
+                physical_size = QSize(round(256 * dpr), round(256 * dpr))
+                scaled = pixmap.scaled(physical_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled.setDevicePixelRatio(dpr)
+                self._preview_label.setPixmap(scaled)
+                return
+        self._preview_label.setText("(no preview available)")
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        self._rerender_button.setEnabled(enabled)
+        self._render_all_button.setEnabled(enabled)
+
+    def _run_job(self, fn, progress_text: str, on_ok) -> None:
+        self._set_buttons_enabled(False)
+        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
+        progress.show()
+
+        worker = _BackgroundWorker(fn)
+
+        def handle_ok(result) -> None:
+            progress.close()
+            self._set_buttons_enabled(True)
+            on_ok(result)
+
+        def handle_fail(message: str) -> None:
+            progress.close()
+            self._set_buttons_enabled(True)
+            QMessageBox.critical(self, "Asset Catalogue", message)
+
+        worker.progress.connect(progress.append, Qt.QueuedConnection)
+        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
+        worker.failed.connect(handle_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _on_rerender(self) -> None:
+        corrections, error = self.corrections_widget.read()
+        if error:
+            QMessageBox.warning(self, "Asset Catalogue", error)
+            return
+
+        def job(report):
+            self._catalogue.set_pack_corrections_bg(self._pack_id, corrections)
+            return self._catalogue.regenerate_model_thumbnail_bg(
+                self._preview_asset_id, on_progress=report
+            )
+
+        def on_ok(stats) -> None:
+            self.corrections = corrections
+            self._reload_preview()
+            if stats.failed:
+                QMessageBox.warning(
+                    self, "Asset Catalogue", "Re-render failed -- check the pack's source files."
+                )
+
+        self._run_job(job, "Re-rendering preview...", on_ok)
+
+    def _on_render_all(self) -> None:
+        try:
+            blender_exe = self._catalogue.resolve_blender()
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Asset Catalogue", str(exc))
+            return
+
+        def job(report):
+            return self._catalogue.generate_model_thumbnails_bg(
+                blender_exe, pack=self._pack_name, on_progress=report
+            )
+
+        def on_ok(stats) -> None:
+            QMessageBox.information(
+                self,
+                "Asset Catalogue",
+                f"Model thumbnails: {stats.generated} generated, "
+                f"{stats.already_done} already done, {stats.failed} failed",
+            )
+            self.result_action = "render_all"
+            self.accept()
+
+        self._run_job(job, f"Rendering {self._models_pending} model thumbnail(s)...", on_ok)
+
+    def _on_skip(self) -> None:
+        self.result_action = "skip"
+        self.accept()
+
+    def _on_cancel_import(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Cancel Import",
+            f"Remove '{self._pack_name}' and everything just ingested? This deletes its "
+            "catalogue entries, thumbnails, and archived library copies. Files in the "
+            "staging folder are never touched.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def job(report):
+            return self._catalogue.remove_pack_bg(self._pack_id, on_progress=report)
+
+        def on_ok(_stats) -> None:
+            self.result_action = "cancelled"
+            self.accept()
+
+        self._run_job(job, f"Removing '{self._pack_name}'...", on_ok)
 
 
 class MainWindow(QMainWindow):
@@ -1227,6 +1484,8 @@ class MainWindow(QMainWindow):
             self._handle_revert_conversion,
             self._handle_cleanup_conversion,
             self._filter_by_pack,
+            self._export_selected_to_project,
+            self._quick_export,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -1273,8 +1532,8 @@ class MainWindow(QMainWindow):
         tools_menu = menu_bar.addMenu("&Tools")
         convert_action = tools_menu.addAction("Convert Selected to glTF (.glb)...")
         convert_action.triggered.connect(self._convert_selected_to_gltf)
-        import_action = tools_menu.addAction("Import Selected to Project...")
-        import_action.triggered.connect(self._import_selected_to_project)
+        export_action = tools_menu.addAction("Export Selected to Project...")
+        export_action.triggered.connect(self._export_selected_to_project)
         tools_menu.addSeparator()
         tag_pack_action = tools_menu.addAction("Tag Pack...")
         tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
@@ -1390,12 +1649,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        job = lambda: self._catalogue.ingest_pack_bg(
+        job = lambda report: self._catalogue.ingest_pack_bg(
             dialog.pack_folder_name,
             dialog.pack_name,
             dialog.creator,
             dialog.licence,
             dialog.source_url,
+            on_progress=report,
         )
 
         def format_result(result: tuple) -> str:
@@ -1424,26 +1684,43 @@ class MainWindow(QMainWindow):
             )
             if stats.blender_unavailable_reason:
                 message += f"\n3D thumbnails skipped: {stats.blender_unavailable_reason}"
-            if stats.calibration_preview:
-                message += (
-                    f"\nRendered 1 model as a calibration preview -- check it, adjust "
-                    f"render corrections in Edit Pack Metadata if needed, then use "
-                    f"Thumbnails > Generate 3D Thumbnails to render the remaining "
-                    f"{stats.models_pending} model(s)"
-                )
             return message
+
+        def on_complete(result: tuple) -> None:
+            stats, _updated_fields = result
+            if stats.calibration_preview and stats.preview_asset_id is not None:
+                self._show_calibration_review(dialog.pack_name, stats)
+            else:
+                QMessageBox.information(self, "Asset Catalogue", format_result(result))
+            self._rebuild_filter_panel()
 
         self._run_background_job(
             job,
             f"Ingesting '{dialog.pack_name}'...",
             format_result,
             self._rebuild_filter_panel,
+            on_complete=on_complete,
         )
+
+    def _show_calibration_review(self, pack_name: str, stats) -> None:
+        detail = self._catalogue.get_pack_detail(pack_name)
+        if detail is None:
+            return
+        dialog = CalibrationReviewDialog(
+            self._catalogue,
+            detail.id,
+            pack_name,
+            stats.preview_asset_id,
+            stats.models_pending,
+            detail.corrections,
+            self,
+        )
+        dialog.exec()
 
     def _generate_2d_thumbnails(self) -> None:
         pack = self.filter_panel.selected_pack()
         self._run_background_job(
-            lambda: self._catalogue.generate_2d_thumbnails_bg(pack=pack),
+            lambda report: self._catalogue.generate_2d_thumbnails_bg(pack=pack, on_progress=report),
             "Generating 2D thumbnails...",
             lambda stats: (
                 f"Thumbnails: {stats.generated} generated, "
@@ -1455,7 +1732,7 @@ class MainWindow(QMainWindow):
     def _generate_audio_thumbnails(self) -> None:
         pack = self.filter_panel.selected_pack()
         self._run_background_job(
-            lambda: self._catalogue.generate_audio_thumbnails_bg(pack=pack),
+            lambda report: self._catalogue.generate_audio_thumbnails_bg(pack=pack, on_progress=report),
             "Generating audio thumbnails...",
             lambda stats: (
                 f"Audio thumbnails: {stats.generated} generated, "
@@ -1472,7 +1749,9 @@ class MainWindow(QMainWindow):
             return
         pack = self.filter_panel.selected_pack()
         self._run_background_job(
-            lambda: self._catalogue.generate_model_thumbnails_bg(blender_exe, pack=pack),
+            lambda report: self._catalogue.generate_model_thumbnails_bg(
+                blender_exe, pack=pack, on_progress=report
+            ),
             "Generating 3D thumbnails via Blender... this can take a while.",
             lambda stats: (
                 f"Model thumbnails: {stats.generated} generated, "
@@ -1490,7 +1769,7 @@ class MainWindow(QMainWindow):
             return
 
         self._run_background_job(
-            lambda: self._catalogue.tag_pack_bg(dialog.pack_name, dialog.tag_name, dialog.category),
+            lambda report: self._catalogue.tag_pack_bg(dialog.pack_name, dialog.tag_name, dialog.category),
             f"Tagging pack '{dialog.pack_name}'...",
             lambda applied: (
                 f"Applied '{dialog.tag_name}' to {applied} asset(s) in '{dialog.pack_name}' "
@@ -1509,7 +1788,7 @@ class MainWindow(QMainWindow):
 
     def _handle_bulk_tag_assets(self, asset_ids: list[int], tag_name: str) -> None:
         self._run_background_job(
-            lambda: self._catalogue.bulk_tag_assets_bg(asset_ids, tag_name),
+            lambda report: self._catalogue.bulk_tag_assets_bg(asset_ids, tag_name),
             f"Tagging {len(asset_ids)} asset(s)...",
             lambda tagged: f"Tagged {tagged} asset(s) with '{tag_name}'",
             self._on_tags_changed,
@@ -1517,7 +1796,7 @@ class MainWindow(QMainWindow):
 
     def _handle_bulk_untag_assets(self, asset_ids: list[int], tag_name: str) -> None:
         self._run_background_job(
-            lambda: self._catalogue.bulk_untag_assets_bg(asset_ids, tag_name),
+            lambda report: self._catalogue.bulk_untag_assets_bg(asset_ids, tag_name),
             f"Removing '{tag_name}' from {len(asset_ids)} asset(s)...",
             lambda removed: f"Removed '{tag_name}' from {removed} asset(s)",
             self._on_tags_changed,
@@ -1568,7 +1847,7 @@ class MainWindow(QMainWindow):
             )
 
         self._run_background_job(
-            lambda: self._catalogue.convert_asset_to_gltf_bg(asset_id),
+            lambda report: self._catalogue.convert_asset_to_gltf_bg(asset_id, on_progress=report),
             "Converting to .glb via Blender...",
             format_result,
             self._on_conversion_changed,
@@ -1592,7 +1871,7 @@ class MainWindow(QMainWindow):
             return message
 
         self._run_background_job(
-            lambda: self._catalogue.convert_assets_to_gltf_bg(asset_ids),
+            lambda report: self._catalogue.convert_assets_to_gltf_bg(asset_ids, on_progress=report),
             f"Converting {len(asset_ids)} asset(s) to .glb via Blender...",
             format_result,
             self._on_conversion_changed,
@@ -1608,7 +1887,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self._run_background_job(
-            lambda: self._catalogue.revert_conversion_bg(asset_id),
+            lambda report: self._catalogue.revert_conversion_bg(asset_id, on_progress=report),
             "Reverting conversion...",
             lambda reverted: "Reverted to the pre-conversion original." if reverted else "Nothing to revert.",
             self._on_conversion_changed,
@@ -1624,7 +1903,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self._run_background_job(
-            lambda: self._catalogue.cleanup_pending_conversion_bg(asset_id),
+            lambda report: self._catalogue.cleanup_pending_conversion_bg(asset_id),
             "Deleting pre-conversion original...",
             lambda cleaned: "Deleted the pre-conversion original." if cleaned else "Nothing to clean up.",
             self._refresh_grid,
@@ -1645,7 +1924,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self._run_background_job(
-            lambda: self._catalogue.cleanup_all_pending_conversions_bg(),
+            lambda report: self._catalogue.cleanup_all_pending_conversions_bg(),
             "Cleaning up pre-conversion originals...",
             lambda count: f"Deleted {count} pre-conversion original(s).",
             self._refresh_grid,
@@ -1679,25 +1958,38 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "Asset Catalogue", f"Library copy is at:\n{path}")
 
-    def _run_background_job(self, fn, progress_text: str, format_result, on_success_refresh) -> None:
-        progress = QProgressDialog(progress_text, None, 0, 0, self)
-        progress.setWindowTitle("Asset Catalogue")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
+    def _run_background_job(
+        self, fn, progress_text: str, format_result, on_success_refresh, on_complete=None
+    ) -> None:
+        """Runs fn (which must accept a `report` callback as its only
+        argument) on a background thread with a live progress feed. On
+        success, either calls on_complete(result) if given -- for a caller
+        that needs to do something other than "show a message box, then
+        refresh" (see the ingest call site's calibration-preview handling)
+        -- or the default: show format_result(result) in a message box,
+        then call on_success_refresh().
+        """
+        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
         progress.show()
 
         worker = _BackgroundWorker(fn)
 
+        def on_progress(text: str) -> None:
+            progress.append(text)
+
         def on_ok(result) -> None:
             progress.close()
-            QMessageBox.information(self, "Asset Catalogue", format_result(result))
-            on_success_refresh()
+            if on_complete is not None:
+                on_complete(result)
+            else:
+                QMessageBox.information(self, "Asset Catalogue", format_result(result))
+                on_success_refresh()
 
         def on_fail(message: str) -> None:
             progress.close()
             QMessageBox.critical(self, "Asset Catalogue", message)
 
+        worker.progress.connect(on_progress, Qt.QueuedConnection)
         worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
         worker.failed.connect(on_fail, Qt.QueuedConnection)
         worker.finished.connect(worker.deleteLater)
@@ -1792,9 +2084,9 @@ class MainWindow(QMainWindow):
                 )
                 menu.addSeparator()
 
-        import_label = "Import to Project..." if len(selected) == 1 else f"Import {len(selected)} to Project..."
-        import_action = menu.addAction(import_label)
-        import_action.triggered.connect(self._import_selected_to_project)
+        export_label = "Export to Project..." if len(selected) == 1 else f"Export {len(selected)} to Project..."
+        export_action = menu.addAction(export_label)
+        export_action.triggered.connect(self._export_selected_to_project)
         menu.addSeparator()
 
         remove_label = "Delete from Library" if len(selected) == 1 else f"Delete {len(selected)} from Library"
@@ -1803,7 +2095,7 @@ class MainWindow(QMainWindow):
 
         return menu
 
-    def _import_selected_to_project(self) -> None:
+    def _export_selected_to_project(self) -> None:
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
         if not selected_ids:
             QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
@@ -1814,18 +2106,48 @@ class MainWindow(QMainWindow):
             )
             return
 
-        dialog = ImportDialog(len(selected_ids), self)
+        dialog = ExportDialog(len(selected_ids), self)
         if dialog.exec() != QDialog.Accepted:
             return
 
-        project_root = dialog.project_root
-        dest_subfolder = dialog.dest_subfolder
+        self._run_export_job(selected_ids, str(dialog.project_root), dialog.dest_subfolder)
+
+    def _quick_export(self, project_root: str) -> None:
+        """One-click export of the current selection to a specific,
+        already-known project folder (a recent project picked from the
+        DetailPanel's Export button, or the button itself when it already
+        has a last-used project) -- skips ExportDialog entirely, always
+        using the default destination subfolder.
+        """
+        selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
+        if not selected_ids:
+            QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
+            return
+        if self._catalogue.staging_folder() is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+        self._run_export_job(selected_ids, project_root, "exported_assets")
+
+    def _run_export_job(self, selected_ids: list[int], project_root: str, dest_subfolder: str) -> None:
         self._run_background_job(
-            lambda: self._catalogue.import_assets_bg(selected_ids, project_root, dest_subfolder),
-            f"Importing {len(selected_ids)} asset(s)...",
-            lambda stats: f"Imported {stats.copied} asset(s) into {project_root}",
-            lambda: None,
+            lambda report: self._catalogue.export_assets_bg(
+                selected_ids, project_root, dest_subfolder, on_progress=report
+            ),
+            f"Exporting {len(selected_ids)} asset(s)...",
+            lambda stats: f"Exported {stats.copied} asset(s) into {project_root}",
+            lambda: self._remember_export_project(project_root),
         )
+
+    def _remember_export_project(self, project_root: str) -> None:
+        s = settings.load()
+        resolved = str(Path(project_root).resolve())
+        recents = [path for path in s.recent_export_projects if path != resolved]
+        recents.insert(0, resolved)
+        s.recent_export_projects = recents[:5]
+        settings.save(s)
+        self.detail_panel.refresh_export_button()
 
     def _remove_selected_assets(self) -> None:
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
@@ -1844,7 +2166,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self._run_background_job(
-            lambda: self._catalogue.remove_assets_bg(selected_ids),
+            lambda report: self._catalogue.remove_assets_bg(selected_ids, on_progress=report),
             f"Removing {len(selected_ids)} asset(s)...",
             lambda stats: f"Removed {stats.removed} asset(s) from the catalogue.",
             self._rebuild_filter_panel,
@@ -1887,7 +2209,7 @@ class MainWindow(QMainWindow):
             return f"Updated '{dialog.new_name}'."
 
         self._run_background_job(
-            lambda: self._catalogue.update_pack_bg(
+            lambda report: self._catalogue.update_pack_bg(
                 dialog.pack_id, dialog.new_name, dialog.creator, dialog.licence,
                 dialog.source_url, dialog.corrections,
             ),
@@ -1912,7 +2234,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self._run_background_job(
-            lambda: self._catalogue.remove_pack_bg(detail.id),
+            lambda report: self._catalogue.remove_pack_bg(detail.id, on_progress=report),
             f"Removing '{pack_name}'...",
             lambda stats: f"Removed '{pack_name}' ({stats.removed_assets} asset(s)).",
             self._on_pack_changed,

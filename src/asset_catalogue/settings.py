@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,13 +13,13 @@ class Settings:
     staging_folder: str | None = None
     library_folder: str | None = None
     blender_path: str | None = None
-    # Godot export is opt-in and fully separable from the rest of the app --
-    # someone cataloguing assets for a non-Godot pipeline (raw STLs, a
-    # different engine) should never be nudged toward Godot-specific UI.
-    # When enabled, godot_project_path is set on first import and reused
-    # for every later one, until cleared or redefined here.
-    godot_export_enabled: bool = False
-    godot_project_path: str | None = None
+    # Most-recently-used project folders for "Export to Project", newest
+    # first, capped at a handful of entries (see main_window.py's
+    # _remember_export_project). Powers the DetailPanel's Export button --
+    # a one-click re-export to the last project, plus a dropdown of others
+    # -- without needing a separate opt-in toggle the way the retired
+    # Godot-specific remembering used to.
+    recent_export_projects: list[str] = field(default_factory=list)
 
     def db_path(self) -> Path:
         return Path(self.library_folder) / "catalogue.db"
@@ -35,7 +35,23 @@ def load() -> Settings:
     if not SETTINGS_PATH.exists():
         return Settings()
     data = json.loads(SETTINGS_PATH.read_text())
-    return Settings(**data)
+
+    # One-time migration from the retired Godot-specific export toggle: its
+    # remembered project path (if any) becomes the first entry in the new
+    # generic recent-projects list; the enabled flag is simply dropped,
+    # since there's no longer a separate opt-in. Both keys are popped
+    # before the dataclass unpack below (along with any other unrecognized
+    # key) so an old settings.json never fails to load with an
+    # unexpected-keyword-argument error.
+    legacy_project = data.pop("godot_project_path", None)
+    data.pop("godot_export_enabled", None)
+    known_fields = set(Settings.__dataclass_fields__)
+    data = {key: value for key, value in data.items() if key in known_fields}
+
+    settings = Settings(**data)
+    if legacy_project and legacy_project not in settings.recent_export_projects:
+        settings.recent_export_projects.insert(0, legacy_project)
+    return settings
 
 
 def save(settings: Settings) -> None:

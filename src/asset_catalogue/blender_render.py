@@ -8,8 +8,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from asset_catalogue import audio_thumbnails, thumbnails
+
+ProgressCallback = Callable[[str], None]
 
 # bpy.ops.wm.obj_import / bpy.ops.wm.stl_import (used by the render script)
 # were introduced in Blender 4.0, replacing the legacy import_scene.obj /
@@ -99,8 +102,8 @@ def build_job_list(
     effective_force = force or asset_id is not None or asset_ids is not None
 
     query = (
-        "SELECT assets.id, assets.relative_path, assets.content_hash, assets.extension, "
-        "packs.pack_folder, packs.corrections "
+        "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
+        "assets.extension, packs.pack_folder, packs.corrections "
         "FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'model'"
     )
@@ -134,6 +137,7 @@ def build_job_list(
         jobs.append(
             {
                 "asset_id": row["id"],
+                "filename": row["filename"],
                 "source_path": str(staging_folder / row["pack_folder"] / row["relative_path"]),
                 "output_path": str(dest),
                 "extension": row["extension"],
@@ -153,7 +157,9 @@ def generate_model_thumbnails(
     force: bool = False,
     asset_id: int | None = None,
     asset_ids: list[int] | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> ModelThumbnailStats:
+    report = on_progress or (lambda _text: None)
     jobs, already_done = build_job_list(
         conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids
     )
@@ -161,6 +167,11 @@ def generate_model_thumbnails(
     if not jobs:
         return stats
 
+    filenames_by_id = {job["asset_id"]: job["filename"] for job in jobs}
+    report(
+        f"Starting Blender to render {len(jobs)} model thumbnail"
+        f"{'s' if len(jobs) != 1 else ''}..."
+    )
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"
@@ -198,10 +209,13 @@ def generate_model_thumbnails(
                 "UPDATE assets SET thumbnail_status = ? WHERE id = ?", (new_status, asset_id)
             )
             conn.commit()
+            filename = filenames_by_id.get(asset_id, f"asset {asset_id}")
             if status == "ok":
                 stats.generated += 1
+                report(f"Rendered thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})")
             else:
                 stats.failed += 1
+                report(f"Failed to render thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})")
             print(f"  [{len(seen_ids)}/{len(jobs)}] asset {asset_id}: {status}")
 
         process.wait()
@@ -237,6 +251,7 @@ class AutoThumbnailStats:
     # generate_pack_thumbnails.
     calibration_preview: bool = False
     models_pending: int = 0
+    preview_asset_id: int | None = None
 
 
 def generate_pack_thumbnails(
@@ -246,6 +261,7 @@ def generate_pack_thumbnails(
     blender_path_setting: str | None,
     pack_id: int,
     pack_name: str,
+    on_progress: ProgressCallback | None = None,
 ) -> AutoThumbnailStats:
     """Generates thumbnails for every asset currently in a pack, dispatched
     by type -- Pillow for textures and audio, Blender for models. If the
@@ -271,13 +287,13 @@ def generate_pack_thumbnails(
     stats = AutoThumbnailStats()
 
     texture_stats = thumbnails.generate_texture_thumbnails(
-        conn, staging_folder, thumbnail_dir, pack_name=pack_name
+        conn, staging_folder, thumbnail_dir, pack_name=pack_name, on_progress=on_progress
     )
     stats.generated += texture_stats.generated
     stats.failed += texture_stats.failed
 
     audio_stats = audio_thumbnails.generate_audio_thumbnails(
-        conn, staging_folder, thumbnail_dir, pack_name=pack_name
+        conn, staging_folder, thumbnail_dir, pack_name=pack_name, on_progress=on_progress
     )
     stats.generated += audio_stats.generated
     stats.failed += audio_stats.failed
@@ -307,17 +323,20 @@ def generate_pack_thumbnails(
 
     if already_calibrated:
         model_stats = generate_model_thumbnails(
-            conn, staging_folder, thumbnail_dir, blender_exe, pack_name=pack_name
+            conn, staging_folder, thumbnail_dir, blender_exe, pack_name=pack_name,
+            on_progress=on_progress,
         )
         stats.generated += model_stats.generated
         stats.failed += model_stats.failed
         return stats
 
     preview_stats = generate_model_thumbnails(
-        conn, staging_folder, thumbnail_dir, blender_exe, asset_id=model_ids[0]
+        conn, staging_folder, thumbnail_dir, blender_exe, asset_id=model_ids[0],
+        on_progress=on_progress,
     )
     stats.generated += preview_stats.generated
     stats.failed += preview_stats.failed
     stats.calibration_preview = True
     stats.models_pending = len(model_ids) - 1
+    stats.preview_asset_id = model_ids[0]
     return stats

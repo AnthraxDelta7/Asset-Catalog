@@ -7,8 +7,11 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from asset_catalogue import ingest, library_assets
+
+ProgressCallback = Callable[[str], None]
 
 CONVERT_SCRIPT_PATH = Path(__file__).parent / "blender_convert_script.py"
 CONVERT_TIMEOUT_SECONDS = 300
@@ -107,6 +110,7 @@ def convert_asset_to_gltf(
     assets_dir: Path,
     blender_exe: Path,
     asset_id: int,
+    on_progress: ProgressCallback | None = None,
 ) -> ConversionResult:
     """Converts one model asset to .glb via Blender, in place: the same
     assets.id keeps its tags/import history, but relative_path/extension/
@@ -118,6 +122,7 @@ def convert_asset_to_gltf(
     blender_render.generate_model_thumbnails with asset_id=), since that's
     already a well-tested single-asset preview path.
     """
+    report = on_progress or (lambda _text: None)
     row = _resolve_conversion_row(conn, asset_id)
     if row is None:
         return ConversionResult(False, "Asset not found")
@@ -138,6 +143,7 @@ def convert_asset_to_gltf(
         json.dump([job], f)
         job_list_path = Path(f.name)
 
+    report(f"Converting {row['filename']} to .glb...")
     try:
         process = subprocess.run(
             [
@@ -182,6 +188,7 @@ def convert_assets_to_gltf(
     assets_dir: Path,
     blender_exe: Path,
     asset_ids: list[int],
+    on_progress: ProgressCallback | None = None,
 ) -> ConversionBatchResult:
     """Batch counterpart to convert_asset_to_gltf: converts every model
     asset in asset_ids that isn't already .glb, via a single Blender
@@ -193,6 +200,7 @@ def convert_assets_to_gltf(
     Caller is responsible for regenerating thumbnails for the converted ids
     afterward (blender_render.generate_model_thumbnails with asset_ids=).
     """
+    report = on_progress or (lambda _text: None)
     result = ConversionBatchResult()
     if not asset_ids:
         return result
@@ -226,6 +234,9 @@ def convert_assets_to_gltf(
         json.dump(jobs, f)
         job_list_path = Path(f.name)
 
+    report(
+        f"Starting Blender to convert {len(jobs)} model{'s' if len(jobs) != 1 else ''} to .glb..."
+    )
     try:
         process = subprocess.Popen(
             [
@@ -258,6 +269,7 @@ def convert_assets_to_gltf(
             row, new_relative_path, output_path = job_context[asset_id]
             if status != "ok":
                 result.failed += 1
+                report(f"Failed to convert {row['filename']} ({len(seen_ids)}/{len(jobs)})")
                 if output_path.exists():
                     output_path.unlink()
                 continue
@@ -266,6 +278,7 @@ def convert_assets_to_gltf(
             )
             result.converted += 1
             result.converted_asset_ids.append(asset_id)
+            report(f"Converted {row['filename']} to .glb ({len(seen_ids)}/{len(jobs)})")
 
         process.wait()
 

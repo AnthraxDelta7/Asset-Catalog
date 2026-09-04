@@ -5,12 +5,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
-GODOT_PROJECT_FILE = "project.godot"
-
-
-def is_godot_project(project_root: Path) -> bool:
-    return (project_root / GODOT_PROJECT_FILE).is_file()
+ProgressCallback = Callable[[str], None]
 
 
 def _sanitize_folder_name(name: str) -> str:
@@ -18,7 +15,7 @@ def _sanitize_folder_name(name: str) -> str:
 
 
 @dataclass
-class ImportStats:
+class ExportStats:
     copied: int = 0
 
 
@@ -65,16 +62,19 @@ def select_assets(
     return conn.execute(query, params).fetchall()
 
 
-def import_assets(
+def export_assets(
     conn: sqlite3.Connection,
     staging_folder: Path,
     project_root: Path,
     project_identifier: str,
     dest_subfolder: str,
     assets: list[sqlite3.Row],
-) -> ImportStats:
-    stats = ImportStats()
+    on_progress: ProgressCallback | None = None,
+) -> ExportStats:
+    report = on_progress or (lambda _text: None)
+    stats = ExportStats()
     for asset in assets:
+        report(f"Exporting {asset['relative_path']}...")
         source = staging_folder / asset["pack_folder"] / asset["relative_path"]
         destination = (
             project_root
@@ -86,7 +86,7 @@ def import_assets(
         shutil.copy2(source, destination)
 
         conn.execute(
-            "INSERT INTO imports (asset_id, project_identifier, destination_path, timestamp) "
+            "INSERT INTO exports (asset_id, project_identifier, destination_path, timestamp) "
             "VALUES (?, ?, ?, ?)",
             (
                 asset["id"],

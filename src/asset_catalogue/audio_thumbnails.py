@@ -4,10 +4,13 @@ import sqlite3
 import struct
 import wave
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image, ImageDraw
 
 from asset_catalogue.thumbnails import THUMBNAIL_SIZE, ThumbnailStats, thumbnail_path
+
+ProgressCallback = Callable[[str], None]
 
 BACKGROUND_COLOR = (24, 24, 28)
 WAVEFORM_COLOR = (100, 180, 255)
@@ -91,10 +94,13 @@ def generate_audio_thumbnails(
     thumbnail_dir: Path,
     pack_name: str | None = None,
     force: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> ThumbnailStats:
+    report = on_progress or (lambda _text: None)
     query = (
-        "SELECT assets.id, assets.relative_path, assets.content_hash, assets.extension, "
-        "packs.pack_folder FROM assets JOIN packs ON packs.id = assets.pack_id "
+        "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
+        "assets.extension, packs.pack_folder "
+        "FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'audio'"
     )
     params: list[str] = []
@@ -119,6 +125,7 @@ def generate_audio_thumbnails(
             stats.already_done += 1
             continue
 
+        report(f"Rendering thumbnail for {row['filename']}...")
         extension = row["extension"].lower()
         source = staging_folder / row["pack_folder"] / row["relative_path"]
         try:
