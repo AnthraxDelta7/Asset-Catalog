@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import html
 import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QStringListModel, QThread, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -35,6 +37,13 @@ from asset_catalogue import blender_render, settings
 from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
 THUMBNAIL_ICON_SIZE = QSize(128, 128)
+# Extra width/height beyond the icon itself is where the (word-wrapped)
+# filename label renders. This has to be set on each item's own sizeHint,
+# not just the grid's setGridSize -- the grid size only controls layout
+# spacing between cells, while text wrapping is computed against the
+# item's own sizeHint, so setGridSize alone left long filenames eliding
+# with "..." regardless of how much extra grid space was added around them.
+GRID_CELL_SIZE = QSize(THUMBNAIL_ICON_SIZE.width() + 32, THUMBNAIL_ICON_SIZE.height() + 72)
 
 
 class FilterPanel(QWidget):
@@ -56,6 +65,13 @@ class FilterPanel(QWidget):
         self._on_delete_tag = on_delete_tag
 
         layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Search"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Filename contains...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_change)
+        layout.addWidget(self.search_edit)
 
         layout.addWidget(QLabel("Type"))
         self.type_combo = QComboBox()
@@ -101,6 +117,9 @@ class FilterPanel(QWidget):
         self.format_combo.addItem("All formats", None)
         for extension in catalogue.list_asset_extensions():
             self.format_combo.addItem(extension.lstrip(".").upper(), extension)
+
+    def selected_search(self) -> str | None:
+        return self.search_edit.text().strip() or None
 
     def selected_type(self) -> str | None:
         return self.type_combo.currentData()
@@ -213,9 +232,7 @@ class ThumbnailGrid(QListWidget):
         self.setSpacing(8)
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
-        self.setGridSize(
-            QSize(THUMBNAIL_ICON_SIZE.width() + 16, THUMBNAIL_ICON_SIZE.height() + 48)
-        )
+        self.setGridSize(GRID_CELL_SIZE)
         # Ctrl/Shift-click and Ctrl+A ("select all") for bulk removal.
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -232,6 +249,7 @@ class ThumbnailGrid(QListWidget):
             item.setData(Qt.UserRole, asset.id)
             item.setIcon(QIcon(self._load_thumbnail(asset, catalogue)))
             item.setToolTip(f"{asset.pack_name} / {asset.filename}\n{asset.asset_type}")
+            item.setSizeHint(GRID_CELL_SIZE)
             self.addItem(item)
         self.blockSignals(False)
 
@@ -262,9 +280,12 @@ class ThumbnailGrid(QListWidget):
 class DetailPanel(QWidget):
     """Single-asset mode (exactly one grid selection): full tag editing plus
     a link to the asset's archived copy in the library. Multi-select mode
-    (2+ selected): tag list and "show in library" are disabled (ambiguous
-    for a set of different assets), but adding a tag still works -- it's
-    applied to every selected asset at once. All actual catalogue writes are
+    (2+ selected): "show in library" is disabled (ambiguous for a set of
+    different assets), but tag editing works both ways -- adding applies a
+    tag to every selected asset at once, and the tag list shows only tags
+    common to *all* selected assets (the intersection, not the union) so
+    removing one is unambiguous: it comes off of every selected asset,
+    never just some of them silently. All actual catalogue writes are
     delegated to MainWindow via callbacks rather than done here directly,
     since MainWindow decides whether a write needs to run in the background
     (a bulk tag can trigger many file copies) or can stay fast/synchronous
@@ -277,18 +298,22 @@ class DetailPanel(QWidget):
         on_tag_asset,
         on_untag_asset,
         on_bulk_tag_assets,
+        on_bulk_untag_assets,
         on_show_in_library,
         on_revert_conversion,
         on_cleanup_conversion,
+        on_filter_by_pack,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
         self._on_tag_asset = on_tag_asset
         self._on_untag_asset = on_untag_asset
         self._on_bulk_tag_assets = on_bulk_tag_assets
+        self._on_bulk_untag_assets = on_bulk_untag_assets
         self._on_show_in_library = on_show_in_library
         self._on_revert_conversion = on_revert_conversion
         self._on_cleanup_conversion = on_cleanup_conversion
+        self._on_filter_by_pack = on_filter_by_pack
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -297,6 +322,15 @@ class DetailPanel(QWidget):
         self.title_label = QLabel("No asset selected")
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
+
+        # A small clickable "Pack: <name>" line -- clicking it filters the
+        # grid down to just that pack, a quick way to jump from "this one
+        # asset looks off" to "let me see the whole pack it came from".
+        self.pack_label = QLabel("")
+        self.pack_label.setWordWrap(True)
+        self.pack_label.setToolTip("Click to filter the grid to this pack")
+        self.pack_label.linkActivated.connect(self._on_pack_link_clicked)
+        layout.addWidget(self.pack_label)
 
         self.meta_label = QLabel("")
         layout.addWidget(self.meta_label)
@@ -333,6 +367,15 @@ class DetailPanel(QWidget):
         self.new_tag_input = QLineEdit()
         self.new_tag_input.setPlaceholderText("New tag name")
         self.new_tag_input.returnPressed.connect(self._add_tag)
+        # Autocompletes against the existing tag vocabulary -- without this,
+        # a typo'd re-tagging attempt silently creates a near-duplicate tag
+        # (e.g. "Si-FI" and "SiFi Guns" both ending up applied to a whole
+        # pack) instead of reusing the tag that's already there.
+        self._tag_completer = QCompleter([], self)
+        self._tag_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._tag_completer.setFilterMode(Qt.MatchContains)
+        self.new_tag_input.setCompleter(self._tag_completer)
+        self.refresh_tag_completer()
         self.add_button = QPushButton("Add tag")
         self.add_button.clicked.connect(self._add_tag)
         add_row.addWidget(self.new_tag_input)
@@ -341,8 +384,13 @@ class DetailPanel(QWidget):
 
         self._set_idle_state()
 
+    def refresh_tag_completer(self) -> None:
+        tag_names = [tag.name for tag in self._catalogue.list_tags()]
+        self._tag_completer.setModel(QStringListModel(tag_names, self._tag_completer))
+
     def set_catalogue(self, catalogue: Catalogue) -> None:
         self._catalogue = catalogue
+        self.refresh_tag_completer()
 
     def _set_idle_state(self) -> None:
         self.tag_list.setEnabled(False)
@@ -358,19 +406,39 @@ class DetailPanel(QWidget):
         self._current_asset = None
         self._multi_asset_ids = []
         self.title_label.setText("No asset selected")
+        self.pack_label.setText("")
         self.meta_label.setText("")
         self.tag_list.clear()
         self._set_idle_state()
 
-    def show_multi_selection(self, asset_ids: list[int]) -> None:
+    def _pack_link_html(self, pack_name: str) -> str:
+        escaped = html.escape(pack_name)
+        return f'Pack: <a href="{escaped}">{escaped}</a>'
+
+    def show_multi_selection(self, assets: list[AssetSummary]) -> None:
         self._asset_id = None
         self._current_asset = None
-        self._multi_asset_ids = asset_ids
-        self.title_label.setText(f"{len(asset_ids)} assets selected")
-        self.meta_label.setText("Add a tag to apply it to all selected assets.")
+        self._multi_asset_ids = [asset.id for asset in assets]
+        self.title_label.setText(f"{len(assets)} assets selected")
+
+        pack_names = {asset.pack_name for asset in assets}
+        self.pack_label.setText(self._pack_link_html(next(iter(pack_names))) if len(pack_names) == 1 else "")
+
+        common_tags = sorted(set.intersection(*(set(asset.tags) for asset in assets))) if assets else []
         self.tag_list.clear()
-        self.tag_list.setEnabled(False)
-        self.remove_button.setEnabled(False)
+        self.tag_list.addItems(common_tags)
+        if common_tags:
+            self.meta_label.setText(
+                "Add a tag to apply it to all selected assets. The list below shows "
+                "only tags common to all of them -- removing one untags all of them."
+            )
+        else:
+            self.meta_label.setText(
+                "Add a tag to apply it to all selected assets. No tag is common to "
+                "all of them yet, so there's nothing to remove in bulk."
+            )
+        self.tag_list.setEnabled(bool(common_tags))
+        self.remove_button.setEnabled(bool(common_tags))
         self.new_tag_input.setEnabled(True)
         self.add_button.setEnabled(True)
         self.show_in_library_button.setEnabled(False)
@@ -381,7 +449,8 @@ class DetailPanel(QWidget):
         self._asset_id = asset.id
         self._current_asset = asset
         self._multi_asset_ids = []
-        self.title_label.setText(f"{asset.pack_name} / {asset.filename}")
+        self.title_label.setText(asset.filename)
+        self.pack_label.setText(self._pack_link_html(asset.pack_name))
         self.meta_label.setText(f"type: {asset.asset_type}   thumbnail: {asset.thumbnail_status}")
         self.tag_list.clear()
         self.tag_list.addItems(asset.tags)
@@ -409,14 +478,20 @@ class DetailPanel(QWidget):
 
     def _remove_selected_tag(self) -> None:
         item = self.tag_list.currentItem()
-        if item is None or self._asset_id is None:
+        if item is None:
             return
-        self._on_untag_asset(self._asset_id, item.text())
+        if self._asset_id is not None:
+            self._on_untag_asset(self._asset_id, item.text())
+        elif self._multi_asset_ids:
+            self._on_bulk_untag_assets(list(self._multi_asset_ids), item.text())
 
     def _show_in_library(self) -> None:
         if self._current_asset is None:
             return
         self._on_show_in_library(self._current_asset.pack_name, self._current_asset.relative_path)
+
+    def _on_pack_link_clicked(self, pack_name: str) -> None:
+        self._on_filter_by_pack(html.unescape(pack_name))
 
     def _revert_conversion(self) -> None:
         if self._asset_id is not None:
@@ -447,7 +522,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None, error_message: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 260)
+        self.resize(520, 340)
         s = settings.load()
 
         layout = QVBoxLayout(self)
@@ -467,6 +542,15 @@ class SettingsDialog(QDialog):
         form.addRow("Library folder:", _browse_row(self.library_edit, self._browse_library))
 
         self.blender_edit = QLineEdit(s.blender_path or "")
+        if not s.blender_path:
+            # Leaving this blank is a valid, working choice -- Blender is
+            # re-detected on demand every time it's actually needed, not
+            # cached here -- but a blank field with no explanation looks
+            # unconfigured even when it's already working. Show what
+            # auto-detection would find so that's clear at a glance.
+            auto_found = blender_render.find_blender(None)
+            if auto_found is not None:
+                self.blender_edit.setPlaceholderText(f"(auto-detected) {auto_found}")
         blender_row = QHBoxLayout()
         blender_browse = QPushButton("Browse...")
         blender_browse.clicked.connect(self._browse_blender)
@@ -477,12 +561,33 @@ class SettingsDialog(QDialog):
         blender_row.addWidget(blender_auto)
         form.addRow("Blender path:", blender_row)
 
+        self.godot_enabled_check = QCheckBox("Enable Godot export")
+        self.godot_enabled_check.setChecked(s.godot_export_enabled)
+        self.godot_enabled_check.toggled.connect(self._on_godot_enabled_toggled)
+        form.addRow("", self.godot_enabled_check)
+
+        self.godot_project_edit = QLineEdit(s.godot_project_path or "")
+        godot_browse_button = QPushButton("Browse...")
+        godot_browse_button.clicked.connect(self._browse_godot_project)
+        godot_clear_button = QPushButton("Clear")
+        godot_clear_button.clicked.connect(lambda: self.godot_project_edit.clear())
+        self.godot_project_row = QHBoxLayout()
+        self.godot_project_row.addWidget(self.godot_project_edit)
+        self.godot_project_row.addWidget(godot_browse_button)
+        self.godot_project_row.addWidget(godot_clear_button)
+        form.addRow("Godot project folder:", self.godot_project_row)
+        self._on_godot_enabled_toggled(s.godot_export_enabled)
+
         layout.addLayout(form)
 
         hint = QLabel(
             "Staging folder: where unprocessed packs sit before ingest.\n"
             "Library folder: portable -- holds catalogue.db and thumbnails/. Point at an "
-            "existing one (copied from another machine, a shared drive) to pick it up as-is."
+            "existing one (copied from another machine, a shared drive) to pick it up as-is.\n"
+            "Godot export: off by default so cataloguing STLs or another pipeline never "
+            "shows Godot-specific UI. Once enabled, the first Import remembers whatever "
+            "project folder you pick here or in that dialog -- every later Import reuses "
+            "it automatically until you clear or change it here."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -520,6 +625,20 @@ class SettingsDialog(QDialog):
             return
         self.blender_edit.setText(str(found))
 
+    def _on_godot_enabled_toggled(self, checked: bool) -> None:
+        self.godot_project_edit.setEnabled(checked)
+        for i in range(self.godot_project_row.count()):
+            widget = self.godot_project_row.itemAt(i).widget()
+            if widget is not None:
+                widget.setEnabled(checked)
+
+    def _browse_godot_project(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select Godot project folder", self.godot_project_edit.text()
+        )
+        if chosen:
+            self.godot_project_edit.setText(chosen)
+
     def _on_accept(self) -> None:
         if not self.staging_edit.text().strip() or not self.library_edit.text().strip():
             QMessageBox.warning(self, "Settings", "Staging folder and library folder are both required.")
@@ -528,6 +647,8 @@ class SettingsDialog(QDialog):
         s.staging_folder = self.staging_edit.text().strip()
         s.library_folder = self.library_edit.text().strip()
         s.blender_path = self.blender_edit.text().strip() or None
+        s.godot_export_enabled = self.godot_enabled_check.isChecked()
+        s.godot_project_path = self.godot_project_edit.text().strip() or None
         settings.save(s)
         self.accept()
 
@@ -964,6 +1085,97 @@ class TagEditDialog(QDialog):
         self.accept()
 
 
+class ImportDialog(QDialog):
+    """Copies the current grid selection into a target project. Godot
+    export (off by default -- see Settings) changes exactly one thing:
+    once a project folder has been picked once, it's shown here locked
+    (read-only) and reused for every later import automatically, instead
+    of asking again each time. Turning Godot export off, or clearing/
+    changing the remembered path in Settings, goes right back to a plain
+    per-import folder picker -- nothing here is Godot-specific beyond that
+    one convenience, so a non-Godot pipeline never has to think about it.
+    """
+
+    def __init__(self, asset_count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Import to Project")
+        self.resize(460, 220)
+        self.project_root: Path | None = None
+        self.dest_subfolder: str = "imported_assets"
+
+        s = settings.load()
+        self._godot_enabled = s.godot_export_enabled
+        self._godot_locked = s.godot_export_enabled and bool(s.godot_project_path)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Import {asset_count} asset(s) into:"))
+
+        form = QFormLayout()
+        self.project_edit = QLineEdit()
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self._browse_project)
+        project_row = QHBoxLayout()
+        project_row.addWidget(self.project_edit)
+        project_row.addWidget(self.browse_button)
+        form.addRow("Project folder:", project_row)
+
+        self.dest_subfolder_edit = QLineEdit("imported_assets")
+        form.addRow("Destination subfolder:", self.dest_subfolder_edit)
+        layout.addLayout(form)
+
+        if self._godot_locked:
+            self.project_edit.setText(s.godot_project_path)
+            self.project_edit.setReadOnly(True)
+            self.browse_button.setEnabled(False)
+            hint = QLabel(
+                "Using your configured Godot project. Change or clear it in "
+                "File > Settings if you need a different destination."
+            )
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+        elif self._godot_enabled:
+            hint = QLabel(
+                "Godot export is enabled but no project is set yet -- pick one below; "
+                "it'll be remembered for every future import until changed in Settings."
+            )
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Import")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_project(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select project folder", self.project_edit.text()
+        )
+        if chosen:
+            self.project_edit.setText(chosen)
+
+    def _on_accept(self) -> None:
+        text = self.project_edit.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Import to Project", "Pick a project folder.")
+            return
+        project_root = Path(text)
+        if not project_root.is_dir():
+            QMessageBox.warning(self, "Import to Project", f"Folder not found: {project_root}")
+            return
+
+        if self._godot_enabled and not self._godot_locked:
+            # First time defining it (Godot export was just turned on with
+            # nothing set yet) -- remember it for every future import.
+            s = settings.load()
+            s.godot_project_path = str(project_root)
+            settings.save(s)
+
+        self.project_root = project_root
+        self.dest_subfolder = self.dest_subfolder_edit.text().strip() or "imported_assets"
+        self.accept()
+
+
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -1010,9 +1222,11 @@ class MainWindow(QMainWindow):
             self._handle_tag_asset,
             self._handle_untag_asset,
             self._handle_bulk_tag_assets,
+            self._handle_bulk_untag_assets,
             self._show_in_library_folder,
             self._handle_revert_conversion,
             self._handle_cleanup_conversion,
+            self._filter_by_pack,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -1051,11 +1265,21 @@ class MainWindow(QMainWindow):
         remove_action = edit_menu.addAction("Remove Selected...")
         remove_action.setShortcut(QKeySequence.Delete)
         remove_action.triggered.connect(self._remove_selected_assets)
-        edit_menu.addSeparator()
-        tag_pack_action = edit_menu.addAction("Tag Pack...")
+
+        # Selection-scoped actions that transform/export rather than edit
+        # the catalogue directly, plus pack- and library-wide maintenance --
+        # kept out of Edit so it doesn't become a junk drawer of every bulk
+        # feature that's landed here over time.
+        tools_menu = menu_bar.addMenu("&Tools")
+        convert_action = tools_menu.addAction("Convert Selected to glTF (.glb)...")
+        convert_action.triggered.connect(self._convert_selected_to_gltf)
+        import_action = tools_menu.addAction("Import Selected to Project...")
+        import_action.triggered.connect(self._import_selected_to_project)
+        tools_menu.addSeparator()
+        tag_pack_action = tools_menu.addAction("Tag Pack...")
         tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
-        edit_menu.addSeparator()
-        cleanup_conversions_action = edit_menu.addAction("Clean Up Pre-Conversion Assets...")
+        tools_menu.addSeparator()
+        cleanup_conversions_action = tools_menu.addAction("Clean Up Pre-Conversion Assets...")
         cleanup_conversions_action.triggered.connect(self._cleanup_all_pending_conversions)
 
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
@@ -1291,6 +1515,43 @@ class MainWindow(QMainWindow):
             self._on_tags_changed,
         )
 
+    def _handle_bulk_untag_assets(self, asset_ids: list[int], tag_name: str) -> None:
+        self._run_background_job(
+            lambda: self._catalogue.bulk_untag_assets_bg(asset_ids, tag_name),
+            f"Removing '{tag_name}' from {len(asset_ids)} asset(s)...",
+            lambda removed: f"Removed '{tag_name}' from {removed} asset(s)",
+            self._on_tags_changed,
+        )
+
+    def _convert_selected_to_gltf(self) -> None:
+        """Edit > Tools menu entry point -- same eligibility logic as the
+        grid's right-click Convert action (single-asset vs batch dispatch
+        included), just reachable without right-clicking anything.
+        """
+        selected = self.grid.selectedItems()
+        if not selected:
+            QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
+            return
+        selected_ids = {item.data(Qt.UserRole) for item in selected}
+        eligible_ids = [
+            asset.id
+            for asset in self._current_assets
+            if asset.id in selected_ids
+            and asset.asset_type == "model"
+            and not asset.relative_path.lower().endswith(".glb")
+        ]
+        if not eligible_ids:
+            QMessageBox.information(
+                self,
+                "Asset Catalogue",
+                "None of the selected assets can be converted (already .glb, or not a model).",
+            )
+            return
+        if len(eligible_ids) == 1:
+            self._convert_asset_to_gltf(eligible_ids[0])
+        else:
+            self._convert_assets_to_gltf(eligible_ids)
+
     def _convert_asset_to_gltf(self, asset_id: int) -> None:
         try:
             blender_exe = self._catalogue.resolve_blender()
@@ -1390,6 +1651,11 @@ class MainWindow(QMainWindow):
             self._refresh_grid,
         )
 
+    def _filter_by_pack(self, pack_name: str) -> None:
+        match = self.filter_panel.pack_list.findItems(pack_name, Qt.MatchExactly)
+        if match:
+            self.filter_panel.pack_list.setCurrentItem(match[0])
+
     def _show_in_library_folder(self, pack_name: str, relative_path: str) -> None:
         path = self._catalogue.library_asset_path_if_archived(pack_name, relative_path)
         if path is None:
@@ -1444,6 +1710,7 @@ class MainWindow(QMainWindow):
             asset_type=self.filter_panel.selected_type(),
             tag=self.filter_panel.selected_tag(),
             extension=self.filter_panel.selected_format(),
+            search=self.filter_panel.selected_search(),
         )
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)
@@ -1460,8 +1727,9 @@ class MainWindow(QMainWindow):
             return
         self._selected_asset_id = None
         if selected:
-            asset_ids = [item.data(Qt.UserRole) for item in selected]
-            self.detail_panel.show_multi_selection(asset_ids)
+            selected_ids = {item.data(Qt.UserRole) for item in selected}
+            assets = [a for a in self._current_assets if a.id in selected_ids]
+            self.detail_panel.show_multi_selection(assets)
         else:
             self.detail_panel.clear_selection()
 
@@ -1524,11 +1792,40 @@ class MainWindow(QMainWindow):
                 )
                 menu.addSeparator()
 
+        import_label = "Import to Project..." if len(selected) == 1 else f"Import {len(selected)} to Project..."
+        import_action = menu.addAction(import_label)
+        import_action.triggered.connect(self._import_selected_to_project)
+        menu.addSeparator()
+
         remove_label = "Delete from Library" if len(selected) == 1 else f"Delete {len(selected)} from Library"
         remove_action = menu.addAction(remove_label)
         remove_action.triggered.connect(self._remove_selected_assets)
 
         return menu
+
+    def _import_selected_to_project(self) -> None:
+        selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
+        if not selected_ids:
+            QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
+            return
+        if self._catalogue.staging_folder() is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+
+        dialog = ImportDialog(len(selected_ids), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        project_root = dialog.project_root
+        dest_subfolder = dialog.dest_subfolder
+        self._run_background_job(
+            lambda: self._catalogue.import_assets_bg(selected_ids, project_root, dest_subfolder),
+            f"Importing {len(selected_ids)} asset(s)...",
+            lambda stats: f"Imported {stats.copied} asset(s) into {project_root}",
+            lambda: None,
+        )
 
     def _remove_selected_assets(self) -> None:
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
@@ -1555,6 +1852,7 @@ class MainWindow(QMainWindow):
 
     def _on_tags_changed(self) -> None:
         self.filter_panel.refresh_tags(self._catalogue)
+        self.detail_panel.refresh_tag_completer()
         self._refresh_grid()
 
     def _on_conversion_changed(self) -> None:
@@ -1660,6 +1958,7 @@ def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(Path(__file__).parent / "app_icon.png")))
 
     # A library folder is required above everything else -- nothing else in
     # the app can run without one, so this loops until Catalogue.open()

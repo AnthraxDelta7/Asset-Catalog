@@ -731,6 +731,10 @@ def cmd_list(args: argparse.Namespace) -> None:
         extension = args.format if args.format.startswith(".") else f".{args.format}"
         clauses.append("assets.extension = ?")
         params.append(extension.lower())
+    if args.search:
+        escaped = args.search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses.append("assets.filename LIKE ? ESCAPE '\\'")
+        params.append(f"%{escaped}%")
     if args.unused:
         clauses.append("NOT EXISTS (SELECT 1 FROM imports WHERE imports.asset_id = assets.id)")
     if clauses:
@@ -802,6 +806,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--type")
     list_parser.add_argument("--tag")
     list_parser.add_argument("--format", help="File extension, with or without the dot (e.g. fbx, .glb)")
+    list_parser.add_argument("--search", help="Only show assets whose filename contains this text")
     list_parser.add_argument(
         "--unused", action="store_true", help="Only show assets never imported into any project"
     )

@@ -28,7 +28,11 @@ def select_assets(
     asset_type: str | None = None,
     tag: str | None = None,
     asset_id: int | None = None,
+    asset_ids: list[int] | None = None,
 ) -> list[sqlite3.Row]:
+    if asset_ids is not None and not asset_ids:
+        return []
+
     query = (
         "SELECT assets.id, assets.relative_path, packs.pack_folder, packs.name AS pack_name "
         "FROM assets JOIN packs ON packs.id = assets.pack_id"
@@ -38,6 +42,10 @@ def select_assets(
     if asset_id is not None:
         clauses.append("assets.id = ?")
         params.append(asset_id)
+    if asset_ids is not None:
+        placeholders = ",".join("?" for _ in asset_ids)
+        clauses.append(f"assets.id IN ({placeholders})")
+        params.extend(asset_ids)
     if tag:
         query += (
             " JOIN asset_tags ON asset_tags.asset_id = assets.id"

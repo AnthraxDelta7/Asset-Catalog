@@ -48,6 +48,21 @@ CREATE TABLE IF NOT EXISTS imports (
     timestamp TEXT NOT NULL
 );
 
+-- Tombstones a (asset, tag) pair the user explicitly untagged, so a later
+-- `tag pack` cascade never silently re-applies it -- the schema otherwise
+-- only tracks *how* a tag was applied (inherited/explicit), not "was
+-- deliberately removed", so a re-run of the same pack-wide tag would
+-- clobber the removal. A new CREATE TABLE (not a change to asset_tags'
+-- schema/CHECK constraint) specifically so this needs no migration of
+-- existing databases -- IF NOT EXISTS just adds it cleanly either way.
+-- Explicitly re-tagging the asset (tag_asset) clears the tombstone, same
+-- "explicit always wins" precedence already used elsewhere.
+CREATE TABLE IF NOT EXISTS excluded_tags (
+    asset_id INTEGER NOT NULL REFERENCES assets(id),
+    tag_id INTEGER NOT NULL REFERENCES tags(id),
+    PRIMARY KEY (asset_id, tag_id)
+);
+
 -- Tracks a model asset mid-conversion (e.g. to glTF): the pre-conversion
 -- file's original identity, kept around so the conversion can be reverted
 -- or, once confirmed good, cleaned up. See conversion.py.

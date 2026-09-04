@@ -13,6 +13,13 @@ class Settings:
     staging_folder: str | None = None
     library_folder: str | None = None
     blender_path: str | None = None
+    # Godot export is opt-in and fully separable from the rest of the app --
+    # someone cataloguing assets for a non-Godot pipeline (raw STLs, a
+    # different engine) should never be nudged toward Godot-specific UI.
+    # When enabled, godot_project_path is set on first import and reused
+    # for every later one, until cleared or redefined here.
+    godot_export_enabled: bool = False
+    godot_project_path: str | None = None
 
     def db_path(self) -> Path:
         return Path(self.library_folder) / "catalogue.db"

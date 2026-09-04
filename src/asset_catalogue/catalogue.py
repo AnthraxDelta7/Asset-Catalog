@@ -10,6 +10,7 @@ from asset_catalogue import (
     blender_render,
     conversion,
     db,
+    importing,
     ingest,
     library_assets,
     packs,
@@ -148,6 +149,7 @@ class Catalogue:
         asset_type: str | None = None,
         tag: str | None = None,
         extension: str | None = None,
+        search: str | None = None,
     ) -> list[AssetSummary]:
         query = (
             "SELECT assets.id, assets.filename, assets.asset_type, "
@@ -173,6 +175,13 @@ class Catalogue:
         if extension:
             clauses.append("assets.extension = ?")
             params.append(extension)
+        if search:
+            # Escape LIKE's own wildcards so a filename that happens to
+            # contain a literal "%" or "_" is matched literally, not
+            # interpreted as a pattern.
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("assets.filename LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY packs.name, assets.relative_path"
@@ -345,6 +354,49 @@ class Catalogue:
             for asset_id in asset_ids:
                 tagging.tag_asset(conn, asset_id, tag_id)
             return len(asset_ids)
+        finally:
+            conn.close()
+
+    def bulk_untag_assets_bg(self, asset_ids: list[int], tag_name: str) -> int:
+        """Removes the same tag from every given asset. Returns how many
+        actually had it (an asset that never had it isn't an error, just
+        not counted) -- mirrors bulk_tag_assets_bg's shape for the reverse
+        operation.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            row = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,)).fetchone()
+            if row is None:
+                return 0
+            return sum(
+                1 for asset_id in asset_ids if tagging.untag_asset(conn, asset_id, row["id"])
+            )
+        finally:
+            conn.close()
+
+    def import_assets_bg(
+        self, asset_ids: list[int], project_root: Path, dest_subfolder: str = "imported_assets"
+    ) -> importing.ImportStats:
+        """Copies the given assets into a target project (rebuilding each
+        asset's relative path under a per-pack subfolder, not flattened)
+        and records every copy in the imports table. project_root is
+        resolved to an absolute path for the recorded project_identifier,
+        matching the CLI's import command exactly.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            assets = importing.select_assets(conn, asset_ids=asset_ids)
+            project_identifier = str(Path(project_root).resolve())
+            return importing.import_assets(
+                conn,
+                self._staging_folder,
+                Path(project_root),
+                project_identifier,
+                dest_subfolder,
+                assets,
+            )
         finally:
             conn.close()
 
