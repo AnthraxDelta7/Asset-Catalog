@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SETTINGS_PATH = REPO_ROOT / "settings.json"
+
+
+def _default_settings_path() -> Path:
+    """Running from source, settings.json sits at the repo root next to the
+    code -- convenient for development, and REPO_ROOT (derived from
+    __file__) is a real, correct path in that case. A frozen PyInstaller
+    build has no repo root at all (__file__ resolves somewhere inside the
+    bundle), so it uses the standard per-user app-data location instead --
+    stable regardless of where the .exe happens to live, survives a rebuild
+    or reinstall (unlike anywhere under the bundle's own folder, which
+    PyInstaller deletes and recreates on every build), and doesn't need
+    admin rights the way writing next to the .exe would in Program Files.
+    """
+    if getattr(sys, "frozen", False):
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "AssetCatalogue" / "settings.json"
+    return REPO_ROOT / "settings.json"
+
+
+SETTINGS_PATH = _default_settings_path()
 
 
 @dataclass
@@ -55,4 +77,5 @@ def load() -> Settings:
 
 
 def save(settings: Settings) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(asdict(settings), indent=2))
