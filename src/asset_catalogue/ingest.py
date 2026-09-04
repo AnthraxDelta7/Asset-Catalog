@@ -18,6 +18,15 @@ HASH_CHUNK_SIZE = 1024 * 1024
 # zip-extraction depth, never ordinary folder nesting, which stays unlimited.
 MAX_NESTED_ZIP_DEPTH = 10
 
+# Quality control: this catalogue is for raw 3D/2D/audio content, and this
+# is now the whitelist of what actually gets catalogued -- a file whose
+# extension isn't a key here is skipped entirely during ingest, not
+# catalogued as a generic "other" asset. This is deliberately a whitelist
+# rather than a blacklist of known-bad extensions (Unity/Unreal project
+# files, etc.): a blacklist only excludes what it explicitly knows about,
+# so anything unanticipated (a new engine, a random stray file) still got
+# catalogued as noise; a whitelist only *includes* what it explicitly
+# knows how to handle, so nothing unrecognized slips through either way.
 ASSET_TYPE_BY_EXTENSION: dict[str, str] = {
     ".obj": "model",
     ".fbx": "model",
@@ -38,25 +47,13 @@ ASSET_TYPE_BY_EXTENSION: dict[str, str] = {
     ".flac": "audio",
 }
 
-# Quality control: this catalogue is for raw 3D/2D/audio content, not
-# game-engine project data. A purchased pack sometimes bundles Unity/Unreal
-# project files alongside the actual usable assets (a sample scene, .meta
-# sidecars, serialized ScriptableObjects, etc.) -- those aren't reusable
-# outside their originating engine project, so they're excluded rather than
-# catalogued as generic "other" assets.
-ENGINE_PROJECT_EXTENSIONS: set[str] = {
-    # Unity
-    ".meta", ".unity", ".prefab", ".asset", ".mat", ".controller",
-    ".anim", ".mask", ".playable", ".signal", ".mixer", ".guiskin",
-    ".spriteatlas", ".asmdef", ".asmref", ".unitypackage", ".uxml", ".uss",
-    ".shadervariants", ".cs",
-    # Unreal
-    ".uasset", ".umap", ".uproject", ".uplugin", ".upk",
-}
-
 # Whole folders belonging to an engine project's build/cache machinery
 # (never real content) -- skipped entirely, not walked into. Matched
-# case-insensitively against the folder name only, not the full path.
+# case-insensitively against the folder name only, not the full path. Kept
+# even under the whitelist model below: these folders can genuinely contain
+# files with whitelisted extensions (e.g. Unity's Library/ caching its own
+# internal preview textures), which aren't real pack content just because
+# their extension looks like one.
 ENGINE_PROJECT_FOLDER_NAMES: set[str] = {
     name.lower()
     for name in (
@@ -88,7 +85,7 @@ class IngestStats:
     duplicate: int = 0
     total: int = 0
     nested_zips_extracted: int = 0
-    skipped_engine_files: int = 0
+    skipped_unrecognized_files: int = 0
     skipped_engine_folders: int = 0
     archived: int = 0
     thumbnails_generated: int = 0
@@ -193,10 +190,6 @@ def ingest_pack(
             if not entry.is_file():
                 continue
 
-            if entry.suffix.lower() in ENGINE_PROJECT_EXTENSIONS:
-                stats.skipped_engine_files += 1
-                continue
-
             if entry.suffix.lower() == ".zip":
                 if zip_depth >= MAX_NESTED_ZIP_DEPTH:
                     raise ValueError(
@@ -213,6 +206,10 @@ def ingest_pack(
                     archives.extract_zip(entry, extracted_dir)
                     stats.nested_zips_extracted += 1
                 work_items.append((extracted_dir, zip_depth + 1))
+                continue
+
+            if entry.suffix.lower() not in ASSET_TYPE_BY_EXTENSION:
+                stats.skipped_unrecognized_files += 1
                 continue
 
             stats.total += 1

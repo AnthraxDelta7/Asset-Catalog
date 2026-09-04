@@ -43,10 +43,10 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"  (unpacked {stats.nested_zips_extracted} nested zip file(s) "
             "found inside the pack)"
         )
-    if stats.skipped_engine_files or stats.skipped_engine_folders:
+    if stats.skipped_unrecognized_files or stats.skipped_engine_folders:
         print(
-            f"  (skipped {stats.skipped_engine_files} Unity/Unreal project file(s) "
-            f"and {stats.skipped_engine_folders} project folder(s) -- not asset content)"
+            f"  (skipped {stats.skipped_unrecognized_files} unrecognized file(s) "
+            f"and {stats.skipped_engine_folders} project folder(s) -- not a supported asset type)"
         )
     print(f"  (archived {stats.archived} asset(s) to the library)")
     print(f"  (generated {stats.thumbnails_generated} thumbnail(s), {stats.thumbnails_failed} failed)")

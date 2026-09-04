@@ -70,10 +70,55 @@ def test_ingest_pack_skips_engine_project_files_and_folders(conn: sqlite3.Connec
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
 
     assert stats.new == 1
-    assert stats.skipped_engine_files == 1
+    assert stats.skipped_unrecognized_files == 1
     assert stats.skipped_engine_folders == 1
     filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
     assert filenames == {"real_asset.png"}
+
+
+def test_ingest_pack_is_a_whitelist_not_just_a_blacklist(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    """Any extension not explicitly recognized is skipped now, not just the
+    known Unity/Unreal ones -- catalogued files always have a real
+    asset_type, never fall through to 'other'.
+    """
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "real_asset.png").write_bytes(b"real")
+    (pack_root / "readme.txt").write_bytes(b"not a Unity/Unreal file, still not on the whitelist")
+    (pack_root / "notes.psd").write_bytes(b"also not on the whitelist")
+
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assert stats.new == 1
+    assert stats.skipped_unrecognized_files == 2
+    filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
+    assert filenames == {"real_asset.png"}
+
+
+def test_ingest_pack_still_extracts_nested_zips_despite_zip_not_being_whitelisted(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    """.zip isn't in ASSET_TYPE_BY_EXTENSION either -- it must still be
+    extracted, not skipped as "unrecognized", so nested-zip handling has
+    to be checked before the whitelist filter, not after.
+    """
+    import zipfile
+
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    nested_zip = pack_root / "Bonus.zip"
+    with zipfile.ZipFile(nested_zip, "w") as zf:
+        zf.writestr("bonus.png", b"bonus data")
+
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assert stats.nested_zips_extracted == 1
+    assert stats.new == 1
+    assert stats.skipped_unrecognized_files == 0
+    filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
+    assert filenames == {"bonus.png"}
 
 
 def test_ingest_pack_extracts_nested_zip(conn: sqlite3.Connection, staging_folder: Path) -> None:

@@ -5,8 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QStringListModel, QThread, QUrl, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -341,6 +341,43 @@ class ThumbnailPreviewDialog(QDialog):
         self.resize(self.PREVIEW_SIZE + 40, self.PREVIEW_SIZE + 100)
 
 
+class PlayButton(QPushButton):
+    """A push button that fills left-to-right with playback progress, like
+    a small progress bar built into the button itself -- feedback that
+    audio is actually playing (and roughly how far through the clip)
+    without a separate widget alongside it. Paints its own background/fill/
+    text from scratch rather than layering on top of the platform style,
+    since a semi-transparent overlay approach fights with however the
+    current style already paints the button's own background.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._progress = 0.0
+
+    def set_progress(self, progress: float) -> None:
+        progress = max(0.0, min(1.0, progress))
+        if progress != self._progress:
+            self._progress = progress
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect()
+
+        base_color = QColor("#232323") if not self.isDown() else QColor("#1a1a1a")
+        painter.fillRect(rect, base_color)
+
+        if self._progress > 0:
+            fill_rect = QRectF(0, 0, rect.width() * self._progress, rect.height())
+            painter.fillRect(fill_rect, QColor(60, 110, 170))
+
+        painter.setPen(QColor("#e8e8e8"))
+        painter.drawText(rect, Qt.AlignCenter, self.text())
+        painter.end()
+
+
 class DetailPanel(QWidget):
     """Single-asset mode (exactly one grid selection): full tag editing plus
     a link to the asset's archived copy in the library. Multi-select mode
@@ -428,8 +465,9 @@ class DetailPanel(QWidget):
         self._audio_output = QAudioOutput(self)
         self._media_player.setAudioOutput(self._audio_output)
         self._media_player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self.play_button = QPushButton("▶ Play")
-        self.play_button.clicked.connect(self._toggle_playback)
+        self._media_player.positionChanged.connect(self._on_playback_position_changed)
+        self.play_button = PlayButton("▶ Play")
+        self.play_button.clicked.connect(self.toggle_playback)
         self.play_button.setVisible(False)
         layout.addWidget(self.play_button)
 
@@ -660,9 +698,16 @@ class DetailPanel(QWidget):
         self._playable_audio_path = None
         self.play_button.setVisible(False)
         self.play_button.setText("▶ Play")
+        self.play_button.set_progress(0.0)
 
-    def _toggle_playback(self) -> None:
-        if self._media_player.playbackState() == QMediaPlayer.PlayingState:
+    def is_audio_playable(self) -> bool:
+        return self._playable_audio_path is not None
+
+    def is_playing(self) -> bool:
+        return self._media_player.playbackState() == QMediaPlayer.PlayingState
+
+    def toggle_playback(self) -> None:
+        if self.is_playing():
             self._media_player.stop()
             return
         if self._playable_audio_path is None:
@@ -671,7 +716,14 @@ class DetailPanel(QWidget):
         self._media_player.play()
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        self.play_button.setText("⏹ Stop" if state == QMediaPlayer.PlayingState else "▶ Play")
+        self.play_button.setText("Stop" if state == QMediaPlayer.PlayingState else "▶ Play")
+        if state != QMediaPlayer.PlayingState:
+            self.play_button.set_progress(0.0)
+
+    def _on_playback_position_changed(self, position: int) -> None:
+        duration = self._media_player.duration()
+        if duration > 0:
+            self.play_button.set_progress(position / duration)
 
     def _on_pack_link_clicked(self, pack_name: str) -> None:
         self._on_filter_by_pack(html.unescape(pack_name))
@@ -1874,11 +1926,11 @@ class MainWindow(QMainWindow):
                     f"\nUnpacked {stats.nested_zips_extracted} nested zip file(s) "
                     "found inside the pack"
                 )
-            if stats.skipped_engine_files or stats.skipped_engine_folders:
+            if stats.skipped_unrecognized_files or stats.skipped_engine_folders:
                 message += (
-                    f"\nSkipped {stats.skipped_engine_files} Unity/Unreal project "
+                    f"\nSkipped {stats.skipped_unrecognized_files} unrecognized "
                     f"file(s) and {stats.skipped_engine_folders} project folder(s) "
-                    "-- not asset content"
+                    "-- not a supported asset type"
                 )
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
@@ -2303,6 +2355,11 @@ class MainWindow(QMainWindow):
                     convert_action.setEnabled(
                         not self._catalogue.has_pending_conversion(asset.id)
                     )
+                if asset.asset_type == "audio":
+                    play_label = "Stop" if self.detail_panel.is_playing() else "▶ Play"
+                    play_action = menu.addAction(play_label)
+                    play_action.triggered.connect(self.detail_panel.toggle_playback)
+                    play_action.setEnabled(self.detail_panel.is_audio_playable())
                 menu.addSeparator()
         else:
             selected_ids = {item.data(Qt.UserRole) for item in selected}
