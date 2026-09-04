@@ -1,5 +1,7 @@
 # Asset Catalogue
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 Standalone tool for cataloguing, tagging, previewing and importing game assets. Design rationale lives in [asset-catalogue-seed.md](asset-catalogue-seed.md); this file tracks day-to-day usage as commands land.
 
 ## Setup
@@ -280,3 +282,7 @@ Build order from the seed doc, tracked here:
 - [x] Import + tracking
 
 All seven build-order steps from the seed doc are now done, and every one of them (ingest, tagging, calibration, and now import) is also reachable from the UI, not just the CLI — the UI is a full front end, not just a browsing/tagging viewer.
+
+## License
+
+GPLv3 (GNU General Public License v3.0) — see [LICENSE](LICENSE). Free to use, modify, and redistribute; any redistributed modified version must also be licensed under the GPL and made available in source form, which is what keeps a repackaged/closed-source resale off the table.
