@@ -1,11 +1,79 @@
 from __future__ import annotations
 
 import sqlite3
+import struct
+import wave
 from pathlib import Path
+
+import pytest
 
 from asset_catalogue import audio_thumbnails, ingest
 
 from conftest import write_wav
+
+
+def _write_pcm_wav(path: Path, sample_width: int) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(sample_width)
+        w.setframerate(44100)
+        frame = bytes([200]) * sample_width + bytes([50]) * sample_width
+        w.writeframes(frame * 800)
+
+
+def _write_extensible_float32_wav(path: Path, n_frames: int = 1600) -> None:
+    """Hand-builds a WAVE_FORMAT_EXTENSIBLE 32-bit float WAV -- the format
+    many DAWs/export tools actually use, which the stdlib `wave` module
+    can't write (or even open -- see audio_thumbnails._parse_wav).
+    """
+    n_channels = 1
+    sample_rate = 44100
+    bits_per_sample = 32
+    block_align = n_channels * bits_per_sample // 8
+    byte_rate = sample_rate * block_align
+
+    sub_format_guid = struct.pack("<H", 3) + bytes.fromhex("0000000000100080000000aa00389b71")
+    fmt_chunk = (
+        struct.pack(
+            "<HHIIHHHH", 0xFFFE, n_channels, sample_rate, byte_rate, block_align,
+            bits_per_sample, 22, bits_per_sample,
+        )
+        + struct.pack("<I", 0)  # channel mask
+        + sub_format_guid
+    )
+    samples = struct.pack(f"<{n_frames}f", *([0.5, -0.25] * (n_frames // 2)))
+
+    with path.open("wb") as f:
+        f.write(b"RIFF")
+        f.write(struct.pack("<I", 0))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(struct.pack("<I", len(fmt_chunk)))
+        f.write(fmt_chunk)
+        f.write(b"data")
+        f.write(struct.pack("<I", len(samples)))
+        f.write(samples)
+    size = path.stat().st_size - 8
+    with path.open("r+b") as f:
+        f.seek(4)
+        f.write(struct.pack("<I", size))
+
+
+@pytest.mark.parametrize("sample_width", [1, 2, 3, 4])
+def test_render_waveform_thumbnail_handles_all_pcm_bit_depths(tmp_path: Path, sample_width: int) -> None:
+    src = tmp_path / f"pcm_{sample_width}.wav"
+    _write_pcm_wav(src, sample_width)
+    dest = tmp_path / f"pcm_{sample_width}.png"
+    audio_thumbnails.render_waveform_thumbnail(src, dest)
+    assert dest.is_file()
+
+
+def test_render_waveform_thumbnail_handles_extensible_float32(tmp_path: Path) -> None:
+    src = tmp_path / "extensible_float.wav"
+    _write_extensible_float32_wav(src)
+    dest = tmp_path / "extensible_float.png"
+    audio_thumbnails.render_waveform_thumbnail(src, dest)
+    assert dest.is_file()
 
 
 def test_generate_audio_thumbnails_renders_waveform_for_wav(

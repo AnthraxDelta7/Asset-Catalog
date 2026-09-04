@@ -23,21 +23,123 @@ PLACEHOLDER_COLOR = (140, 140, 150)
 # distinct from other asset types, without pretending to show real data.
 WAVEFORM_EXTENSIONS = {".wav"}
 
+# WAV's own format-tag values, from the fmt chunk -- `wave` gives us
+# channels/sample-width/frame-rate but never this, and it's needed to tell
+# 32-bit integer PCM apart from 32-bit IEEE float (same sample_width,
+# completely different byte layout and value range).
+WAVE_FORMAT_PCM = 1
+WAVE_FORMAT_IEEE_FLOAT = 3
+WAVE_FORMAT_EXTENSIBLE = 0xFFFE
+
+
+def _parse_wav(source_path: Path) -> tuple[int, int, int, bytes]:
+    """Manually parses the WAV file's RIFF chunks and returns
+    (format_tag, n_channels, sample_width_bytes, raw_data_bytes).
+
+    Bypasses the stdlib `wave` module entirely, rather than just reading
+    the format tag ourselves and letting `wave` handle the rest -- verified
+    that `wave.open()` outright refuses to open a WAVE_FORMAT_EXTENSIBLE
+    file whose SubFormat isn't its own hardcoded PCM GUID, raising
+    `wave.Error: unknown extended format` for a perfectly valid 32-bit
+    float WAVE_FORMAT_EXTENSIBLE file -- a format real audio tools commonly
+    export. Chunk-walking (not fixed offsets) since real files often carry
+    extra chunks (LIST/INFO metadata, etc.) before "fmt "/"data". For
+    WAVE_FORMAT_EXTENSIBLE, the real format tag is buried in the first two
+    bytes of the 16-byte SubFormat GUID rather than the base tag field.
+    """
+    try:
+        with source_path.open("rb") as f:
+            header = f.read(12)
+            if header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+                raise ValueError(f"Not a valid WAV file: {source_path.name}")
+
+            format_tag: int | None = None
+            n_channels: int | None = None
+            sample_width: int | None = None
+            raw_data: bytes | None = None
+
+            while True:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                chunk_id = chunk_header[:4]
+                chunk_size = struct.unpack("<I", chunk_header[4:8])[0]
+
+                if chunk_id == b"fmt ":
+                    fmt_data = f.read(chunk_size)
+                    format_tag, n_channels = struct.unpack("<HH", fmt_data[:4])
+                    bits_per_sample = struct.unpack("<H", fmt_data[14:16])[0]
+                    sample_width = bits_per_sample // 8
+                    if format_tag == WAVE_FORMAT_EXTENSIBLE and len(fmt_data) >= 26:
+                        format_tag = struct.unpack("<H", fmt_data[24:26])[0]
+                elif chunk_id == b"data":
+                    raw_data = f.read(chunk_size)
+                else:
+                    f.seek(chunk_size, 1)
+                # Chunks are word-aligned; an odd-sized chunk has a padding
+                # byte after it that isn't part of chunk_size.
+                if chunk_size % 2:
+                    f.read(1)
+
+            if format_tag is None or n_channels is None or sample_width is None:
+                raise ValueError(f"WAV file has no fmt chunk: {source_path.name}")
+            if raw_data is None:
+                raise ValueError(f"WAV file has no data chunk: {source_path.name}")
+            return format_tag, n_channels, sample_width, raw_data
+    except struct.error as exc:
+        raise ValueError(f"Malformed WAV header: {source_path.name}") from exc
+
+
+def _decode_pcm_samples(raw: bytes, sample_width: int) -> tuple[list[int], int]:
+    """Returns (signed samples, max possible amplitude for that width).
+    WAV's 8-bit PCM is stored unsigned (centered at 128) -- every other
+    integer width is signed -- so 8-bit needs re-centering before it's
+    comparable to the others. 24-bit has no native `struct` format code,
+    so it's unpacked manually as little-endian byte triplets with sign
+    extension.
+    """
+    if sample_width == 1:
+        return [b - 128 for b in raw], 128
+    if sample_width == 2:
+        count = len(raw) // 2
+        return list(struct.unpack(f"<{count}h", raw[: count * 2])), 1 << 15
+    if sample_width == 3:
+        count = len(raw) // 3
+        samples = []
+        for i in range(count):
+            b0, b1, b2 = raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]
+            value = b0 | (b1 << 8) | (b2 << 16)
+            if value >= 1 << 23:
+                value -= 1 << 24
+            samples.append(value)
+        return samples, 1 << 23
+    if sample_width == 4:
+        count = len(raw) // 4
+        return list(struct.unpack(f"<{count}i", raw[: count * 4])), 1 << 31
+    raise ValueError(f"Unsupported WAV sample width: {sample_width * 8}-bit")
+
+
+def _decode_float_samples(raw: bytes, sample_width: int) -> tuple[list[float], float]:
+    """IEEE float WAV samples are already normalized to roughly -1.0..1.0."""
+    if sample_width == 4:
+        count = len(raw) // 4
+        return list(struct.unpack(f"<{count}f", raw[: count * 4])), 1.0
+    if sample_width == 8:
+        count = len(raw) // 8
+        return list(struct.unpack(f"<{count}d", raw[: count * 8])), 1.0
+    raise ValueError(f"Unsupported floating-point WAV sample width: {sample_width * 8}-bit")
+
 
 def render_waveform_thumbnail(source_path: Path, dest_path: Path) -> None:
-    with wave.open(str(source_path), "rb") as wav_file:
-        n_channels = wav_file.getnchannels()
-        sample_width = wav_file.getsampwidth()
-        raw = wav_file.readframes(wav_file.getnframes())
+    format_tag, n_channels, sample_width, raw = _parse_wav(source_path)
 
-    if sample_width != 2:
-        # 8-bit/24-bit/32-bit-or-float PCM isn't handled by the 16-bit
-        # unpack below -- treated as a decode failure (retried later like
-        # any other failed thumbnail) rather than misinterpreting bytes.
-        raise ValueError(f"Unsupported WAV sample width: {sample_width * 8}-bit")
+    if format_tag == WAVE_FORMAT_IEEE_FLOAT:
+        samples, max_amplitude = _decode_float_samples(raw, sample_width)
+    elif format_tag == WAVE_FORMAT_PCM:
+        samples, max_amplitude = _decode_pcm_samples(raw, sample_width)
+    else:
+        raise ValueError(f"Unsupported WAV format tag: {format_tag}")
 
-    total_samples = len(raw) // 2
-    samples = struct.unpack(f"<{total_samples}h", raw[: total_samples * 2])
     if n_channels > 1:
         samples = samples[::n_channels]  # first channel only -- plenty for a preview
 
@@ -48,7 +150,7 @@ def render_waveform_thumbnail(source_path: Path, dest_path: Path) -> None:
     if samples:
         chunk_size = max(1, len(samples) // width)
         mid_y = height / 2
-        scale = (height / 2 - 4) / 32768
+        scale = (height / 2 - 4) / max_amplitude
         for x in range(width):
             chunk = samples[x * chunk_size : (x + 1) * chunk_size]
             if not chunk:
