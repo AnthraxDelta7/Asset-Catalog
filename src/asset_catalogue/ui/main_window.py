@@ -345,10 +345,12 @@ class PlayButton(QPushButton):
     """A push button that fills left-to-right with playback progress, like
     a small progress bar built into the button itself -- feedback that
     audio is actually playing (and roughly how far through the clip)
-    without a separate widget alongside it. Paints its own background/fill/
-    text from scratch rather than layering on top of the platform style,
-    since a semi-transparent overlay approach fights with however the
-    current style already paints the button's own background.
+    without a separate widget alongside it. Draws the button completely
+    normally first (same style/theme/hover/disabled look as every other
+    QPushButton in the app), then overlays just a semi-transparent progress
+    wash on top -- an earlier version hand-painted the whole button from
+    scratch instead, which looked visibly flat/grayed-out next to the
+    platform-styled buttons around it.
     """
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
@@ -362,19 +364,14 @@ class PlayButton(QPushButton):
             self.update()
 
     def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._progress <= 0:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
-
-        base_color = QColor("#232323") if not self.isDown() else QColor("#1a1a1a")
-        painter.fillRect(rect, base_color)
-
-        if self._progress > 0:
-            fill_rect = QRectF(0, 0, rect.width() * self._progress, rect.height())
-            painter.fillRect(fill_rect, QColor(60, 110, 170))
-
-        painter.setPen(QColor("#e8e8e8"))
-        painter.drawText(rect, Qt.AlignCenter, self.text())
+        fill_rect = QRectF(0, 0, rect.width() * self._progress, rect.height())
+        painter.fillRect(fill_rect, QColor(90, 150, 220, 90))
         painter.end()
 
 
