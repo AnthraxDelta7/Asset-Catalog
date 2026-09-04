@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import audio_thumbnails, thumbnails
+from asset_catalogue import audio_thumbnails, paths, thumbnails
 
 ProgressCallback = Callable[[str], None]
 
@@ -19,7 +19,7 @@ ProgressCallback = Callable[[str], None]
 # import_mesh.stl operators. Verified against 5.2.1; not tested below 4.0.
 MIN_BLENDER_VERSION = (4, 0, 0)
 
-RENDER_SCRIPT_PATH = Path(__file__).parent / "blender_thumbnail_script.py"
+RENDER_SCRIPT_PATH = paths.package_dir() / "blender_thumbnail_script.py"
 
 _WINDOWS_SEARCH_DIRS = (
     Path("C:/Program Files/Blender Foundation"),

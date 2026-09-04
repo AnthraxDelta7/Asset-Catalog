@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import ingest, library_assets
+from asset_catalogue import ingest, library_assets, paths
 
 ProgressCallback = Callable[[str], None]
 
-CONVERT_SCRIPT_PATH = Path(__file__).parent / "blender_convert_script.py"
+CONVERT_SCRIPT_PATH = paths.package_dir() / "blender_convert_script.py"
 CONVERT_TIMEOUT_SECONDS = 300
 
 
