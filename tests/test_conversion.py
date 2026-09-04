@@ -54,6 +54,20 @@ def test_has_pending_conversion_and_listing(conn: sqlite3.Connection, staging_fo
     assert conversion.list_pending_conversion_asset_ids(conn) == [asset_id]
 
 
+def test_list_pending_conversions_includes_pack_and_filenames(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    asset_id = _make_asset_with_pending_conversion(conn, staging_folder, assets_dir)
+    rows = conversion.list_pending_conversions(conn)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["asset_id"] == asset_id
+    assert row["pack_name"] == "Pack"
+    assert row["original_filename"] == "model.fbx"
+    assert row["converted_filename"] == "model.glb"
+    assert row["converted_at"] == "2020-01-01T00:00:00"
+
+
 def test_revert_conversion_restores_original_and_removes_glb(
     conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
 ) -> None:

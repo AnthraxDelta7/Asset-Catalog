@@ -311,6 +311,24 @@ def list_pending_conversion_asset_ids(conn: sqlite3.Connection) -> list[int]:
     ]
 
 
+def list_pending_conversions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Everything needed to show a real, reviewable list of pending
+    conversions -- which assets, which packs, converted when -- rather than
+    just the count `count_pending_conversions` gives. Backs the pending-
+    conversions review dialog, so a bulk revert/cleanup decision can be
+    made with actual context instead of a bare confirmation prompt.
+    """
+    return conn.execute(
+        "SELECT pending_conversions.asset_id, assets.filename AS converted_filename, "
+        "pending_conversions.original_filename, packs.name AS pack_name, "
+        "pending_conversions.converted_at "
+        "FROM pending_conversions "
+        "JOIN assets ON assets.id = pending_conversions.asset_id "
+        "JOIN packs ON packs.id = assets.pack_id "
+        "ORDER BY packs.name, pending_conversions.converted_at"
+    ).fetchall()
+
+
 def revert_conversion(
     conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path, asset_id: int
 ) -> bool:

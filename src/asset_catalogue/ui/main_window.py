@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStyle,
+    QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -1678,6 +1680,193 @@ class CalibrationReviewDialog(QDialog):
         self._run_job(job, f"Removing '{self._pack_name}'...", on_ok)
 
 
+class PendingConversionsDialog(QDialog):
+    """Real review for pending glTF conversions -- what the status bar's
+    pending-conversions badge opens now, replacing what used to be a bare
+    "delete N originals?" confirmation (the same information the badge
+    already gave) with an actual list of which assets, which packs, and
+    when they were converted, so a revert/keep decision can be made with
+    real context instead of just a count. Supports acting on a subset
+    (select rows, Revert or Keep just those) as well as the original
+    all-at-once bulk action.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self._worker: _BackgroundWorker | None = None
+        self._asset_ids: list[int] = []
+        self.setWindowTitle("Pending Conversions")
+        self.resize(640, 420)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "These model assets were converted to .glb, but the pre-conversion "
+            "original hasn't been reverted or cleaned up yet. Select one or more "
+            "rows to act on just those, or use Keep All to confirm every "
+            "conversion listed here at once."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Pack", "Original File", "Converted To", "Converted At"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, stretch=1)
+
+        selection_row = QHBoxLayout()
+        self.revert_button = QPushButton("Revert Selected")
+        self.revert_button.clicked.connect(self._revert_selected)
+        self.keep_button = QPushButton("Keep Selected (Delete Originals)")
+        self.keep_button.clicked.connect(self._keep_selected)
+        selection_row.addWidget(self.revert_button)
+        selection_row.addWidget(self.keep_button)
+        layout.addLayout(selection_row)
+
+        bulk_row = QHBoxLayout()
+        self.keep_all_button = QPushButton("Keep All (Delete All Originals)")
+        self.keep_all_button.clicked.connect(self._keep_all)
+        bulk_row.addWidget(self.keep_all_button)
+        bulk_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        bulk_row.addWidget(close_button)
+        layout.addLayout(bulk_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        rows = self._catalogue.list_pending_conversions()
+        self._asset_ids = [row["asset_id"] for row in rows]
+        self.table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self.table.setItem(i, 0, QTableWidgetItem(row["pack_name"]))
+            self.table.setItem(i, 1, QTableWidgetItem(row["original_filename"]))
+            self.table.setItem(i, 2, QTableWidgetItem(row["converted_filename"]))
+            self.table.setItem(i, 3, QTableWidgetItem(row["converted_at"]))
+        self.table.resizeColumnsToContents()
+        has_rows = bool(rows)
+        self.revert_button.setEnabled(has_rows)
+        self.keep_button.setEnabled(has_rows)
+        self.keep_all_button.setEnabled(has_rows)
+        if not rows:
+            # Nothing left to review -- close rather than leave an empty
+            # table sitting open with every action already disabled.
+            self.accept()
+
+    def _selected_asset_ids(self) -> list[int]:
+        selected_rows = {index.row() for index in self.table.selectedIndexes()}
+        return [self._asset_ids[row] for row in selected_rows]
+
+    def _run_job(self, fn, progress_text: str, on_ok) -> None:
+        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
+        progress.show()
+        worker = _BackgroundWorker(fn)
+
+        def handle_ok(result) -> None:
+            progress.close()
+            on_ok(result)
+
+        def handle_fail(message: str) -> None:
+            progress.close()
+            QMessageBox.critical(self, "Asset Catalogue", message)
+
+        worker.progress.connect(progress.append, Qt.QueuedConnection)
+        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
+        worker.failed.connect(handle_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _revert_selected(self) -> None:
+        asset_ids = self._selected_asset_ids()
+        if not asset_ids:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Revert Conversions",
+            f"Restore the pre-conversion original for {len(asset_ids)} asset(s) and "
+            "discard the converted .glb?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def job(report):
+            reverted = 0
+            for i, asset_id in enumerate(asset_ids, 1):
+                report(f"Reverting asset {i}/{len(asset_ids)}...")
+                if self._catalogue.revert_conversion_bg(asset_id):
+                    reverted += 1
+            return reverted
+
+        def on_ok(reverted) -> None:
+            QMessageBox.information(self, "Asset Catalogue", f"Reverted {reverted} asset(s).")
+            self._refresh()
+
+        self._run_job(job, f"Reverting {len(asset_ids)} asset(s)...", on_ok)
+
+    def _keep_selected(self) -> None:
+        asset_ids = self._selected_asset_ids()
+        if not asset_ids:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Pre-Conversion Originals",
+            f"Permanently delete the pre-conversion original for {len(asset_ids)} "
+            "asset(s)? The converted .glb files are kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def job(report):
+            cleaned = 0
+            for i, asset_id in enumerate(asset_ids, 1):
+                report(f"Cleaning up asset {i}/{len(asset_ids)}...")
+                if self._catalogue.cleanup_pending_conversion_bg(asset_id):
+                    cleaned += 1
+            return cleaned
+
+        def on_ok(cleaned) -> None:
+            QMessageBox.information(self, "Asset Catalogue", f"Deleted {cleaned} pre-conversion original(s).")
+            self._refresh()
+
+        self._run_job(job, f"Cleaning up {len(asset_ids)} asset(s)...", on_ok)
+
+    def _keep_all(self) -> None:
+        count = len(self._asset_ids)
+        if count == 0:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete All Pre-Conversion Originals",
+            f"Permanently delete the pre-conversion original for all {count} "
+            "pending asset(s)? The converted .glb files are kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def job(report):
+            report(f"Cleaning up {count} asset(s)...")
+            return self._catalogue.cleanup_all_pending_conversions_bg()
+
+        def on_ok(cleaned) -> None:
+            QMessageBox.information(self, "Asset Catalogue", f"Deleted {cleaned} pre-conversion original(s).")
+            self._refresh()
+
+        self._run_job(job, f"Cleaning up {count} asset(s)...", on_ok)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, catalogue: Catalogue) -> None:
         super().__init__()
@@ -1748,7 +1937,7 @@ class MainWindow(QMainWindow):
         self.pending_conversions_button.setToolTip(
             "Click to review and clean up pending glTF conversions"
         )
-        self.pending_conversions_button.clicked.connect(self._cleanup_all_pending_conversions)
+        self.pending_conversions_button.clicked.connect(self._open_pending_conversions_dialog)
         self.pending_conversions_button.setVisible(False)
         self.statusBar().addPermanentWidget(self.pending_conversions_button)
 
@@ -2196,6 +2385,11 @@ class MainWindow(QMainWindow):
             lambda count: f"Deleted {count} pre-conversion original(s).",
             self._refresh_grid,
         )
+
+    def _open_pending_conversions_dialog(self) -> None:
+        dialog = PendingConversionsDialog(self._catalogue, self)
+        dialog.exec()
+        self._refresh_grid()
 
     def _filter_by_pack(self, pack_name: str) -> None:
         match = self.filter_panel.pack_list.findItems(pack_name, Qt.MatchExactly)
