@@ -94,8 +94,14 @@ def generate_audio_thumbnails(
     thumbnail_dir: Path,
     pack_name: str | None = None,
     force: bool = False,
+    asset_id: int | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> ThumbnailStats:
+    # Targeting one asset directly (e.g. the detail panel's "Generate
+    # Thumbnail" button) always renders it regardless of prior status, same
+    # as --force -- mirrors blender_render.build_job_list's asset_id
+    # handling for models.
+    effective_force = force or asset_id is not None
     report = on_progress or (lambda _text: None)
     query = (
         "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
@@ -104,11 +110,14 @@ def generate_audio_thumbnails(
         "WHERE assets.asset_type = 'audio'"
     )
     params: list[str] = []
-    if not force:
+    if not effective_force:
         query += " AND assets.thumbnail_status != 'done'"
     if pack_name:
         query += " AND packs.name = ?"
         params.append(pack_name)
+    if asset_id is not None:
+        query += " AND assets.id = ?"
+        params.append(asset_id)
 
     rows = conn.execute(query, params).fetchall()
     stats = ThumbnailStats()
@@ -117,7 +126,7 @@ def generate_audio_thumbnails(
 
         # Thumbnail identity is the hash, not the file -- if it's already on
         # disk (from a previous run) there's nothing to render, just record it.
-        if dest.exists() and not force:
+        if dest.exists() and not effective_force:
             conn.execute(
                 "UPDATE assets SET thumbnail_status = 'done' WHERE id = ?",
                 (row["id"],),

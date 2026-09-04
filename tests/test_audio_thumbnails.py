@@ -36,3 +36,22 @@ def test_generate_audio_thumbnails_placeholder_for_undecodable_format(
     assert stats.generated == 1  # placeholder counts as generated, not failed
     content_hash = conn.execute("SELECT content_hash FROM assets").fetchone()["content_hash"]
     assert audio_thumbnails.thumbnail_path(thumbnail_dir, content_hash).is_file()
+
+
+def test_generate_audio_thumbnails_asset_id_targets_only_that_asset(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    write_wav(staging_folder, "Pack", "a.wav", tone=b"\x00\x01")
+    write_wav(staging_folder, "Pack", "b.wav", tone=b"\x02\x03")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    rows = {row["filename"]: row["id"] for row in conn.execute("SELECT id, filename FROM assets")}
+
+    stats = audio_thumbnails.generate_audio_thumbnails(conn, staging_folder, thumbnail_dir, asset_id=rows["a.wav"])
+    assert stats.generated == 1
+    statuses = {
+        row["filename"]: row["thumbnail_status"]
+        for row in conn.execute("SELECT filename, thumbnail_status FROM assets")
+    }
+    assert statuses["a.wav"] == "done"
+    assert statuses["b.wav"] == "pending"

@@ -50,7 +50,9 @@ def write_texture(
     return path
 
 
-def write_wav(staging_folder: Path, pack_name: str, filename: str = "sound.wav") -> Path:
+def write_wav(
+    staging_folder: Path, pack_name: str, filename: str = "sound.wav", tone: bytes = b"\x00\x01"
+) -> Path:
     import wave
 
     path = staging_folder / pack_name / filename
@@ -59,5 +61,5 @@ def write_wav(staging_folder: Path, pack_name: str, filename: str = "sound.wav")
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(8000)
-        w.writeframes(b"\x00\x01" * 800)
+        w.writeframes(tone * 800)
     return path

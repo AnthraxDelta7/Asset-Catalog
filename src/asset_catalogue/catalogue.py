@@ -494,6 +494,7 @@ class Catalogue:
         self,
         pack: str | None = None,
         force: bool = False,
+        asset_id: int | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
@@ -506,6 +507,7 @@ class Catalogue:
                 self._thumbnail_dir,
                 pack_name=pack,
                 force=force,
+                asset_id=asset_id,
                 on_progress=on_progress,
             )
         finally:
@@ -515,6 +517,7 @@ class Catalogue:
         self,
         pack: str | None = None,
         force: bool = False,
+        asset_id: int | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
@@ -527,6 +530,7 @@ class Catalogue:
                 self._thumbnail_dir,
                 pack_name=pack,
                 force=force,
+                asset_id=asset_id,
                 on_progress=on_progress,
             )
         finally:

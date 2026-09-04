@@ -302,6 +302,7 @@ def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
         s.thumbnail_dir(),
         pack_name=args.pack,
         force=args.force,
+        asset_id=args.asset_id,
     )
     print(
         f"Thumbnails: {stats.generated} generated, "
@@ -323,6 +324,7 @@ def cmd_thumbnail_generate_audio(args: argparse.Namespace) -> None:
         s.thumbnail_dir(),
         pack_name=args.pack,
         force=args.force,
+        asset_id=args.asset_id,
     )
     print(
         f"Audio thumbnails: {stats.generated} generated, "
@@ -870,6 +872,11 @@ def build_parser() -> argparse.ArgumentParser:
     thumbnail_generate_parser.add_argument(
         "--force", action="store_true", help="Re-render even assets already marked done"
     )
+    thumbnail_generate_parser.add_argument(
+        "--asset-id",
+        type=int,
+        help="Render just this one asset, regardless of its current thumbnail status",
+    )
     thumbnail_generate_parser.set_defaults(func=cmd_thumbnail_generate)
 
     thumbnail_generate_models_parser = thumbnail_sub.add_parser(
@@ -893,6 +900,11 @@ def build_parser() -> argparse.ArgumentParser:
     thumbnail_generate_audio_parser.add_argument("--pack")
     thumbnail_generate_audio_parser.add_argument(
         "--force", action="store_true", help="Re-render even assets already marked done"
+    )
+    thumbnail_generate_audio_parser.add_argument(
+        "--asset-id",
+        type=int,
+        help="Render just this one asset, regardless of its current thumbnail status",
     )
     thumbnail_generate_audio_parser.set_defaults(func=cmd_thumbnail_generate_audio)
 

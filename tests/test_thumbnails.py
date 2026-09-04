@@ -78,3 +78,33 @@ def test_generate_texture_thumbnails_force_rerenders_even_if_already_done(
     stats = thumbnails.generate_texture_thumbnails(conn, staging_folder, thumbnail_dir, force=True)
     assert stats.generated == 1
     assert stats.already_done == 0
+
+
+def test_generate_texture_thumbnails_asset_id_targets_only_that_asset(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    """Backs the detail panel's per-asset "Generate Thumbnail" button --
+    must render exactly the requested asset, ignore every other pending
+    asset in the same pack, and re-render regardless of current status
+    (same as --force), without needing --force explicitly passed.
+    """
+    write_texture(staging_folder, "Pack", "a.png", color=(1, 2, 3))
+    write_texture(staging_folder, "Pack", "b.png", color=(4, 5, 6))
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    rows = {row["filename"]: row["id"] for row in conn.execute("SELECT id, filename FROM assets")}
+
+    stats = thumbnails.generate_texture_thumbnails(conn, staging_folder, thumbnail_dir, asset_id=rows["a.png"])
+    assert stats.generated == 1
+    statuses = {
+        row["filename"]: row["thumbnail_status"]
+        for row in conn.execute("SELECT filename, thumbnail_status FROM assets")
+    }
+    assert statuses["a.png"] == "done"
+    assert statuses["b.png"] == "pending"
+
+    # Calling it again on the same asset_id, already 'done', must still
+    # re-render rather than being excluded like a plain non-targeted run.
+    stats2 = thumbnails.generate_texture_thumbnails(conn, staging_folder, thumbnail_dir, asset_id=rows["a.png"])
+    assert stats2.generated == 1
+    assert stats2.already_done == 0

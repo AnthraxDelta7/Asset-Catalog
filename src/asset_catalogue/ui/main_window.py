@@ -48,6 +48,11 @@ THUMBNAIL_ICON_SIZE = QSize(128, 128)
 # with "..." regardless of how much extra grid space was added around them.
 GRID_CELL_SIZE = QSize(THUMBNAIL_ICON_SIZE.width() + 32, THUMBNAIL_ICON_SIZE.height() + 72)
 
+# asset_type values that actually have a thumbnail generator -- 'other'
+# doesn't, so the detail panel's "Generate Thumbnail" button never offers
+# to do something that would just silently do nothing.
+THUMBNAIL_CAPABLE_TYPES = {"texture", "audio", "model"}
+
 
 class FilterPanel(QWidget):
     def __init__(
@@ -364,6 +369,7 @@ class DetailPanel(QWidget):
         on_filter_by_pack,
         on_export_browse,
         on_quick_export,
+        on_generate_thumbnail,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -377,6 +383,7 @@ class DetailPanel(QWidget):
         self._on_filter_by_pack = on_filter_by_pack
         self._on_export_browse = on_export_browse
         self._on_quick_export = on_quick_export
+        self._on_generate_thumbnail = on_generate_thumbnail
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -397,6 +404,14 @@ class DetailPanel(QWidget):
 
         self.meta_label = QLabel("")
         layout.addWidget(self.meta_label)
+
+        # Only shown for a single-selected asset whose thumbnail isn't
+        # 'done' yet, and whose asset_type actually has a thumbnail
+        # generator at all ("other" doesn't -- see THUMBNAIL_CAPABLE_TYPES).
+        self.generate_thumbnail_button = QPushButton("Generate Thumbnail")
+        self.generate_thumbnail_button.clicked.connect(self._generate_thumbnail)
+        self.generate_thumbnail_button.setVisible(False)
+        layout.addWidget(self.generate_thumbnail_button)
 
         self.show_in_library_button = QPushButton("Show in Library Folder")
         self.show_in_library_button.clicked.connect(self._show_in_library)
@@ -527,6 +542,7 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(False)
         self.add_button.setEnabled(False)
         self.show_in_library_button.setEnabled(False)
+        self.generate_thumbnail_button.setVisible(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self._update_export_button(False)
@@ -573,6 +589,7 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(True)
         self.add_button.setEnabled(True)
         self.show_in_library_button.setEnabled(False)
+        self.generate_thumbnail_button.setVisible(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self._update_export_button(True)
@@ -582,9 +599,10 @@ class DetailPanel(QWidget):
         self._asset_id = asset.id
         self._current_asset = asset
         self._multi_asset_ids = []
-        self.title_label.setText(asset.filename)
+        self.title_label.setText(Path(asset.filename).stem)
         self.pack_label.setText(self._pack_link_html(asset.pack_name))
-        self.meta_label.setText(f"type: {asset.asset_type}   thumbnail: {asset.thumbnail_status}")
+        file_format = Path(asset.filename).suffix.lstrip(".").upper() or "(none)"
+        self.meta_label.setText(f"type: {asset.asset_type}   format: {file_format}")
         self.tag_list.clear()
         self.tag_list.addItems(asset.tags)
         self.tag_list.setEnabled(True)
@@ -595,6 +613,9 @@ class DetailPanel(QWidget):
             asset.pack_name, asset.relative_path
         )
         self.show_in_library_button.setEnabled(archived is not None)
+        self.generate_thumbnail_button.setVisible(
+            asset.thumbnail_status != "done" and asset.asset_type in THUMBNAIL_CAPABLE_TYPES
+        )
         pending = self._catalogue.has_pending_conversion(asset.id)
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
@@ -628,6 +649,11 @@ class DetailPanel(QWidget):
         if self._current_asset is None:
             return
         self._on_show_in_library(self._current_asset.pack_name, self._current_asset.relative_path)
+
+    def _generate_thumbnail(self) -> None:
+        if self._current_asset is None:
+            return
+        self._on_generate_thumbnail(self._current_asset.id, self._current_asset.asset_type)
 
     def _stop_playback_and_hide(self) -> None:
         self._media_player.stop()
@@ -1644,6 +1670,7 @@ class MainWindow(QMainWindow):
             self._filter_by_pack,
             self._export_selected_to_project,
             self._quick_export,
+            self._handle_generate_thumbnail,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -2092,6 +2119,26 @@ class MainWindow(QMainWindow):
             lambda report: self._catalogue.cleanup_pending_conversion_bg(asset_id),
             "Deleting pre-conversion original...",
             lambda cleaned: "Deleted the pre-conversion original." if cleaned else "Nothing to clean up.",
+            self._refresh_grid,
+        )
+
+    def _handle_generate_thumbnail(self, asset_id: int, asset_type: str) -> None:
+        if asset_type == "texture":
+            job = lambda report: self._catalogue.generate_2d_thumbnails_bg(asset_id=asset_id, on_progress=report)
+        elif asset_type == "audio":
+            job = lambda report: self._catalogue.generate_audio_thumbnails_bg(asset_id=asset_id, on_progress=report)
+        elif asset_type == "model":
+            job = lambda report: self._catalogue.regenerate_model_thumbnail_bg(asset_id, on_progress=report)
+        else:
+            return
+
+        self._run_background_job(
+            job,
+            "Generating thumbnail...",
+            lambda stats: (
+                f"Thumbnail: {stats.generated} generated, "
+                f"{stats.already_done} already done, {stats.failed} failed"
+            ),
             self._refresh_grid,
         )
 
