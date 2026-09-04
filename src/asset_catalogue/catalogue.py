@@ -10,6 +10,7 @@ from asset_catalogue import (
     audio_thumbnails,
     blender_render,
     conversion,
+    credits,
     db,
     exporting,
     ingest,
@@ -244,6 +245,9 @@ class Catalogue:
 
     def count_pending_conversions(self) -> int:
         return len(conversion.list_pending_conversion_asset_ids(self._conn))
+
+    def generate_credits_report(self, project_root: Path | str | None = None) -> str:
+        return credits.generate_report(self._conn, project_root)
 
     def tag_asset(self, asset_id: int, tag_name: str, category: str | None = None) -> None:
         tag_id = tagging.get_or_create_tag(self._conn, tag_name, category)

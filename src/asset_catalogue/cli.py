@@ -9,6 +9,7 @@ from asset_catalogue import (
     audio_thumbnails,
     blender_render,
     conversion,
+    credits,
     db,
     exporting,
     ingest,
@@ -637,6 +638,12 @@ def cmd_exports(args: argparse.Namespace) -> None:
     print(f"{len(rows)} export record(s)")
 
 
+def cmd_credits(args: argparse.Namespace) -> None:
+    conn = _connect()
+    project_root = Path(args.project_root) if args.project_root else None
+    print(credits.generate_report(conn, project_root), end="")
+
+
 def cmd_remove(args: argparse.Namespace) -> None:
     if not any([args.asset_id, args.pack, args.type, args.tag, args.all]):
         raise SystemExit(
@@ -1007,6 +1014,19 @@ def build_parser() -> argparse.ArgumentParser:
     exports_parser.add_argument("--project", help="Filter to one target project path")
     exports_parser.add_argument("--asset-id", type=int)
     exports_parser.set_defaults(func=cmd_exports)
+
+    credits_parser = subparsers.add_parser(
+        "credits",
+        help="Generate a plain-text attribution report (creator/licence/source URL per pack)",
+    )
+    credits_parser.add_argument(
+        "project_root",
+        nargs="?",
+        default=None,
+        help="Limit to packs with at least one asset exported into this project; "
+        "omit for every pack in the catalogue",
+    )
+    credits_parser.set_defaults(func=cmd_credits)
 
     remove_parser = subparsers.add_parser(
         "remove",

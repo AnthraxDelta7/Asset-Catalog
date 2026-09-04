@@ -5,8 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QStringListModel, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QStringListModel, QThread, QUrl, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -294,6 +295,47 @@ class ThumbnailGrid(QListWidget):
         return placeholder
 
 
+class ThumbnailPreviewDialog(QDialog):
+    """A larger view of an asset's already-rendered thumbnail -- the 128px
+    grid icon doesn't show much detail for a busy texture or a complex
+    model render. Just the existing thumbnail image scaled up, not a live
+    re-render or an interactive 3D viewer.
+    """
+
+    PREVIEW_SIZE = 512
+
+    def __init__(self, asset: AssetSummary, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(asset.filename)
+
+        layout = QVBoxLayout(self)
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setMinimumSize(self.PREVIEW_SIZE, self.PREVIEW_SIZE)
+
+        path = catalogue.thumbnail_path_for(asset.content_hash)
+        pixmap = QPixmap(str(path)) if path is not None else QPixmap()
+        if not pixmap.isNull():
+            dpr = self.devicePixelRatioF()
+            physical_size = QSize(round(self.PREVIEW_SIZE * dpr), round(self.PREVIEW_SIZE * dpr))
+            scaled = pixmap.scaled(physical_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            image_label.setPixmap(scaled)
+        else:
+            image_label.setText("(no thumbnail rendered yet)")
+        layout.addWidget(image_label, stretch=1)
+
+        info_label = QLabel(f"{asset.pack_name} / {asset.filename}   ({asset.asset_type})")
+        info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(info_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+        self.resize(self.PREVIEW_SIZE + 40, self.PREVIEW_SIZE + 100)
+
+
 class DetailPanel(QWidget):
     """Single-asset mode (exactly one grid selection): full tag editing plus
     a link to the asset's archived copy in the library. Multi-select mode
@@ -359,6 +401,22 @@ class DetailPanel(QWidget):
         self.show_in_library_button = QPushButton("Show in Library Folder")
         self.show_in_library_button.clicked.connect(self._show_in_library)
         layout.addWidget(self.show_in_library_button)
+
+        # Only shown for a single-selected audio asset that's actually been
+        # archived (same enablement condition as Show in Library Folder --
+        # that's the reliable "there's a real file to play" signal). Plays
+        # straight from the archived library copy, not staging, so it's
+        # unaffected by whatever's currently selected in the staging
+        # browser and always available once ingested.
+        self._playable_audio_path: Path | None = None
+        self._media_player = QMediaPlayer(self)
+        self._audio_output = QAudioOutput(self)
+        self._media_player.setAudioOutput(self._audio_output)
+        self._media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.play_button = QPushButton("▶ Play")
+        self.play_button.clicked.connect(self._toggle_playback)
+        self.play_button.setVisible(False)
+        layout.addWidget(self.play_button)
 
         # Only shown for a single-selected asset with a pending conversion
         # (see conversion.py) -- lets the user review a converted .glb next
@@ -472,6 +530,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self._update_export_button(False)
+        self._stop_playback_and_hide()
 
     def clear_selection(self) -> None:
         self._asset_id = None
@@ -517,6 +576,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self._update_export_button(True)
+        self._stop_playback_and_hide()
 
     def show_asset(self, asset: AssetSummary) -> None:
         self._asset_id = asset.id
@@ -539,6 +599,11 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
         self._update_export_button(True)
+
+        self._media_player.stop()
+        self._playable_audio_path = archived if asset.asset_type == "audio" else None
+        self.play_button.setVisible(self._playable_audio_path is not None)
+        self.play_button.setText("▶ Play")
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
@@ -563,6 +628,24 @@ class DetailPanel(QWidget):
         if self._current_asset is None:
             return
         self._on_show_in_library(self._current_asset.pack_name, self._current_asset.relative_path)
+
+    def _stop_playback_and_hide(self) -> None:
+        self._media_player.stop()
+        self._playable_audio_path = None
+        self.play_button.setVisible(False)
+        self.play_button.setText("▶ Play")
+
+    def _toggle_playback(self) -> None:
+        if self._media_player.playbackState() == QMediaPlayer.PlayingState:
+            self._media_player.stop()
+            return
+        if self._playable_audio_path is None:
+            return
+        self._media_player.setSource(QUrl.fromLocalFile(str(self._playable_audio_path)))
+        self._media_player.play()
+
+    def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        self.play_button.setText("⏹ Stop" if state == QMediaPlayer.PlayingState else "▶ Play")
 
     def _on_pack_link_clicked(self, pack_name: str) -> None:
         self._on_filter_by_pack(html.unescape(pack_name))
@@ -1208,6 +1291,80 @@ class ExportDialog(QDialog):
         self.accept()
 
 
+class CreditsReportDialog(QDialog):
+    """Generates a plain-text attribution report (creator/licence/source
+    URL per pack) -- for the whole catalogue by default, or narrowed to
+    just the packs actually exported into one project. A read-only preview
+    plus Save As, rather than writing straight to a file, so it's easy to
+    check before it ends up in a real credits screen.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self.setWindowTitle("Credits Report")
+        self.resize(560, 480)
+
+        layout = QVBoxLayout(self)
+
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Project folder:"))
+        self.project_edit = QLineEdit()
+        self.project_edit.setPlaceholderText("(leave blank for the whole catalogue)")
+        scope_row.addWidget(self.project_edit, stretch=1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse_project)
+        scope_row.addWidget(browse_button)
+        generate_button = QPushButton("Generate")
+        generate_button.clicked.connect(self._generate)
+        scope_row.addWidget(generate_button)
+        layout.addLayout(scope_row)
+
+        self.report_view = QPlainTextEdit()
+        self.report_view.setReadOnly(True)
+        font = self.report_view.font()
+        font.setFamily("Consolas")
+        self.report_view.setFont(font)
+        layout.addWidget(self.report_view, stretch=1)
+
+        button_row = QHBoxLayout()
+        save_button = QPushButton("Save As...")
+        save_button.clicked.connect(self._save_as)
+        button_row.addWidget(save_button)
+        button_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        self._generate()
+
+    def _browse_project(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select project folder", self.project_edit.text()
+        )
+        if chosen:
+            self.project_edit.setText(chosen)
+            self._generate()
+
+    def _generate(self) -> None:
+        text = self.project_edit.text().strip()
+        project_root = Path(text) if text else None
+        if project_root is not None and not project_root.is_dir():
+            QMessageBox.warning(self, "Credits Report", f"Folder not found: {project_root}")
+            return
+        report = self._catalogue.generate_credits_report(project_root)
+        self.report_view.setPlainText(report)
+
+    def _save_as(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Save Credits Report", "credits.txt", "Text files (*.txt);;All files (*)"
+        )
+        if not chosen:
+            return
+        Path(chosen).write_text(self.report_view.toPlainText(), encoding="utf-8")
+
+
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -1474,6 +1631,7 @@ class MainWindow(QMainWindow):
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
         self.grid.customContextMenuRequested.connect(self._show_grid_context_menu)
+        self.grid.itemDoubleClicked.connect(self._on_grid_item_double_clicked)
         self.detail_panel = DetailPanel(
             catalogue,
             self._handle_tag_asset,
@@ -1501,6 +1659,27 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(1, 3)
 
         self.setCentralWidget(main_splitter)
+
+        # A persistent, click-to-act reminder for pending glTF conversions
+        # left unresolved (never reverted or cleaned up) -- easy to forget
+        # about since nothing else in the UI surfaces it unless you're
+        # looking at the specific asset. Lives in the status bar's
+        # permanent-widget area so it survives every _refresh_grid() call
+        # without competing with the transient "N asset(s)" message.
+        self.pending_conversions_button = QPushButton()
+        self.pending_conversions_button.setFlat(True)
+        self.pending_conversions_button.setCursor(Qt.PointingHandCursor)
+        self.pending_conversions_button.setStyleSheet(
+            "QPushButton { color: #d9a441; border: none; padding: 2px 8px; }"
+            "QPushButton:hover { text-decoration: underline; }"
+        )
+        self.pending_conversions_button.setToolTip(
+            "Click to review and clean up pending glTF conversions"
+        )
+        self.pending_conversions_button.clicked.connect(self._cleanup_all_pending_conversions)
+        self.pending_conversions_button.setVisible(False)
+        self.statusBar().addPermanentWidget(self.pending_conversions_button)
+
         self._refresh_grid()
 
     def _build_menu(self) -> None:
@@ -1540,6 +1719,9 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         cleanup_conversions_action = tools_menu.addAction("Clean Up Pre-Conversion Assets...")
         cleanup_conversions_action.triggered.connect(self._cleanup_all_pending_conversions)
+        tools_menu.addSeparator()
+        credits_action = tools_menu.addAction("Generate Credits Report...")
+        credits_action.triggered.connect(self._open_credits_dialog)
 
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
         gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
@@ -1759,6 +1941,10 @@ class MainWindow(QMainWindow):
             ),
             self._refresh_grid,
         )
+
+    def _open_credits_dialog(self) -> None:
+        dialog = CreditsReportDialog(self._catalogue, self)
+        dialog.exec()
 
     def _open_tag_pack_dialog(self) -> None:
         if not self._catalogue.list_packs():
@@ -2007,6 +2193,16 @@ class MainWindow(QMainWindow):
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)
         self.statusBar().showMessage(f"{len(self._current_assets)} asset(s)")
+        self._update_pending_conversions_badge()
+
+    def _update_pending_conversions_badge(self) -> None:
+        count = self._catalogue.count_pending_conversions()
+        if count:
+            noun = "conversion" if count == 1 else "conversions"
+            self.pending_conversions_button.setText(f"⚠ {count} pending {noun} -- click to review")
+            self.pending_conversions_button.setVisible(True)
+        else:
+            self.pending_conversions_button.setVisible(False)
 
     def _on_grid_selection_changed(self) -> None:
         selected = self.grid.selectedItems()
@@ -2024,6 +2220,14 @@ class MainWindow(QMainWindow):
             self.detail_panel.show_multi_selection(assets)
         else:
             self.detail_panel.clear_selection()
+
+    def _on_grid_item_double_clicked(self, item) -> None:
+        asset_id = item.data(Qt.UserRole)
+        asset = next((a for a in self._current_assets if a.id == asset_id), None)
+        if asset is None:
+            return
+        dialog = ThumbnailPreviewDialog(asset, self._catalogue, self)
+        dialog.exec()
 
     def _show_grid_context_menu(self, pos) -> None:
         item = self.grid.itemAt(pos)
