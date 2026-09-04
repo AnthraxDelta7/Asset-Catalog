@@ -401,6 +401,8 @@ class Catalogue:
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
+        report = on_progress or (lambda _text: None)
+        report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
         conn = db.connect(settings.load().db_path())
         try:
@@ -541,6 +543,8 @@ class Catalogue:
     ) -> conversion.ConversionResult:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
+        report = on_progress or (lambda _text: None)
+        report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
         conn = db.connect(settings.load().db_path())
         try:
@@ -574,6 +578,8 @@ class Catalogue:
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
+        report = on_progress or (lambda _text: None)
+        report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
         conn = db.connect(settings.load().db_path())
         try:

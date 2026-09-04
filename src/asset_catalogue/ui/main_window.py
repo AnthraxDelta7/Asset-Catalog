@@ -1583,13 +1583,9 @@ class CalibrationReviewDialog(QDialog):
         self._run_job(job, "Re-rendering preview...", on_ok)
 
     def _on_render_all(self) -> None:
-        try:
-            blender_exe = self._catalogue.resolve_blender()
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Asset Catalogue", str(exc))
-            return
-
         def job(report):
+            report("Checking Blender installation...")
+            blender_exe = self._catalogue.resolve_blender()
             return self._catalogue.generate_model_thumbnails_bg(
                 blender_exe, pack=self._pack_name, on_progress=report
             )
@@ -1951,16 +1947,17 @@ class MainWindow(QMainWindow):
         )
 
     def _generate_model_thumbnails(self) -> None:
-        try:
-            blender_exe = self._catalogue.resolve_blender()
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Asset Catalogue", str(exc))
-            return
         pack = self.filter_panel.selected_pack()
-        self._run_background_job(
-            lambda report: self._catalogue.generate_model_thumbnails_bg(
+
+        def job(report):
+            report("Checking Blender installation...")
+            blender_exe = self._catalogue.resolve_blender()
+            return self._catalogue.generate_model_thumbnails_bg(
                 blender_exe, pack=pack, on_progress=report
-            ),
+            )
+
+        self._run_background_job(
+            job,
             "Generating 3D thumbnails via Blender... this can take a while.",
             lambda stats: (
                 f"Model thumbnails: {stats.generated} generated, "
@@ -2045,12 +2042,6 @@ class MainWindow(QMainWindow):
             self._convert_assets_to_gltf(eligible_ids)
 
     def _convert_asset_to_gltf(self, asset_id: int) -> None:
-        try:
-            blender_exe = self._catalogue.resolve_blender()
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Asset Catalogue", str(exc))
-            return
-
         def format_result(result) -> str:
             if not result.ok:
                 return f"Conversion failed: {result.error}"
@@ -2067,12 +2058,6 @@ class MainWindow(QMainWindow):
         )
 
     def _convert_assets_to_gltf(self, asset_ids: list[int]) -> None:
-        try:
-            blender_exe = self._catalogue.resolve_blender()
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Asset Catalogue", str(exc))
-            return
-
         def format_result(result) -> str:
             message = f"Converted {result.converted} to .glb (thumbnails regenerated)."
             if result.skipped:

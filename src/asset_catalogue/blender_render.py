@@ -49,7 +49,11 @@ def find_blender(blender_path_setting: str | None) -> Path | None:
 
 def get_blender_version(blender_exe: Path) -> tuple[int, int, int] | None:
     result = subprocess.run(
-        [str(blender_exe), "--version"], capture_output=True, text=True, timeout=30
+        [str(blender_exe), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
     match = re.search(r"Blender (\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match:
@@ -193,6 +197,7 @@ def generate_model_thumbnails(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
         seen_ids: set[int] = set()

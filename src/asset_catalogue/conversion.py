@@ -157,6 +157,7 @@ def convert_asset_to_gltf(
             capture_output=True,
             text=True,
             timeout=CONVERT_TIMEOUT_SECONDS,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     finally:
         job_list_path.unlink(missing_ok=True)
@@ -251,6 +252,7 @@ def convert_assets_to_gltf(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
         seen_ids: set[int] = set()
