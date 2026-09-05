@@ -12,6 +12,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QSplitter,
     QStyle,
@@ -934,17 +936,29 @@ class StagingBrowserDialog(QDialog):
     widget, which is the documented, known-flaky part). Building a small
     dedicated browser sidesteps relying on that quirky, undocumented corner
     of the native widget's behavior.
+
+    multi_select=True (used by batch ingest) switches the list to extended
+    selection: double-clicking a folder still drills into it (needed to
+    reach the right directory level), but a .zip no longer auto-accepts on
+    double-click since there may be more still to pick, and Select gathers
+    every highlighted entry at the current level -- siblings only, not a
+    recursive pick across subfolders -- into selected_items instead of
+    setting the single selected_relative_path/selected_is_zip pair.
     """
 
-    def __init__(self, staging_folder: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, staging_folder: Path, parent: QWidget | None = None, multi_select: bool = False
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Select Pack")
+        self.setWindowTitle("Select Packs" if multi_select else "Select Pack")
         self.resize(480, 420)
         self._staging_folder = staging_folder
         self._current_dir = staging_folder
+        self._multi_select = multi_select
 
         self.selected_relative_path: str | None = None
         self.selected_is_zip: bool = False
+        self.selected_items: list[tuple[str, bool]] = []
 
         layout = QVBoxLayout(self)
 
@@ -958,15 +972,24 @@ class StagingBrowserDialog(QDialog):
         layout.addLayout(nav_row)
 
         self.list_widget = QListWidget()
+        if multi_select:
+            self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.list_widget, stretch=1)
 
-        hint = QLabel(
-            "Double-click a folder to open it, or a .zip to select it directly. "
-            "Single-click an entry and press Select to pick it without entering it "
-            "(a folder this way, not its contents); with nothing highlighted, Select "
-            "picks the folder you're currently browsing."
-        )
+        if multi_select:
+            hint = QLabel(
+                "Double-click a folder to open it. Ctrl/Shift-click to select several "
+                "folders and/or .zip files at this level, then press Select -- picks "
+                "siblings in the current folder, not a recursive pick across subfolders."
+            )
+        else:
+            hint = QLabel(
+                "Double-click a folder to open it, or a .zip to select it directly. "
+                "Single-click an entry and press Select to pick it without entering it "
+                "(a folder this way, not its contents); with nothing highlighted, Select "
+                "picks the folder you're currently browsing."
+            )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -1018,12 +1041,29 @@ class StagingBrowserDialog(QDialog):
         if kind == "folder":
             self._current_dir = path
             self._refresh_listing()
-        else:
+        elif not self._multi_select:
             self.selected_relative_path = str(path.relative_to(self._staging_folder))
             self.selected_is_zip = True
             self.accept()
+        # multi_select: double-clicking a zip just leaves it selected (Qt's
+        # default double-click behavior already does that) rather than
+        # accepting immediately, since there may be more still to pick.
 
     def _select_current_folder(self) -> None:
+        if self._multi_select:
+            self.selected_items = [
+                (
+                    str(item.data(Qt.UserRole)[1].relative_to(self._staging_folder)),
+                    item.data(Qt.UserRole)[0] == "zip",
+                )
+                for item in self.list_widget.selectedItems()
+            ]
+            if not self.selected_items:
+                QMessageBox.warning(self, "Select Packs", "Select at least one folder or zip file.")
+                return
+            self.accept()
+            return
+
         # A single-clicked-but-not-entered list item (the natural first
         # instinct in most file pickers -- highlight, then press a button)
         # takes priority over "the folder currently being browsed": without
@@ -1152,6 +1192,201 @@ class IngestDialog(QDialog):
         self.creator = self.creator_edit.text().strip() or None
         self.licence = self.licence_edit.text().strip() or None
         self.source_url = self.source_url_edit.text().strip() or None
+        self.accept()
+
+
+class PerPackMetadataDialog(QDialog):
+    """One pack's worth of the same fields IngestDialog collects, minus the
+    source picker -- used by BatchIngestDialog's "ask me for each pack"
+    mode, once per selected source, in order. Creator/licence/source_url
+    start pre-filled with whatever the previous pack in the batch was given
+    (blank for the first one) rather than starting blank every time, since
+    consecutive packs in a batch commonly share a creator or licence and
+    only one or two fields actually change between them.
+    """
+
+    def __init__(
+        self,
+        source_label: str,
+        index: int,
+        total: int,
+        initial_pack_name: str,
+        initial_creator: str,
+        initial_licence: str,
+        initial_source_url: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Pack {index} of {total}: {source_label}")
+        self.resize(420, 220)
+
+        self.pack_name: str = ""
+        self.creator: str | None = None
+        self.licence: str | None = None
+        self.source_url: str | None = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.pack_name_edit = QLineEdit(initial_pack_name)
+        form.addRow("Pack name:", self.pack_name_edit)
+        self.creator_edit = QLineEdit(initial_creator)
+        form.addRow("Creator:", self.creator_edit)
+        self.licence_edit = QLineEdit(initial_licence)
+        form.addRow("Licence:", self.licence_edit)
+        self.source_url_edit = QLineEdit(initial_source_url)
+        form.addRow("Source URL:", self.source_url_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Next" if index < total else "Ingest")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        pack_name = self.pack_name_edit.text().strip()
+        if not pack_name:
+            QMessageBox.warning(self, "Ingest Pack", "Enter a pack name.")
+            return
+        self.pack_name = pack_name
+        self.creator = self.creator_edit.text().strip() or None
+        self.licence = self.licence_edit.text().strip() or None
+        self.source_url = self.source_url_edit.text().strip() or None
+        self.accept()
+
+
+class BatchIngestDialog(QDialog):
+    """Picks several staging folders/zips at once (via StagingBrowserDialog
+    in multi-select mode) and ingests them as separate packs in a single
+    background job. Either the same creator/licence/source_url is applied
+    to every pack (typical for a bundle bought from one source), or
+    PerPackMetadataDialog is shown once per pack in turn before any
+    ingesting starts -- metadata collection is fully synchronous/modal
+    up front, then the (slow) actual ingest work runs as one background
+    job, rather than interleaving GUI dialogs with background threads.
+
+    Pack names in "same info" mode are just each source's folder/zip stem,
+    matching IngestDialog's own auto-naming -- there's no per-pack name
+    field here, so a source needing a custom name should go through the
+    regular single-pack Ingest Pack... dialog instead.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self.setWindowTitle("Batch Ingest")
+        self.resize(480, 360)
+
+        self._sources: list[tuple[str, bool]] = []  # (relative_path, is_zip)
+        self.items: list[tuple[str, str, str | None, str | None, str | None]] = []
+
+        layout = QVBoxLayout(self)
+
+        browse_button = QPushButton("Browse Folders/Zips...")
+        browse_button.clicked.connect(self._browse_staging)
+        layout.addWidget(browse_button)
+
+        self.sources_list = QListWidget()
+        layout.addWidget(self.sources_list, stretch=1)
+
+        self.same_info_radio = QRadioButton("Use the same info for every pack")
+        self.same_info_radio.setChecked(True)
+        self.ask_each_radio = QRadioButton("Ask me for each pack")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.same_info_radio)
+        mode_group.addButton(self.ask_each_radio)
+        self.same_info_radio.toggled.connect(self._update_shared_fields_enabled)
+        layout.addWidget(self.same_info_radio)
+        layout.addWidget(self.ask_each_radio)
+
+        form = QFormLayout()
+        self.creator_edit = QLineEdit()
+        form.addRow("Creator:", self.creator_edit)
+        self.licence_edit = QLineEdit()
+        form.addRow("Licence:", self.licence_edit)
+        self.source_url_edit = QLineEdit()
+        form.addRow("Source URL:", self.source_url_edit)
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Each selected folder/zip becomes its own pack, named after its "
+            "folder or file name."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Ingest")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_shared_fields_enabled(self, checked: bool) -> None:
+        self.creator_edit.setEnabled(checked)
+        self.licence_edit.setEnabled(checked)
+        self.source_url_edit.setEnabled(checked)
+
+    def _browse_staging(self) -> None:
+        staging_folder = self._catalogue.staging_folder()
+        if staging_folder is None:
+            QMessageBox.warning(self, "Batch Ingest", "No staging folder configured.")
+            return
+        browser = StagingBrowserDialog(staging_folder, self, multi_select=True)
+        if browser.exec() != QDialog.Accepted or not browser.selected_items:
+            return
+        self._sources = browser.selected_items
+        self.sources_list.clear()
+        for relative_path, _is_zip in self._sources:
+            self.sources_list.addItem(relative_path)
+
+    @staticmethod
+    def _default_pack_name(relative_path: str, is_zip: bool) -> str:
+        name = Path(relative_path)
+        return name.stem if is_zip else name.name
+
+    def _on_accept(self) -> None:
+        if not self._sources:
+            QMessageBox.warning(self, "Batch Ingest", "Pick at least one pack folder or zip file.")
+            return
+
+        if self.same_info_radio.isChecked():
+            creator = self.creator_edit.text().strip() or None
+            licence = self.licence_edit.text().strip() or None
+            source_url = self.source_url_edit.text().strip() or None
+            self.items = [
+                (relative_path, self._default_pack_name(relative_path, is_zip), creator, licence, source_url)
+                for relative_path, is_zip in self._sources
+            ]
+            self.accept()
+            return
+
+        # "Ask me for each pack": collect everything up front via a chain of
+        # modal dialogs before accepting -- if the user cancels partway,
+        # the whole batch is abandoned rather than ingesting a partial set.
+        items: list[tuple[str, str, str | None, str | None, str | None]] = []
+        creator, licence, source_url = "", "", ""
+        total = len(self._sources)
+        for index, (relative_path, is_zip) in enumerate(self._sources, start=1):
+            dialog = PerPackMetadataDialog(
+                relative_path,
+                index,
+                total,
+                self._default_pack_name(relative_path, is_zip),
+                creator,
+                licence,
+                source_url,
+                self,
+            )
+            if dialog.exec() != QDialog.Accepted:
+                return
+            items.append((relative_path, dialog.pack_name, dialog.creator, dialog.licence, dialog.source_url))
+            creator = dialog.creator or ""
+            licence = dialog.licence or ""
+            source_url = dialog.source_url or ""
+
+        self.items = items
         self.accept()
 
 
@@ -2521,6 +2756,11 @@ class MainWindow(QMainWindow):
         ingest_button.clicked.connect(self._open_ingest_dialog)
         toolbar.addWidget(ingest_button)
 
+        batch_ingest_button = QPushButton("Batch Ingest...")
+        batch_ingest_button.setCursor(Qt.PointingHandCursor)
+        batch_ingest_button.clicked.connect(self._open_batch_ingest_dialog)
+        toolbar.addWidget(batch_ingest_button)
+
     def _update_window_title(self) -> None:
         library_folder = settings.load().library_folder or "no library configured"
         self.setWindowTitle(f"Asset Catalogue -- {library_folder}")
@@ -2644,6 +2884,56 @@ class MainWindow(QMainWindow):
         self._run_background_job(
             job,
             f"Ingesting '{dialog.pack_name}'...",
+            format_result,
+            self._rebuild_filter_panel,
+            on_complete=on_complete,
+        )
+
+    def _open_batch_ingest_dialog(self) -> None:
+        if self._catalogue.staging_folder() is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+        dialog = BatchIngestDialog(self._catalogue, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        items = dialog.items
+        job = lambda report: self._catalogue.ingest_packs_batch_bg(items, on_progress=report)
+
+        def format_result(results: list) -> str:
+            total_new = sum(stats.new for _, stats, _ in results)
+            total_duplicate = sum(stats.duplicate for _, stats, _ in results)
+            total_scanned = sum(stats.total for _, stats, _ in results)
+            total_archived = sum(stats.archived for _, stats, _ in results)
+            total_generated = sum(stats.thumbnails_generated for _, stats, _ in results)
+            total_failed = sum(stats.thumbnails_failed for _, stats, _ in results)
+            lines = [
+                f"Ingested {len(results)} pack(s): {total_new} new, {total_duplicate} "
+                f"duplicate, {total_scanned} scanned, {total_archived} archived",
+                f"Generated {total_generated} thumbnail(s), {total_failed} failed",
+                "",
+            ]
+            for pack_name, stats, updated_fields in results:
+                line = f"- {pack_name}: {stats.new} new, {stats.duplicate} duplicate"
+                if updated_fields:
+                    line += f" (updated: {', '.join(updated_fields)})"
+                if stats.blender_unavailable_reason:
+                    line += " -- 3D thumbnails skipped"
+                lines.append(line)
+            return "\n".join(lines)
+
+        def on_complete(results: list) -> None:
+            for pack_name, stats, _updated_fields in results:
+                if stats.calibration_preview and stats.preview_asset_id is not None:
+                    self._show_calibration_review(pack_name, stats)
+            QMessageBox.information(self, "Asset Catalogue", format_result(results))
+            self._rebuild_filter_panel()
+
+        self._run_background_job(
+            job,
+            f"Ingesting {len(items)} pack(s)...",
             format_result,
             self._rebuild_filter_panel,
             on_complete=on_complete,

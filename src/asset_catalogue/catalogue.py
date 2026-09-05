@@ -398,6 +398,34 @@ class Catalogue:
         finally:
             conn.close()
 
+    def ingest_packs_batch_bg(
+        self,
+        items: list[tuple[str, str, str | None, str | None, str | None]],
+        on_progress: Callable[[str], None] | None = None,
+    ) -> list[tuple[str, ingest.IngestStats, list[str]]]:
+        """Ingests multiple packs in one background job -- each pack still
+        goes through the exact same ingest_pack_bg used for a single pack
+        (hash, archive, auto-thumbnail), just looped with a header line
+        between packs so the progress log reads as one pack at a time
+        rather than an interleaved mess. Each (pack_folder_name, pack_name,
+        creator, licence, source_url) tuple in items is independent, so one
+        pack failing partway (e.g. a missing folder) still raises and aborts
+        the whole batch -- same all-or-nothing semantics as a single ingest,
+        just scoped to the batch rather than silently skipping the rest.
+        """
+        results = []
+        total = len(items)
+        for index, (pack_folder_name, pack_name, creator, licence, source_url) in enumerate(
+            items, start=1
+        ):
+            if on_progress:
+                on_progress(f"=== Pack {index}/{total}: {pack_name} ===")
+            stats, updated_fields = self.ingest_pack_bg(
+                pack_folder_name, pack_name, creator, licence, source_url, on_progress=on_progress
+            )
+            results.append((pack_name, stats, updated_fields))
+        return results
+
     def _auto_generate_thumbnails(
         self,
         conn: sqlite3.Connection,

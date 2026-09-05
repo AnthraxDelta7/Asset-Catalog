@@ -177,6 +177,36 @@ def test_ingest_pack_bg_end_to_end(catalogue: Catalogue, tmp_path: Path, monkeyp
     assert len(catalogue.list_assets()) == 1
 
 
+def test_ingest_packs_batch_bg_ingests_each_pack_and_reports_headers(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    s = settings.Settings(
+        staging_folder=str(catalogue.staging_folder()),
+        library_folder=str(Path(catalogue._thumbnail_dir).parent),
+    )
+    settings.save(s)
+
+    write_texture(catalogue.staging_folder(), "PackA", "a.png", color=(200, 50, 50))
+    write_texture(catalogue.staging_folder(), "PackB", "b.png", color=(50, 200, 50))
+
+    progress_lines: list[str] = []
+    results = catalogue.ingest_packs_batch_bg(
+        [
+            ("PackA", "PackA", "Creator", None, None),
+            ("PackB", "PackB", None, "CC0", None),
+        ],
+        on_progress=progress_lines.append,
+    )
+
+    assert [pack_name for pack_name, _stats, _updated in results] == ["PackA", "PackB"]
+    assert [stats.new for _pack_name, stats, _updated in results] == [1, 1]
+    assert len(catalogue.list_assets()) == 2
+    assert any("Pack 1/2: PackA" in line for line in progress_lines)
+    assert any("Pack 2/2: PackB" in line for line in progress_lines)
+
+
 def test_export_assets_bg_end_to_end(catalogue_with_asset: tuple[Catalogue, int], tmp_path: Path, monkeypatch) -> None:
     catalogue, asset_id = catalogue_with_asset
     settings_path = tmp_path / "settings.json"
