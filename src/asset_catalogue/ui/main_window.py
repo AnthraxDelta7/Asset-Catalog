@@ -317,12 +317,19 @@ class ThumbnailPreviewDialog(QDialog):
     """A larger view of an asset's already-rendered thumbnail -- the 128px
     grid icon doesn't show much detail for a busy texture or a complex
     model render. Just the existing thumbnail image scaled up, not a live
-    re-render or an interactive 3D viewer.
+    re-render -- for a model asset with a cached interactive preview, a
+    "View in 3D" button hands off to that instead of duplicating it here.
     """
 
     PREVIEW_SIZE = 512
 
-    def __init__(self, asset: AssetSummary, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        asset: AssetSummary,
+        catalogue: Catalogue,
+        on_view_3d=None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(asset.filename)
 
@@ -347,9 +354,20 @@ class ThumbnailPreviewDialog(QDialog):
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
 
+        button_row = QHBoxLayout()
+        if asset.asset_type == "model" and on_view_3d is not None:
+            preview_path = catalogue.model_preview_path_for(asset.content_hash)
+            view_3d_button = QPushButton("View in 3D (Orbit/Zoom)...")
+            view_3d_button.setEnabled(preview_path is not None)
+            if preview_path is None:
+                view_3d_button.setToolTip("No cached preview yet -- Regenerate Thumbnail first.")
+            view_3d_button.clicked.connect(lambda: (self.accept(), on_view_3d(asset.filename, preview_path)))
+            button_row.addWidget(view_3d_button)
+        button_row.addStretch(1)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
-        layout.addWidget(close_button)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
 
         self.resize(self.PREVIEW_SIZE + 40, self.PREVIEW_SIZE + 100)
 
@@ -2920,13 +2938,30 @@ class MainWindow(QMainWindow):
     def _open_model_preview(self, filename: str, preview_path: Path | None) -> None:
         if preview_path is None:
             return
-        # Imported lazily, not at module top -- pyqtgraph/PyOpenGL/trimesh
-        # are only ever loaded into memory if someone actually opens a 3D
-        # preview, not on every app launch.
-        from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
 
-        dialog = Model3DPreviewDialog(filename, preview_path, self)
-        dialog.exec()
+        def job(report):
+            report("Loading 3D preview...")
+            # Imported lazily, on this background thread -- pyqtgraph/
+            # PyOpenGL/trimesh are only ever loaded into memory if someone
+            # actually opens a 3D preview, not on every app launch. The
+            # import itself (and the file parsing/color-baking below) is
+            # pure CPU work with no Qt/OpenGL calls, so it's safe here --
+            # this used to run synchronously on the GUI thread with zero
+            # feedback, which is what made the first 3D preview in a
+            # session look like the whole app had frozen or crashed (a
+            # cold import of these libraries alone took over a second in
+            # testing, done invisibly).
+            from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+            return load_preview_parts(preview_path)
+
+        def on_complete(parts) -> None:
+            from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+            dialog = Model3DPreviewDialog(filename, parts, self)
+            dialog.exec()
+
+        self._run_background_job(job, "Rendering 3D preview...", None, None, on_complete=on_complete)
 
     def _open_pending_conversions_dialog(self) -> None:
         dialog = PendingConversionsDialog(self._catalogue, self)
@@ -3044,7 +3079,7 @@ class MainWindow(QMainWindow):
         asset = next((a for a in self._current_assets if a.id == asset_id), None)
         if asset is None:
             return
-        dialog = ThumbnailPreviewDialog(asset, self._catalogue, self)
+        dialog = ThumbnailPreviewDialog(asset, self._catalogue, self._open_model_preview, self)
         dialog.exec()
 
     def _show_grid_context_menu(self, pos) -> None:

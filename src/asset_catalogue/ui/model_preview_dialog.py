@@ -119,12 +119,22 @@ def _y_up_to_z_up(vertices: np.ndarray) -> np.ndarray:
     return np.stack([x, -z, y], axis=1)
 
 
-def _load_scene_parts(path: Path) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+PreviewPart = tuple[np.ndarray, np.ndarray, np.ndarray]
+
+
+def load_preview_parts(path: Path) -> list[PreviewPart]:
     """Returns (vertices, faces, vertex_colors) per mesh part in the
     scene, already in world space (Scene.dump bakes each part's node
     transform in) -- unlike collapsing everything into one merged mesh,
     this keeps each part's own material/texture distinct, which matters
     for a multi-material asset (a cauldron's body vs. its handle, say).
+
+    Pure CPU work (trimesh parsing, color baking, the axis fix) -- no Qt
+    or OpenGL calls -- so it's safe to run on a background thread. See
+    MainWindow._open_model_preview: this is exactly the (surprisingly
+    slow, first-time-only) part that used to run synchronously on the
+    GUI thread with zero feedback, which is what made the first 3D
+    preview in a session look like the app had frozen or crashed.
     """
     loaded = trimesh.load(str(path))
     parts = loaded.dump(concatenate=False) if isinstance(loaded, trimesh.Scene) else [loaded]
@@ -139,14 +149,22 @@ def _load_scene_parts(path: Path) -> list[tuple[np.ndarray, np.ndarray, np.ndarr
 
 
 class Model3DPreviewDialog(QDialog):
-    """Loads a model asset's cached preview .glb (see model_preview.py --
-    generated alongside the static thumbnail by blender_thumbnail_script.py)
-    into a real orbit/pan/zoom viewer. Left-drag to rotate, right-drag or
-    the wheel to zoom, and shift+left-drag to pan -- all built into
-    pyqtgraph's GLViewWidget, no custom mouse handling needed.
+    """Displays a model asset's already-loaded preview parts (see
+    load_preview_parts -- generated from the cached .glb alongside the
+    static thumbnail by blender_thumbnail_script.py) in a real orbit/pan/
+    zoom viewer. Left-drag to rotate, right-drag or the wheel to zoom, and
+    shift+left-drag to pan -- all built into pyqtgraph's GLViewWidget, no
+    custom mouse handling needed.
+
+    Takes pre-loaded parts rather than a file path deliberately: building
+    the GL widgets themselves is fast, so it's safe to do synchronously
+    here on the GUI thread (required -- Qt/OpenGL widgets can't be built
+    off it), while the genuinely slow work (parsing the file, baking
+    colors) happens beforehand on a background thread. See
+    MainWindow._open_model_preview.
     """
 
-    def __init__(self, filename: str, preview_path: Path, parent: QWidget | None = None) -> None:
+    def __init__(self, filename: str, parts: list[PreviewPart], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"3D Preview -- {filename}")
         self.resize(640, 560)
@@ -163,14 +181,9 @@ class Model3DPreviewDialog(QDialog):
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
 
-        self._load(preview_path)
+        self._build(parts)
 
-    def _load(self, preview_path: Path) -> None:
-        try:
-            parts = _load_scene_parts(preview_path)
-        except Exception as exc:  # noqa: BLE001 - surface as a preview error, not a crash
-            self._show_error(f"Couldn't load preview: {exc}")
-            return
+    def _build(self, parts: list[PreviewPart]) -> None:
         if not parts:
             self._show_error("Preview file has no usable geometry.")
             return
