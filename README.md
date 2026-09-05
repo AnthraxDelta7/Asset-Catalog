@@ -8,19 +8,9 @@ If you'd like to support development, you can do so here: [ko-fi.com/anthraxdelt
 
 ## Setup
 
-```
-python -m venv .venv
-.venv\Scripts\pip install -e .
-```
+Grab the latest build from the [Releases page](https://github.com/AnthraxDelta7/Asset-Catalog/releases/latest), download `AssetCatalogue-vX.Y.Z-windows.zip`, and extract it anywhere. Run `AssetCatalogue.exe` inside the extracted `AssetCatalogue` folder — no Python install required. On first launch (or anytime no library is configured yet), a Settings dialog walks you through picking a staging folder (where unprocessed packs land, needed before ingesting anything) and a library folder (where the catalogue itself lives); nothing else to install or configure by hand. Blender 4.0+ is optional, only needed for 3D model thumbnails/conversion — auto-detected if it's already installed, or point at it directly in that same Settings dialog.
 
-Configure the staging folder (where unprocessed packs land, required before `ingest`) and the library folder (where the catalogue lives, required before almost everything else):
-
-```
-asset-catalogue settings set --staging-folder "D:\path\to\staging" --library-folder "D:\path\to\library"
-asset-catalogue settings show
-```
-
-Settings live in `settings.json` at the repo root (gitignored — it's a local machine path, different per install). The **library folder** is the portable part: it holds `catalogue.db` and `thumbnails/`, derived automatically from `--library-folder` (there's no separate way to configure the DB or thumbnail paths — they always live together, so the whole catalogue moves as one unit). To move the library to another machine, or share it over a network drive, just copy the folder and point `--library-folder` at the copy — `settings set` doesn't need to know anything else about it, and an existing `catalogue.db` found there is picked up as-is, no import step. The staging folder, by contrast, is *not* meant to travel with the library — it's wherever unprocessed packs happen to sit on this particular machine before `ingest`.
+Want to build from source instead, or use the CLI? See "Development setup" below.
 
 ## Ingest
 
@@ -354,6 +344,24 @@ The app checks quietly in the background on launch for a newer version, and **He
 This is deliberately just a **notification**, not a silent auto-updater: a running `.exe` can't overwrite itself on Windows, so real auto-update needs a separate helper process or a relaunch dance — real complexity not worth it yet at this project's scale. When a newer version exists, a dialog offers **Open Release Page** (opens it in your browser to download), **Skip This Version** (remembered in settings — the automatic background check won't mention that specific version again, though a manual check still always reports the real current state), or **Remind Me Later** (does nothing, asks again next launch). The background check fails silently on any error (no network, GitHub unreachable, etc.) — only the manual check surfaces a failure, since a launch-time network hiccup shouldn't interrupt someone who's just trying to catalogue assets.
 
 **Cutting a release:** bump `__version__` in `src/asset_catalogue/version.py`, commit, tag it (`git tag vX.Y.Z`), push the tag, then publish an actual GitHub Release for that tag with the built `dist/AssetCatalogue` folder (zipped) attached — the release object is what the update check actually queries, a pushed tag alone isn't enough.
+
+## Development setup
+
+For running from source, using the CLI, or contributing:
+
+```
+python -m venv .venv
+.venv\Scripts\pip install -e .
+```
+
+Configure the staging folder (where unprocessed packs land, required before `ingest`) and the library folder (where the catalogue lives, required before almost everything else):
+
+```
+asset-catalogue settings set --staging-folder "D:\path\to\staging" --library-folder "D:\path\to\library"
+asset-catalogue settings show
+```
+
+Settings live in `settings.json` at the repo root when running from source (gitignored — it's a local machine path, different per install; the packaged `.exe` keeps its own copy under `%APPDATA%\AssetCatalogue\` instead). The **library folder** is the portable part: it holds `catalogue.db` and `thumbnails/`, derived automatically from `--library-folder` (there's no separate way to configure the DB or thumbnail paths — they always live together, so the whole catalogue moves as one unit). To move the library to another machine, or share it over a network drive, just copy the folder and point `--library-folder` at the copy — `settings set` doesn't need to know anything else about it, and an existing `catalogue.db` found there is picked up as-is, no import step. The staging folder, by contrast, is *not* meant to travel with the library — it's wherever unprocessed packs happen to sit on this particular machine before `ingest`.
 
 ## Testing
 
