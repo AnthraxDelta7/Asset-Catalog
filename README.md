@@ -123,6 +123,8 @@ One Blender process handles the whole batch (startup dominates the per-asset cos
 
 Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing.
 
+Every source file path handed to a Blender importer is prefixed with Windows' `\\?\` extended-length marker before use — Python's own file access is long-path-aware and never needed this, but Blender's importers call straight into the OS APIs that cap a path at 260 characters (`MAX_PATH`), which a deeply nested staging path (a long pack/creator folder name plus a multi-level zip extraction) can genuinely exceed. Without it, an asset like that fails to import with a plain "cannot open file" even though the file is completely readable — this bit a real pack during development and is now fixed for every importer (OBJ/FBX/GLTF/GLB/STL/`.blend`), not just the one that happened to trigger it first.
+
 ## Per-pack calibration
 
 Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7). A brand-new pack with model assets already gets this workflow's first step done automatically at ingest — see "Thumbnails are generated automatically" above:

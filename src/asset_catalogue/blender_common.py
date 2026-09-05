@@ -6,19 +6,40 @@ blender_common` despite this not being part of the normal package.
 """
 
 import math
+import os
 import sys
 
 import bpy
 
 FALLBACK_MATERIAL_NAME = "AssetCatalogueFallback"
 
+
+def _long_path(path: str) -> str:
+    r"""Windows' classic file APIs cap a path at 260 characters (MAX_PATH).
+    Python's own file access is long-path-aware and doesn't hit this, but
+    Blender's importers (STL confirmed; likely the others too, just not yet
+    hit by a deep enough pack) call straight into the OS APIs that do --
+    "Cannot open file" for a perfectly real, readable file once its full
+    staging path creeps past 260 chars (easy with a nested zip extraction
+    plus a long pack/creator name). Prefixing with \\?\ (\\?\UNC\ for a
+    network path) opts into Windows' extended-length path handling, which
+    lifts the limit to ~32,767 chars -- the standard fix, not Blender- or
+    asset-type-specific, so it's applied once here for every importer
+    rather than per file type.
+    """
+    normalized = os.path.abspath(path)
+    if normalized.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + normalized[2:]
+    return "\\\\?\\" + normalized
+
+
 IMPORTERS = {
-    ".obj": lambda path: bpy.ops.wm.obj_import(filepath=path),
-    ".fbx": lambda path: bpy.ops.import_scene.fbx(filepath=path),
-    ".gltf": lambda path: bpy.ops.import_scene.gltf(filepath=path),
-    ".glb": lambda path: bpy.ops.import_scene.gltf(filepath=path),
-    ".stl": lambda path: bpy.ops.wm.stl_import(filepath=path),
-    ".blend": lambda path: _import_blend(path),
+    ".obj": lambda path: bpy.ops.wm.obj_import(filepath=_long_path(path)),
+    ".fbx": lambda path: bpy.ops.import_scene.fbx(filepath=_long_path(path)),
+    ".gltf": lambda path: bpy.ops.import_scene.gltf(filepath=_long_path(path)),
+    ".glb": lambda path: bpy.ops.import_scene.gltf(filepath=_long_path(path)),
+    ".stl": lambda path: bpy.ops.wm.stl_import(filepath=_long_path(path)),
+    ".blend": lambda path: _import_blend(_long_path(path)),
 }
 
 
