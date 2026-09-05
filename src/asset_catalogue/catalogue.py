@@ -502,9 +502,74 @@ class Catalogue:
                 blender_exe,
                 asset_id=asset_id,
                 asset_ids=asset_ids,
+                on_progress=on_progress,
+            )
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _model_asset_ids_missing_preview(
+        conn: sqlite3.Connection, preview_dir: Path, asset_ids: list[int]
+    ) -> list[int]:
+        """Filters a candidate list down to just the model assets that don't
+        already have a cached interactive-preview .glb -- so a bulk "render
+        previews for this selection/pack" action skips ones already done
+        instead of re-paying Blender's import cost for nothing. Takes conn
+        explicitly (rather than using self._conn) since the only caller,
+        render_model_previews_bg, runs on a background thread with its own
+        connection -- SQLite connections aren't safe to share across
+        threads, same reasoning as every other _bg method in this class.
+        """
+        if not asset_ids:
+            return []
+        placeholders = ",".join("?" for _ in asset_ids)
+        rows = conn.execute(
+            f"SELECT id, content_hash FROM assets "
+            f"WHERE id IN ({placeholders}) AND asset_type = 'model'",
+            asset_ids,
+        ).fetchall()
+        return [
+            row["id"]
+            for row in rows
+            if not model_preview.preview_path(preview_dir, row["content_hash"]).exists()
+        ]
+
+    def render_model_previews_bg(
+        self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
+    ) -> blender_render.ModelThumbnailStats:
+        """The one and only place the interactive 3D preview .glb actually
+        gets generated -- deliberately on demand, never as a side effect of
+        ingest or of any other thumbnail-generation path (regenerate,
+        convert-to-glTF, revert). Generating it for every model at import
+        time made ingesting/bulk-rendering a large pack noticeably slower
+        for previews most people would never actually open -- see the
+        grid's "Render 3D Preview(s)" context menu action and the "3D
+        Preview" viewer's own on-demand render for a single missing one.
+        Assets that already have a cached preview are skipped (counted as
+        already_done) rather than re-rendered.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            missing_ids = self._model_asset_ids_missing_preview(conn, self._preview_dir, asset_ids)
+            already_done = len(asset_ids) - len(missing_ids)
+            if not missing_ids:
+                return blender_render.ModelThumbnailStats(already_done=already_done)
+            report = on_progress or (lambda _text: None)
+            report("Checking Blender installation...")
+            blender_exe = self.resolve_blender()
+            stats = blender_render.generate_model_thumbnails(
+                conn,
+                self._staging_folder,
+                self._thumbnail_dir,
+                blender_exe,
+                asset_ids=missing_ids,
                 preview_dir=self._preview_dir,
                 on_progress=on_progress,
             )
+            stats.already_done += already_done
+            return stats
         finally:
             conn.close()
 
@@ -658,7 +723,6 @@ class Catalogue:
                     self._thumbnail_dir,
                     blender_exe,
                     asset_id=asset_id,
-                    preview_dir=self._preview_dir,
                     on_progress=on_progress,
                 )
             return result
@@ -694,7 +758,6 @@ class Catalogue:
                     self._thumbnail_dir,
                     blender_exe,
                     asset_ids=result.converted_asset_ids,
-                    preview_dir=self._preview_dir,
                     on_progress=on_progress,
                 )
             return result
@@ -720,7 +783,6 @@ class Catalogue:
                             self._thumbnail_dir,
                             blender_exe,
                             asset_id=asset_id,
-                            preview_dir=self._preview_dir,
                             on_progress=on_progress,
                         )
                     except RuntimeError:
@@ -765,7 +827,6 @@ class Catalogue:
                 blender_exe,
                 pack_name=pack,
                 force=force,
-                preview_dir=self._preview_dir,
                 on_progress=on_progress,
             )
         finally:

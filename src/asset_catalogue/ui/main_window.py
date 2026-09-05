@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from asset_catalogue import blender_render, library_health, library_stats, settings, updater
+from asset_catalogue import blender_render, library_health, library_stats, paths, settings, updater
 from asset_catalogue.version import __version__
 from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
@@ -68,6 +68,7 @@ class FilterPanel(QWidget):
         on_remove_pack,
         on_rename_tag,
         on_delete_tag,
+        on_render_pack_previews,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -76,6 +77,7 @@ class FilterPanel(QWidget):
         self._on_remove_pack = on_remove_pack
         self._on_rename_tag = on_rename_tag
         self._on_delete_tag = on_delete_tag
+        self._on_render_pack_previews = on_render_pack_previews
 
         layout = QVBoxLayout(self)
 
@@ -193,6 +195,12 @@ class FilterPanel(QWidget):
         menu = QMenu(self)
         edit_action = menu.addAction("Edit Pack Metadata...")
         edit_action.triggered.connect(lambda: self._on_edit_pack(pack_name))
+        model_ids = [a.id for a in self._catalogue.list_assets(pack=pack_name, asset_type="model")]
+        if model_ids:
+            render_previews_action = menu.addAction(f"Render 3D Previews for Pack ({len(model_ids)})")
+            render_previews_action.triggered.connect(
+                lambda: self._on_render_pack_previews(model_ids)
+            )
         menu.addSeparator()
         remove_action = menu.addAction(f"Remove Pack '{pack_name}'...")
         remove_action.triggered.connect(lambda: self._on_remove_pack(pack_name))
@@ -356,12 +364,10 @@ class ThumbnailPreviewDialog(QDialog):
 
         button_row = QHBoxLayout()
         if asset.asset_type == "model" and on_view_3d is not None:
-            preview_path = catalogue.model_preview_path_for(asset.content_hash)
             view_3d_button = QPushButton("View in 3D (Orbit/Zoom)...")
-            view_3d_button.setEnabled(preview_path is not None)
-            if preview_path is None:
-                view_3d_button.setToolTip("No cached preview yet -- Regenerate Thumbnail first.")
-            view_3d_button.clicked.connect(lambda: (self.accept(), on_view_3d(asset.filename, preview_path)))
+            view_3d_button.clicked.connect(
+                lambda: (self.accept(), on_view_3d(asset.filename, asset.id, asset.content_hash))
+            )
             button_row.addWidget(view_3d_button)
         button_row.addStretch(1)
         close_button = QPushButton("Close")
@@ -2287,6 +2293,7 @@ class MainWindow(QMainWindow):
             self._remove_pack,
             self._rename_tag,
             self._delete_tag,
+            self._render_model_previews_for_selection,
         )
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
@@ -2487,6 +2494,7 @@ class MainWindow(QMainWindow):
             self._remove_pack,
             self._rename_tag,
             self._delete_tag,
+            self._render_model_previews_for_selection,
         )
         main_splitter = self.centralWidget()
         main_splitter.replaceWidget(0, self.filter_panel)
@@ -2699,7 +2707,9 @@ class MainWindow(QMainWindow):
             "About Asset Catalogue",
             f"<b>Asset Catalogue</b> v{__version__}<br><br>"
             "Cataloguing, tagging, previewing and exporting game assets.<br><br>"
-            "Licensed under the GNU GPLv3.",
+            "Licensed under the GNU GPLv3.<br><br>"
+            "App icon by Gajah Mada "
+            '(<a href="https://www.flaticon.com/authors/gajah-mada">flaticon.com</a>).',
         )
 
     def _open_tag_pack_dialog(self) -> None:
@@ -2935,11 +2945,25 @@ class MainWindow(QMainWindow):
             self._refresh_grid,
         )
 
-    def _open_model_preview(self, filename: str, preview_path: Path | None) -> None:
-        if preview_path is None:
-            return
+    def _open_model_preview(self, filename: str, asset_id: int, content_hash: str) -> None:
+        """The preview .glb is generated on demand, not automatically at
+        ingest/thumbnail time (see Catalogue.render_model_previews_bg) --
+        rendering it for every model up front made ingesting/bulk-rendering
+        a large pack noticeably slower for previews most people would
+        never open. If this asset doesn't have one cached yet, this
+        renders just that one asset first (same background job, same
+        progress dialog), then opens the viewer once it's ready.
+        """
 
         def job(report):
+            preview_path = self._catalogue.model_preview_path_for(content_hash)
+            if preview_path is None:
+                report("Rendering 3D preview (first time for this asset)...")
+                self._catalogue.render_model_previews_bg([asset_id], on_progress=report)
+                preview_path = self._catalogue.model_preview_path_for(content_hash)
+            if preview_path is None:
+                raise RuntimeError("Couldn't render a 3D preview for this asset.")
+
             report("Loading 3D preview...")
             # Imported lazily, on this background thread -- pyqtgraph/
             # PyOpenGL/trimesh are only ever loaded into memory if someone
@@ -2962,6 +2986,23 @@ class MainWindow(QMainWindow):
             dialog.exec()
 
         self._run_background_job(job, "Rendering 3D preview...", None, None, on_complete=on_complete)
+
+    def _render_model_previews_for_selection(self, asset_ids: list[int]) -> None:
+        """Proactively pre-generates the interactive 3D preview cache for a
+        grid selection or a whole pack, without opening the viewer --
+        assets that already have one cached are skipped. The deliberate,
+        explicit alternative to generating previews automatically for
+        every model (see render_model_previews_bg).
+        """
+        self._run_background_job(
+            lambda report: self._catalogue.render_model_previews_bg(asset_ids, on_progress=report),
+            f"Rendering 3D preview(s) for {len(asset_ids)} asset(s)...",
+            lambda stats: (
+                f"3D previews: {stats.generated} rendered, "
+                f"{stats.already_done} already cached, {stats.failed} failed"
+            ),
+            self._refresh_grid,
+        )
 
     def _open_pending_conversions_dialog(self) -> None:
         dialog = PendingConversionsDialog(self._catalogue, self)
@@ -3007,6 +3048,19 @@ class MainWindow(QMainWindow):
         -- or the default: show format_result(result) in a message box,
         then call on_success_refresh().
         """
+        # self._active_worker is a single shared slot -- starting a second
+        # job while one is still running would drop the only Python
+        # reference to its QThread while the underlying thread is still
+        # alive natively, a real crash risk ("QThread: Destroyed while
+        # thread is still running"). ProgressLogDialog is modal, so real
+        # mouse/keyboard input can't normally trigger this, but guard it
+        # directly rather than relying on that alone.
+        if self._active_worker is not None and self._active_worker.isRunning():
+            QMessageBox.information(
+                self, "Asset Catalogue", "Another background job is already running -- please wait for it to finish."
+            )
+            return
+
         progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
         progress.show()
 
@@ -3027,10 +3081,22 @@ class MainWindow(QMainWindow):
             progress.close()
             QMessageBox.critical(self, "Asset Catalogue", message)
 
+        def on_thread_finished() -> None:
+            # Runs after deleteLater() is scheduled but before the C++
+            # object is actually destroyed -- clearing the reference here
+            # (rather than leaving self._active_worker pointing at a
+            # worker that's about to become invalid) is what makes the
+            # "already running" guard above safe to check at any time,
+            # instead of risking a shiboken "already deleted" error on a
+            # stale reference.
+            if self._active_worker is worker:
+                self._active_worker = None
+            worker.deleteLater()
+
         worker.progress.connect(on_progress, Qt.QueuedConnection)
         worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
         worker.failed.connect(on_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(on_thread_finished)
         self._active_worker = worker
         worker.start()
 
@@ -3128,16 +3194,12 @@ class MainWindow(QMainWindow):
                         lambda: self._regenerate_thumbnails([asset.id])
                     )
                 if asset.asset_type == "model":
-                    preview_path = self._catalogue.model_preview_path_for(asset.content_hash)
-                    preview_action = menu.addAction("3D Preview (Orbit/Zoom)...")
+                    has_preview = self._catalogue.model_preview_path_for(asset.content_hash) is not None
+                    preview_label = "3D Preview (Orbit/Zoom)..." if has_preview else "3D Preview (renders on open)..."
+                    preview_action = menu.addAction(preview_label)
                     preview_action.triggered.connect(
-                        lambda: self._open_model_preview(asset.filename, preview_path)
+                        lambda: self._open_model_preview(asset.filename, asset.id, asset.content_hash)
                     )
-                    preview_action.setEnabled(preview_path is not None)
-                    if preview_path is None:
-                        preview_action.setToolTip(
-                            "No cached preview yet -- Regenerate Thumbnail first."
-                        )
                 if asset.asset_type == "model" and not asset.relative_path.lower().endswith(".glb"):
                     convert_action = menu.addAction("Convert to glTF (.glb)...")
                     convert_action.triggered.connect(
@@ -3172,6 +3234,16 @@ class MainWindow(QMainWindow):
                 )
                 regen_action.triggered.connect(
                     lambda: self._regenerate_thumbnails(thumbnail_eligible_ids)
+                )
+            model_ids = [
+                asset.id
+                for asset in self._current_assets
+                if asset.id in selected_ids and asset.asset_type == "model"
+            ]
+            if model_ids:
+                render_preview_action = menu.addAction(f"Render {len(model_ids)} 3D Preview(s)")
+                render_preview_action.triggered.connect(
+                    lambda: self._render_model_previews_for_selection(model_ids)
                 )
             eligible_ids = [
                 asset.id
@@ -3389,7 +3461,7 @@ def main() -> None:
     # app fixes both.
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(Path(__file__).parent / "app_icon.png")))
+    app.setWindowIcon(QIcon(str(paths.package_dir() / "app_icon.png")))
 
     # A library folder is required above everything else -- nothing else in
     # the app can run without one, so this loops until Catalogue.open()
