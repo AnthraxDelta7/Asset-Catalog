@@ -15,6 +15,7 @@ dependencies = [
     "pyqtgraph>=0.13",
     "PyOpenGL>=3.1",
     "trimesh>=4",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
