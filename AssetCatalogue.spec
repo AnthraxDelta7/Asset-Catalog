@@ -9,7 +9,7 @@ a = Analysis(
         ('src/asset_catalogue/blender_thumbnail_script.py', 'asset_catalogue'),
         ('src/asset_catalogue/blender_convert_script.py', 'asset_catalogue'),
         ('src/asset_catalogue/blender_common.py', 'asset_catalogue'),
-        ('src/asset_catalogue/ui/app_icon.png', 'asset_catalogue'),
+        ('src/asset_catalogue/app_icon.png', 'asset_catalogue'),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -37,7 +37,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='src/asset_catalogue/ui/app_icon.ico',
+    icon='src/asset_catalogue/app_icon.ico',
 )
 coll = COLLECT(
     exe,

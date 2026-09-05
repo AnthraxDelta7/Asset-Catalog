@@ -3448,6 +3448,104 @@ def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:
         return None, str(exc)
 
 
+class _StartupSplash(QWidget):
+    """Icon, name, credit, version -- shown while the app is doing the two
+    things that take long enough to be worth covering for: opening the
+    catalogue database, and the OpenGL pre-warm below (a cold
+    pyqtgraph/PyOpenGL import measured over a second on its own). Frameless
+    and always-on-top (Qt.SplashScreen is the purpose-built window type for
+    exactly this), closed via finish() once the real main window is ready
+    to take over.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.SplashScreen | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setFixedSize(320, 220)
+        self.setStyleSheet(
+            "QWidget { background-color: #202225; border: 1px solid #3a3d42; }"
+            "QLabel { color: #e8e8e8; background: transparent; border: none; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(6)
+
+        icon_label = QLabel()
+        icon_pixmap = QPixmap(str(paths.package_dir() / "app_icon.png"))
+        if not icon_pixmap.isNull():
+            icon_label.setPixmap(
+                icon_pixmap.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label)
+
+        name_label = QLabel("Asset Catalogue")
+        name_font = name_label.font()
+        name_font.setPointSize(15)
+        name_font.setBold(True)
+        name_label.setFont(name_font)
+        name_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(name_label)
+
+        credit_label = QLabel("by AnthraxDelta7")
+        credit_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(credit_label)
+
+        version_label = QLabel(f"v{__version__}")
+        version_label.setStyleSheet("color: #9a9a9a;")
+        version_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(version_label)
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            center = screen.geometry().center()
+            self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+
+
+def _prewarm_opengl(window: "MainWindow") -> None:
+    """Pays -- once, at launch, before the main window's first paint --
+    the one-time cost that otherwise showed up as a visible flicker the
+    first time someone opened a 3D preview. QSurfaceFormat.setDefaultFormat()
+    in main() (see the comment there) turned out not to be the actual
+    mechanism: GLViewWidget never calls setFormat() itself, it only reads
+    whatever format Qt handed it -- confirmed by reading pyqtgraph's own
+    source. The real cause is a Windows/Qt behavior that has nothing to
+    do with GL capabilities: the first time any QOpenGLWidget-based
+    widget is realized inside a top-level window, Windows' compositor has
+    to switch that window's whole backing surface to one that can host
+    GPU-composited OpenGL content, and that switch is visible as a flash,
+    regardless of which depth/stencil/profile bits were requested. It
+    happens exactly once per process, on whichever window hosts the first
+    such widget.
+
+    Called with `window` not yet shown: a child widget's .show() is
+    deferred by Qt until its top-level parent actually becomes visible,
+    so building the dummy GL widget here and calling window.show()
+    afterward realizes both together in a single step -- the window comes
+    into existence already GL-capable, with no separate "before" state
+    for the flicker to show up against, rather than just moving the
+    flicker earlier (which building it right after window.show() would
+    still do).
+
+    Blocks briefly (the cold pyqtgraph/PyOpenGL import, ~1s+ measured) --
+    acceptable here specifically because a splash screen is already
+    covering for it; this is not meant to be called once the app is
+    actually running. Silent on failure (e.g. no OpenGL driver at all) --
+    worst case, the flicker just reappears on first real use, exactly
+    like before this existed.
+    """
+    try:
+        import pyqtgraph.opengl as gl
+
+        warm = gl.GLViewWidget(window)
+        warm.setGeometry(0, 0, 1, 1)
+        warm.show()
+        QTimer.singleShot(200, warm.deleteLater)
+    except Exception:  # noqa: BLE001 -- purely a nice-to-have, never worth crashing startup over
+        pass
+
+
 def main() -> None:
     # Both must happen before QApplication is constructed to take effect.
     #
@@ -3461,22 +3559,20 @@ def main() -> None:
     # down with it. Sharing one context across every OpenGL-backed widget
     # in the app fixes both.
     #
-    # QSurfaceFormat.setDefaultFormat: without this, the *main* window
-    # (created long before any 3D preview) starts with a plain, non-GL
-    # surface, and the first time a GLViewWidget appears anywhere in the
-    # process, Windows' compositor has to switch that window's backing
-    # surface to a GL-capable one on the spot -- visible as the whole app
-    # flickering/flashing once, as if it briefly closed and reopened, even
-    # though nothing actually crashed. Setting a GL-capable default format
-    # up front means every window (including the main one, at launch)
-    # already has a compatible surface, so there's nothing left to switch
-    # later when the first 3D preview actually opens.
+    # QSurfaceFormat.setDefaultFormat: reasonable GL capabilities (a real
+    # depth buffer) for every window up front. Doesn't fix the startup
+    # flicker on its own (see _prewarm_opengl's docstring for the actual
+    # mechanism and fix) but there's no reason not to have it set anyway.
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     surface_format = QSurfaceFormat()
     surface_format.setDepthBufferSize(24)
     QSurfaceFormat.setDefaultFormat(surface_format)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(paths.package_dir() / "app_icon.png")))
+
+    splash = _StartupSplash()
+    splash.show()
+    app.processEvents()
 
     # A library folder is required above everything else -- nothing else in
     # the app can run without one, so this loops until Catalogue.open()
@@ -3485,6 +3581,10 @@ def main() -> None:
     # crash past this gate with a raw traceback.
     catalogue, _ = _try_open_catalogue()
     error_message: str | None = None
+    if catalogue is None:
+        # A modal settings dialog needs the user's attention, not a splash
+        # screen competing for it -- brought back afterward, below.
+        splash.hide()
     while catalogue is None:
         dialog = SettingsDialog(error_message=error_message)
         if dialog.exec() != QDialog.Accepted:
@@ -3492,7 +3592,14 @@ def main() -> None:
         catalogue, error_message = _try_open_catalogue()
 
     window = MainWindow(catalogue)
+    splash.show()
+    app.processEvents()
+    # Before window.show(), deliberately -- see _prewarm_opengl's
+    # docstring for why the ordering is what makes this actually work
+    # rather than just moving the flicker a little earlier.
+    _prewarm_opengl(window)
     window.show()
+    splash.close()
     window._check_for_updates(silent=True)
     sys.exit(app.exec())
 
