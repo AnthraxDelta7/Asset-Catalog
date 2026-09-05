@@ -7,7 +7,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QSurfaceFormat
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -3449,17 +3449,32 @@ def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:
 
 
 def main() -> None:
-    # Must be set before QApplication is constructed to take effect. Each
-    # new pyqtgraph GLViewWidget (the 3D preview -- see
-    # model_preview_dialog.py) otherwise gets its own separate OpenGL
-    # context, but pyqtgraph's compiled shader programs are cached
-    # globally by name, not per-context -- opening a second 3D preview in
-    # the same session reused a program handle that belonged to the
-    # first (now-different) context, raising GL_INVALID_VALUE on every
-    # draw call and, in the packaged .exe, taking the whole app down with
-    # it. Sharing one context across every OpenGL-backed widget in the
-    # app fixes both.
+    # Both must happen before QApplication is constructed to take effect.
+    #
+    # AA_ShareOpenGLContexts: each new pyqtgraph GLViewWidget (the 3D
+    # preview -- see model_preview_dialog.py) otherwise gets its own
+    # separate OpenGL context, but pyqtgraph's compiled shader programs
+    # are cached globally by name, not per-context -- opening a second 3D
+    # preview in the same session reused a program handle that belonged
+    # to the first (now-different) context, raising GL_INVALID_VALUE on
+    # every draw call and, in the packaged .exe, taking the whole app
+    # down with it. Sharing one context across every OpenGL-backed widget
+    # in the app fixes both.
+    #
+    # QSurfaceFormat.setDefaultFormat: without this, the *main* window
+    # (created long before any 3D preview) starts with a plain, non-GL
+    # surface, and the first time a GLViewWidget appears anywhere in the
+    # process, Windows' compositor has to switch that window's backing
+    # surface to a GL-capable one on the spot -- visible as the whole app
+    # flickering/flashing once, as if it briefly closed and reopened, even
+    # though nothing actually crashed. Setting a GL-capable default format
+    # up front means every window (including the main one, at launch)
+    # already has a compatible surface, so there's nothing left to switch
+    # later when the first 3D preview actually opens.
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    surface_format = QSurfaceFormat()
+    surface_format.setDepthBufferSize(24)
+    QSurfaceFormat.setDefaultFormat(surface_format)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(paths.package_dir() / "app_icon.png")))
 
