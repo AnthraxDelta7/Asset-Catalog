@@ -123,3 +123,34 @@ def test_generate_audio_thumbnails_asset_id_targets_only_that_asset(
     }
     assert statuses["a.wav"] == "done"
     assert statuses["b.wav"] == "pending"
+
+
+def test_generate_audio_thumbnails_asset_ids_targets_the_given_set(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    """Backs the grid's multi-select "Regenerate N Thumbnail(s)" context
+    menu action -- renders exactly the given assets and re-renders them
+    regardless of current status, mirroring asset_id's behavior.
+    """
+    write_wav(staging_folder, "Pack", "a.wav", tone=b"\x00\x01")
+    write_wav(staging_folder, "Pack", "b.wav", tone=b"\x02\x03")
+    write_wav(staging_folder, "Pack", "c.wav", tone=b"\x04\x05")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    rows = {row["filename"]: row["id"] for row in conn.execute("SELECT id, filename FROM assets")}
+
+    stats = audio_thumbnails.generate_audio_thumbnails(
+        conn, staging_folder, thumbnail_dir, asset_ids=[rows["a.wav"], rows["b.wav"]]
+    )
+    assert stats.generated == 2
+    statuses = {
+        row["filename"]: row["thumbnail_status"]
+        for row in conn.execute("SELECT filename, thumbnail_status FROM assets")
+    }
+    assert statuses["a.wav"] == "done"
+    assert statuses["b.wav"] == "done"
+    assert statuses["c.wav"] == "pending"
+
+    stats2 = audio_thumbnails.generate_audio_thumbnails(conn, staging_folder, thumbnail_dir, asset_ids=[])
+    assert stats2.generated == 0
+    assert stats2.already_done == 0

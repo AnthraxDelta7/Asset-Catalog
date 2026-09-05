@@ -281,7 +281,7 @@ class ThumbnailGrid(QListWidget):
         # image gets stretched by Qt to fill a 128-*logical*-pixel icon
         # slot on any scaled/HiDPI display (e.g. Windows' common 125%/150%
         # scaling), which is what actually causes visible blur: the source
-        # thumbnails are rendered at 256x256, plenty of real resolution for
+        # thumbnails are rendered at 512x512, plenty of real resolution for
         # this, the blur was purely from Qt not being told about the ratio.
         dpr = self.devicePixelRatioF()
         physical_size = QSize(
@@ -2441,6 +2441,53 @@ class MainWindow(QMainWindow):
             self._refresh_grid,
         )
 
+    def _regenerate_thumbnails(self, asset_ids: list[int]) -> None:
+        """Force-regenerates thumbnails for an arbitrary selection -- unlike
+        the detail panel's conditional "Generate Thumbnail" button, this
+        always re-renders regardless of current thumbnail_status (e.g. to
+        freshen already-'done' thumbnails after a resolution change). Assets
+        not in THUMBNAIL_CAPABLE_TYPES are expected to already be filtered
+        out by the caller (see _build_grid_context_menu).
+        """
+        by_type: dict[str, list[int]] = {"texture": [], "audio": [], "model": []}
+        for asset in self._current_assets:
+            if asset.id in asset_ids and asset.asset_type in by_type:
+                by_type[asset.asset_type].append(asset.id)
+
+        def job(report):
+            generated = already_done = failed = 0
+            if by_type["texture"]:
+                stats = self._catalogue.generate_2d_thumbnails_bg(
+                    asset_ids=by_type["texture"], on_progress=report
+                )
+                generated += stats.generated
+                already_done += stats.already_done
+                failed += stats.failed
+            if by_type["audio"]:
+                stats = self._catalogue.generate_audio_thumbnails_bg(
+                    asset_ids=by_type["audio"], on_progress=report
+                )
+                generated += stats.generated
+                already_done += stats.already_done
+                failed += stats.failed
+            if by_type["model"]:
+                stats = self._catalogue.regenerate_model_thumbnail_bg(
+                    asset_ids=by_type["model"], on_progress=report
+                )
+                generated += stats.generated
+                already_done += stats.already_done
+                failed += stats.failed
+            return generated, already_done, failed
+
+        self._run_background_job(
+            job,
+            "Regenerating thumbnails...",
+            lambda result: (
+                f"Thumbnails: {result[0]} generated, {result[1]} already done, {result[2]} failed"
+            ),
+            self._refresh_grid,
+        )
+
     def _cleanup_all_pending_conversions(self) -> None:
         pending_count = self._catalogue.count_pending_conversions()
         if pending_count == 0:
@@ -2599,6 +2646,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return None
 
+        selected_ids = {item.data(Qt.UserRole) for item in selected}
         menu = QMenu(self)
         if len(selected) == 1:
             asset_id = selected[0].data(Qt.UserRole)
@@ -2614,6 +2662,11 @@ class MainWindow(QMainWindow):
                     )
                     is not None
                 )
+                if asset.asset_type in THUMBNAIL_CAPABLE_TYPES:
+                    regen_action = menu.addAction("Regenerate Thumbnail")
+                    regen_action.triggered.connect(
+                        lambda: self._regenerate_thumbnails([asset.id])
+                    )
                 if asset.asset_type == "model" and not asset.relative_path.lower().endswith(".glb"):
                     convert_action = menu.addAction("Convert to glTF (.glb)...")
                     convert_action.triggered.connect(
@@ -2629,7 +2682,18 @@ class MainWindow(QMainWindow):
                     play_action.setEnabled(self.detail_panel.is_audio_playable())
                 menu.addSeparator()
         else:
-            selected_ids = {item.data(Qt.UserRole) for item in selected}
+            thumbnail_eligible_ids = [
+                asset.id
+                for asset in self._current_assets
+                if asset.id in selected_ids and asset.asset_type in THUMBNAIL_CAPABLE_TYPES
+            ]
+            if thumbnail_eligible_ids:
+                regen_action = menu.addAction(
+                    f"Regenerate {len(thumbnail_eligible_ids)} Thumbnail(s)"
+                )
+                regen_action.triggered.connect(
+                    lambda: self._regenerate_thumbnails(thumbnail_eligible_ids)
+                )
             eligible_ids = [
                 asset.id
                 for asset in self._current_assets
@@ -2642,6 +2706,7 @@ class MainWindow(QMainWindow):
                 convert_action.triggered.connect(
                     lambda: self._convert_assets_to_gltf(eligible_ids)
                 )
+            if thumbnail_eligible_ids or eligible_ids:
                 menu.addSeparator()
 
         export_label = "Export to Project..." if len(selected) == 1 else f"Export {len(selected)} to Project..."

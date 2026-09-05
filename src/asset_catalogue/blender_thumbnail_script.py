@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from blender_common import IMPORTERS, apply_corrections, clear_imported_objects, get_job_list_path
 
-RESOLUTION = 256
+RESOLUTION = 512
 WORLD_COLOR = (0.05, 0.05, 0.06)  # neutral dark gray/charcoal
 CAMERA_DIRECTION = mathutils.Vector((1, -1, 0.7)).normalized()
 CAMERA_DISTANCE_FACTOR = 3.2  # empirical fit for the default ~40deg camera FOV

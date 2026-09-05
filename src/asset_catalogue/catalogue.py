@@ -394,13 +394,16 @@ class Catalogue:
             conn.close()
 
     def regenerate_model_thumbnail_bg(
-        self, asset_id: int, on_progress: Callable[[str], None] | None = None
+        self,
+        asset_id: int | None = None,
+        asset_ids: list[int] | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> blender_render.ModelThumbnailStats:
-        """Re-renders a single model asset's thumbnail regardless of its
-        current thumbnail_status -- used to preview render corrections
+        """Re-renders one or more model assets' thumbnails regardless of
+        their current thumbnail_status -- used to preview render corrections
         (up_axis/scale/material_fallback) against one asset at a time, e.g.
-        the post-ingest calibration review, without touching the rest of
-        the pack.
+        the post-ingest calibration review, and by the grid's "Regenerate
+        Thumbnail(s)" context menu action for an arbitrary selection.
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
@@ -415,6 +418,7 @@ class Catalogue:
                 self._thumbnail_dir,
                 blender_exe,
                 asset_id=asset_id,
+                asset_ids=asset_ids,
                 on_progress=on_progress,
             )
         finally:
@@ -500,6 +504,7 @@ class Catalogue:
         pack: str | None = None,
         force: bool = False,
         asset_id: int | None = None,
+        asset_ids: list[int] | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
@@ -513,6 +518,7 @@ class Catalogue:
                 pack_name=pack,
                 force=force,
                 asset_id=asset_id,
+                asset_ids=asset_ids,
                 on_progress=on_progress,
             )
         finally:
@@ -523,6 +529,7 @@ class Catalogue:
         pack: str | None = None,
         force: bool = False,
         asset_id: int | None = None,
+        asset_ids: list[int] | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
@@ -536,6 +543,7 @@ class Catalogue:
                 pack_name=pack,
                 force=force,
                 asset_id=asset_id,
+                asset_ids=asset_ids,
                 on_progress=on_progress,
             )
         finally:

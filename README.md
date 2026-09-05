@@ -94,7 +94,7 @@ Removing a tag from one asset "sticks" even across a later pack-wide re-tag: `un
 
 ## Thumbnails (2D)
 
-Renders a 256x256 PNG for every `texture`-type asset, named after its content hash — so identical content, wherever it's re-encountered, never gets rendered twice:
+Renders a 512x512 PNG for every `texture`-type asset, named after its content hash — so identical content, wherever it's re-encountered, never gets rendered twice:
 
 ```
 asset-catalogue thumbnail generate [--pack "Pack Name"] [--force] [--asset-id ID]
@@ -119,7 +119,7 @@ asset-catalogue settings set --blender-path "C:\Program Files\Blender Foundation
 asset-catalogue thumbnail generate-models [--pack "Pack Name"] [--force]
 ```
 
-One Blender process handles the whole batch (startup dominates the per-asset cost, so this matters). Supports OBJ, FBX, GLTF/GLB, STL, and `.blend` (via library append). Rendered at 256x256 with EEVEE, a single sun light, dark neutral background, framed to each asset's bounding box. An asset that imports but produces zero mesh objects (or errors outright) is marked `failed` rather than saving a blank thumbnail, and is retried on the next run — same failed/done semantics as the 2D path above.
+One Blender process handles the whole batch (startup dominates the per-asset cost, so this matters). Supports OBJ, FBX, GLTF/GLB, STL, and `.blend` (via library append). Rendered at 512x512 with EEVEE, a single sun light, dark neutral background, framed to each asset's bounding box. An asset that imports but produces zero mesh objects (or errors outright) is marked `failed` rather than saving a blank thumbnail, and is retried on the next run — same failed/done semantics as the 2D path above.
 
 Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are read from `packs.corrections` and applied after import, before framing.
 
@@ -270,7 +270,9 @@ A separate **Browse Zip...** option (for a `.zip` living *outside* the staging f
 
 **A pending-conversions reminder lives in the status bar** whenever at least one exists (`⚠ N pending conversions -- click to review`) — a pending conversion is easy to forget about otherwise, since nothing else in the UI surfaces it unless you're already looking at that specific asset. Clicking it opens a **Pending Conversions** review dialog: a real table (pack, original filename, converted-to filename, when it was converted) rather than a bare "delete N originals?" prompt with no more detail than the badge itself already gave. Select one or more rows to **Revert** (restore the pre-conversion original, discard the `.glb`) or **Keep** (permanently delete just those originals, keep their `.glb`s) just those assets, or use **Keep All** for the same bulk action **Tools > Clean Up Pre-Conversion Assets...** already offered. The dialog refreshes itself after every action and closes on its own once nothing is left to review.
 
-**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Export to Project...**, and Delete from Library. Multiple selected: **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Export N to Project...**, and Delete (labeled with the total count).
+**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Regenerate Thumbnail** (offered for any thumbnail-capable type — `texture`/`audio`/`model`, not `other`), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Export to Project...**, and Delete from Library. Multiple selected: **Regenerate N Thumbnail(s)** (the label's count is however many of the selection are thumbnail-capable; anything else is silently left out), **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Export N to Project...**, and Delete (labeled with the total count).
+
+Unlike the detail panel's **Generate Thumbnail** button (which only appears once, for an asset whose thumbnail isn't `done` yet), **Regenerate Thumbnail(s)** always re-renders regardless of current status — the one to reach for when a thumbnail is already `done` but looks wrong (a bad render, or after a resolution change) rather than actually missing.
 
 **Right-click a pack in the Pack list** for **Edit Pack Metadata...** (name, creator, licence, source URL, and render corrections all in one dialog — the same fields as `pack set-metadata`/`rename`/`set-corrections` combined, pre-filled with the pack's current values; renaming moves its archived library folder to match, same as the CLI) and **Remove Pack '\<name\>'...** (deletes every asset in the pack, the pack entry itself, and its whole archived library folder, after a confirmation naming the asset count — the UI counterpart to `pack remove`). Right-clicking "All packs" shows no menu, since it isn't a real pack.
 

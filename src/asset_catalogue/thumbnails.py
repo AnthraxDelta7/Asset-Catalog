@@ -7,7 +7,7 @@ from typing import Callable
 
 from PIL import Image, UnidentifiedImageError
 
-THUMBNAIL_SIZE = (256, 256)
+THUMBNAIL_SIZE = (512, 512)
 ProgressCallback = Callable[[str], None]
 
 
@@ -38,20 +38,24 @@ def generate_texture_thumbnails(
     pack_name: str | None = None,
     force: bool = False,
     asset_id: int | None = None,
+    asset_ids: list[int] | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> ThumbnailStats:
-    # Targeting one asset directly (e.g. the detail panel's "Generate
-    # Thumbnail" button) always renders it regardless of prior status, same
-    # as --force -- mirrors blender_render.build_job_list's asset_id
+    # Targeting specific asset(s) directly (e.g. the detail panel's
+    # "Generate Thumbnail" button, or the grid's "Regenerate Thumbnail(s)"
+    # context menu action) always renders them regardless of prior status,
+    # same as --force -- mirrors blender_render.build_job_list's asset_id
     # handling for models.
-    effective_force = force or asset_id is not None
+    if asset_ids is not None and not asset_ids:
+        return ThumbnailStats()
+    effective_force = force or asset_id is not None or asset_ids is not None
     report = on_progress or (lambda _text: None)
     query = (
         "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
         "packs.pack_folder FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'texture'"
     )
-    params: list[str] = []
+    params: list = []
     if not effective_force:
         query += " AND assets.thumbnail_status != 'done'"
     if pack_name:
@@ -60,6 +64,10 @@ def generate_texture_thumbnails(
     if asset_id is not None:
         query += " AND assets.id = ?"
         params.append(asset_id)
+    elif asset_ids is not None:
+        placeholders = ",".join("?" * len(asset_ids))
+        query += f" AND assets.id IN ({placeholders})"
+        params.extend(asset_ids)
 
     rows = conn.execute(query, params).fetchall()
     stats = ThumbnailStats()
