@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -14,6 +15,51 @@ ProgressCallback = Callable[[str], None]
 @dataclass
 class RemoveStats:
     removed: int = 0
+
+
+def trash_assets(conn: sqlite3.Connection, asset_ids: list[int]) -> int:
+    """Soft-deletes assets -- hides them from the normal grid (deleted_at
+    set) without touching any files, catalogue rows, tags, or the archived
+    library copy. Reversible via restore_assets, unlike remove_assets. This
+    is what the grid's "Delete from Library" action actually does now;
+    actually deleting files happens only via the Trash view's "Delete
+    Permanently" (see purge, which calls remove_assets on the trashed ids).
+    Already-trashed ids are silently skipped (not double-counted).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    count = 0
+    for asset_id in asset_ids:
+        cursor = conn.execute(
+            "UPDATE assets SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, asset_id),
+        )
+        count += cursor.rowcount
+    conn.commit()
+    return count
+
+
+def restore_assets(conn: sqlite3.Connection, asset_ids: list[int]) -> int:
+    """Undoes trash_assets -- clears deleted_at so the asset shows up in
+    the normal grid again. Already-active ids are silently skipped.
+    """
+    count = 0
+    for asset_id in asset_ids:
+        cursor = conn.execute(
+            "UPDATE assets SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL",
+            (asset_id,),
+        )
+        count += cursor.rowcount
+    conn.commit()
+    return count
+
+
+def list_trashed_asset_ids(conn: sqlite3.Connection) -> list[int]:
+    return [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM assets WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+        )
+    ]
 
 
 @dataclass

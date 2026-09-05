@@ -4,6 +4,8 @@
 
 Standalone tool for cataloguing, tagging, previewing and exporting game assets. Design rationale lives in [asset-catalogue-seed.md](asset-catalogue-seed.md); this file tracks day-to-day usage as commands land.
 
+If you'd like to support development, you can do so here: [ko-fi.com/anthraxdelta7](https://ko-fi.com/anthraxdelta7)
+
 ## Setup
 
 ```
@@ -125,6 +127,12 @@ Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are
 
 Every source file path handed to a Blender importer is prefixed with Windows' `\\?\` extended-length marker before use — Python's own file access is long-path-aware and never needed this, but Blender's importers call straight into the OS APIs that cap a path at 260 characters (`MAX_PATH`), which a deeply nested staging path (a long pack/creator folder name plus a multi-level zip extraction) can genuinely exceed. Without it, an asset like that fails to import with a plain "cannot open file" even though the file is completely readable — this bit a real pack during development and is now fixed for every importer (OBJ/FBX/GLTF/GLB/STL/`.blend`), not just the one that happened to trigger it first.
 
+## Interactive 3D preview
+
+Every model thumbnail render also exports a small `.glb` of the same imported-and-corrected scene, cached alongside the PNG (content-hash-keyed, same identity scheme as thumbnails — see `model_preview.py`). No second Blender launch: import is the expensive part, and the render pass already has the scene set up. The UI's grid right-click menu offers **3D Preview (Orbit/Zoom)...** for any `model` asset once this cache exists (regenerate its thumbnail first if it predates this feature) — a real orbit/pan/zoom viewer (`pyqtgraph`'s `GLViewWidget`, loaded via `trimesh`), not just a bigger version of the static render.
+
+Deliberately lightweight rather than a full renderer: plain flat-shaded geometry, no materials or textures loaded from the `.glb`. That's what the existing Blender-rendered static thumbnail is already for — this is for spinning a model around to check topology, proportions, and orientation before committing to use it, which doesn't need real shading to be useful. Both the extra dependencies (`pyqtgraph`, `PyOpenGL`, `trimesh`) and the viewer module itself are only ever loaded into memory the first time someone actually opens a 3D preview, not on every app launch.
+
 ## Per-pack calibration
 
 Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7). A brand-new pack with model assets already gets this workflow's first step done automatically at ingest — see "Thumbnails are generated automatically" above:
@@ -165,6 +173,17 @@ Removing a pack deletes every one of its assets (catalogue rows, thumbnails, arc
 asset-catalogue pack remove <pack_name> [--yes]
 ```
 
+A pack's rating (1-5) and notes are personal, opinion fields — separate from creator/licence/source URL (facts about the pack) — most useful for remembering later which of a big purchased-pack backlog is actually worth reusing:
+
+```
+asset-catalogue pack notes <pack_name> [--notes "..."] [--rating 1-5]
+asset-catalogue pack notes <pack_name> [--clear-notes] [--clear-rating]
+```
+
+## Favorites
+
+A quick personal flag on individual assets, independent of tags (tags categorize; favorites just mark "I liked this one specifically"). UI-only for now — toggled via the grid's right-click menu or the detail panel's star button, and filterable via the **★ Favorites only** checkbox (see the UI section below); no dedicated CLI command yet.
+
 ## Converting models to glTF
 
 On demand, per model asset (never automatic) — imports the asset in its original format via Blender, applies the pack's corrections (same ones used for thumbnails), and exports it as `.glb`. Same asset id, same tags/import history — only its file (`relative_path`, `extension`, `content_hash`, `file_size`) changes in place, and its thumbnail is regenerated immediately afterward so a broken conversion is obvious right away rather than discovered later:
@@ -201,7 +220,34 @@ Removes one, many, or all assets from the catalogue — the database row, tags, 
 asset-catalogue remove --asset-id <id> [--asset-id <id> ...] | --pack "Pack Name" | --type texture | --tag tag_name | --all [--yes]
 ```
 
-Prints what's about to be removed and asks for confirmation unless `--yes` is passed.
+Prints what's about to be removed and asks for confirmation unless `--yes` is passed. This is a real, immediate delete — for a reversible one, see Trash below.
+
+## Trash
+
+A soft-delete: hides assets from the normal grid/listings (`deleted_at` set) without touching the catalogue row, tags, thumbnail, or archived library copy — reversible via restore, unlike `remove` above. This is what the UI's grid delete action (**Move to Trash**) actually does now:
+
+```
+asset-catalogue trash move --asset-id <id> [--asset-id <id> ...]
+asset-catalogue trash list
+asset-catalogue trash restore [--asset-id <id> ...]      # omit --asset-id to restore everything
+asset-catalogue trash empty [--asset-id <id> ...] [--yes] # omit --asset-id to empty the whole Trash
+```
+
+`trash empty` is the actual, permanent delete (same file/DB cleanup as `remove`) — it prompts for confirmation unless `--yes` is passed, same convention as `remove`.
+
+## Library statistics and health
+
+```
+asset-catalogue stats
+```
+
+Total assets/size, favorited count, breakdowns by asset type and thumbnail status, and the largest packs by size — read-only, computed from each asset's `file_size` recorded at ingest (no filesystem walk needed). Same report backs **Tools > Library Statistics...** in the UI.
+
+```
+asset-catalogue check [--fix]
+```
+
+Scans for drift between the catalogue's records and reality on disk: a missing archived library copy, a thumbnail file gone despite `thumbnail_status` saying `done`, or a staging source that's disappeared since ingest (informational only — many people clean up staging on purpose once a pack's archived). Trashed assets are skipped. `--fix` applies the two safe automatic fixes: resets a broken thumbnail's status back to `pending` (so the next thumbnail pass re-renders it), and re-archives a missing library copy from staging where the source file is still there. An asset that's lost both its staging source and its library copy has no automatic fix. Same checks and fixes back **Tools > Check Library Integrity...** in the UI.
 
 ## Export
 
@@ -264,19 +310,28 @@ A separate **Browse Zip...** option (for a `.zip` living *outside* the staging f
 
 **Menu structure: Edit is selection-editing only; Tools is everything that transforms, exports, or maintains rather than edits.** These grew feature-by-feature into one crowded Edit menu; split apart so Edit doesn't become a junk drawer:
 
-- **Edit > Select All** (Ctrl+A) and **Edit > Remove Selected...** (Delete key) — pure catalogue-editing, scoped to the current grid selection. Remove deletes the catalogue database rows, thumbnails, and any archived library copy for whatever's selected — one, many, or all of it; a confirmation dialog says so explicitly before anything happens, since it's easy to forget that "remove from library" doesn't touch the actual files sitting in your staging folder.
+- **Edit > Select All** (Ctrl+A) and **Edit > Move Selected to Trash** (Delete key) — pure catalogue-editing, scoped to the current grid selection. Moving to Trash is reversible (see above); nothing is actually deleted until confirmed in **Tools > View Trash...**.
 - **Tools > Convert Selected to glTF (.glb)...** — the menu-bar equivalent of the grid's right-click Convert action (below), for when you don't want to right-click: converts whatever's selected and eligible (model assets not already `.glb`; anything else in the selection is silently skipped, same as the CLI's multi `--asset-id`), dispatching to the single- or batch-conversion path depending on how many end up eligible.
 - **Tools > Export Selected to Project...** copies whatever's selected out to a target project — the UI counterpart to the CLI's `export`, operating on the current grid selection instead of a `--pack`/`--type`/`--tag` filter. The dialog asks for a project folder (pre-filled with the most recently used one, if any — always editable) and destination subfolder (default `exported_assets`). For repeat exports to the same project, the detail panel's **Export** button (described above) skips this dialog entirely.
 - **Tools > Tag Pack...** (described above) and **Tools > Clean Up Pre-Conversion Assets...** — confirms every pending glTF conversion at once (see "Converting models to glTF" above), permanently deleting each one's pre-conversion original (staging + library copy) while keeping the converted `.glb`, after a confirmation dialog stating the count. This is the bulk counterpart to the per-asset Revert/Delete buttons in the detail panel; it's a no-op with an info message if nothing is pending.
 - **Tools > Generate Credits Report...** opens a dialog with a live preview of the attribution report described in "Credits report" above — a project-folder field (blank for the whole catalogue) plus Generate/Save As, so you can check it before it ends up in a real credits screen.
+- **Tools > Library Statistics...** shows a read-only snapshot of the library's size and composition: total assets/size across all packs, favorited count, breakdowns by asset type and thumbnail status, and the largest packs by size. Same report as the CLI's `stats` command (see below).
+- **Tools > View Trash...** opens the Trash review dialog: a table of everything currently trashed (pack, filename, when it was trashed), with per-row **Restore Selected** / **Delete Selected Permanently**, plus a bulk **Empty Trash (Delete All Permanently)**. Restoring needs no confirmation (it's just clearing a flag); the two permanent-delete actions do, since — unlike moving to Trash — they're the real, unrecoverable delete (catalogue entry, thumbnail, and archived library copy, same as `remove`/`Remove Pack`). The dialog closes itself once Trash is empty.
+- **Tools > Check Library Integrity...** scans for drift between the catalogue's records and reality on disk: an archived library copy that went missing, a thumbnail file gone despite `thumbnail_status` saying `done`, or a staging source that's disappeared since ingest (informational only — many people clean up staging on purpose once a pack's archived, so this one's just a heads-up that a future re-render/re-convert would need that file back). Trashed assets are skipped, since their files not being touched is the whole point of Trash. Two one-click fixes are offered for the rows they apply to: **Reset Selected Thumbnail Status** (marks a broken-thumbnail row `pending` again so the next thumbnail pass re-renders it) and **Re-archive Selected from Staging** (re-copies a missing library copy from staging, if it's still there). An asset that's lost both its staging source and its library copy has no automatic fix — Trash or Remove is the honest next step, done manually from the grid. Same checks (and the `--fix` flag for both automatic fixes) are available via the CLI's `check` command.
 
 **A pending-conversions reminder lives in the status bar** whenever at least one exists (`⚠ N pending conversions -- click to review`) — a pending conversion is easy to forget about otherwise, since nothing else in the UI surfaces it unless you're already looking at that specific asset. Clicking it opens a **Pending Conversions** review dialog: a real table (pack, original filename, converted-to filename, when it was converted) rather than a bare "delete N originals?" prompt with no more detail than the badge itself already gave. Select one or more rows to **Revert** (restore the pre-conversion original, discard the `.glb`) or **Keep** (permanently delete just those originals, keep their `.glb`s) just those assets, or use **Keep All** for the same bulk action **Tools > Clean Up Pre-Conversion Assets...** already offered. The dialog refreshes itself after every action and closes on its own once nothing is left to review.
 
-**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), **Regenerate Thumbnail** (offered for any thumbnail-capable type — `texture`/`audio`/`model`, not `other`), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Export to Project...**, and Delete from Library. Multiple selected: **Regenerate N Thumbnail(s)** (the label's count is however many of the selection are thumbnail-capable; anything else is silently left out), **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Export N to Project...**, and Delete (labeled with the total count).
+**Right-click the grid** for a context menu scoped to whatever's selected — right-clicking outside the current selection switches to just that item first, same convention as a normal file manager. One asset selected: Show in Library Folder (disabled if it hasn't been archived), a **☆ Add to Favorites**/**★ Remove from Favorites** toggle, **Regenerate Thumbnail** (offered for any thumbnail-capable type — `texture`/`audio`/`model`, not `other`), **3D Preview (Orbit/Zoom)...** for a `model` asset once its preview has been generated (see "Interactive 3D preview" below; disabled with an explanatory tooltip otherwise), **Convert to glTF (.glb)...** (only offered for a model asset that isn't already `.glb` and has no conversion already pending), **Export to Project...**, and **Move to Trash**. Multiple selected: bulk **★ Add N to Favorites**/**☆ Remove N from Favorites**, **Regenerate N Thumbnail(s)** (the label's count is however many of the selection are thumbnail-capable; anything else is silently left out), **Convert N to glTF (.glb)...** (only offered if at least one selected asset is an eligible model — the label's count is the eligible subset; anything not a model, or already `.glb`, is silently left out of the batch, same as the CLI's multi `--asset-id`), **Export N to Project...**, and **Move N to Trash**.
 
 Unlike the detail panel's **Generate Thumbnail** button (which only appears once, for an asset whose thumbnail isn't `done` yet), **Regenerate Thumbnail(s)** always re-renders regardless of current status — the one to reach for when a thumbnail is already `done` but looks wrong (a bad render, or after a resolution change) rather than actually missing.
 
-**Right-click a pack in the Pack list** for **Edit Pack Metadata...** (name, creator, licence, source URL, and render corrections all in one dialog — the same fields as `pack set-metadata`/`rename`/`set-corrections` combined, pre-filled with the pack's current values; renaming moves its archived library folder to match, same as the CLI) and **Remove Pack '\<name\>'...** (deletes every asset in the pack, the pack entry itself, and its whole archived library folder, after a confirmation naming the asset count — the UI counterpart to `pack remove`). Right-clicking "All packs" shows no menu, since it isn't a real pack.
+**Favorites** are a personal flag independent of tags — tags are for categorization, favorites are for "I liked this specific one" out of a big purchased-pack backlog. A favorited asset shows a ★ prefix on its filename in the grid. The detail panel's single-select view also has its own **☆ Add to Favorites**/**★ Favorited** toggle button, and the filter panel has a **★ Favorites only** checkbox that narrows the grid down to just favorited assets (combines with every other filter, same AND semantics as the rest of the filter panel).
+
+**"Move to Trash" doesn't delete anything** — it just hides the selection from the normal grid (`assets.deleted_at` set); the catalogue rows, thumbnails, and archived library copy are all left exactly as they are, and nothing is actually removed until you say so explicitly in **Tools > View Trash...** (below). No confirmation prompt is needed for moving to Trash itself, since it's fully reversible.
+
+**Right-click a pack in the Pack list** for **Edit Pack Metadata...** (name, creator, licence, source URL, a 1-5 star **Rating**, personal **Notes**, and render corrections all in one dialog — the same fields as `pack set-metadata`/`rename`/`set-corrections`/`notes` combined, pre-filled with the pack's current values; renaming moves its archived library folder to match, same as the CLI) and **Remove Pack '\<name\>'...** (deletes every asset in the pack, the pack entry itself, and its whole archived library folder, after a confirmation naming the asset count — the UI counterpart to `pack remove`; this is a real, immediate delete, not Trash). Right-clicking "All packs" shows no menu, since it isn't a real pack.
+
+Rating and notes are personal, opinion-not-fact fields (unlike creator/licence/source URL) — most useful for remembering, months later, which of a huge purchased-pack backlog is actually worth reusing. The detail panel shows a selected asset's pack rating as ★★★☆☆-style stars right on the **Pack:** line, and its notes as a tooltip on that same line (hover to read).
 
 **Right-click a tag in the Tags list** for **Edit Tag...** (rename and/or re-category — updates every asset carrying it at once) and **Delete Tag '\<name\>'...** (removes it from the vocabulary and from every asset carrying it, after a confirmation naming the usage count) — the UI counterparts to `tag rename`/`tag delete`. Right-clicking "All tags" shows no menu.
 

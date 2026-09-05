@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import audio_thumbnails, paths, thumbnails
+from asset_catalogue import audio_thumbnails, model_preview, paths, thumbnails
 
 ProgressCallback = Callable[[str], None]
 
@@ -96,6 +96,7 @@ def build_job_list(
     force: bool,
     asset_id: int | None = None,
     asset_ids: list[int] | None = None,
+    preview_dir: Path | None = None,
 ) -> tuple[list[dict], int]:
     if asset_ids is not None and not asset_ids:
         return [], 0
@@ -138,12 +139,16 @@ def build_job_list(
             continue
 
         corrections = json.loads(row["corrections"]) if row["corrections"] else {}
+        preview_output_path = None
+        if preview_dir is not None:
+            preview_output_path = str(model_preview.preview_path(preview_dir, row["content_hash"]))
         jobs.append(
             {
                 "asset_id": row["id"],
                 "filename": row["filename"],
                 "source_path": str(staging_folder / row["pack_folder"] / row["relative_path"]),
                 "output_path": str(dest),
+                "preview_output_path": preview_output_path,
                 "extension": row["extension"],
                 "corrections": corrections,
             }
@@ -161,11 +166,12 @@ def generate_model_thumbnails(
     force: bool = False,
     asset_id: int | None = None,
     asset_ids: list[int] | None = None,
+    preview_dir: Path | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> ModelThumbnailStats:
     report = on_progress or (lambda _text: None)
     jobs, already_done = build_job_list(
-        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids
+        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids, preview_dir
     )
     stats = ModelThumbnailStats(already_done=already_done)
     if not jobs:
@@ -177,6 +183,8 @@ def generate_model_thumbnails(
         f"{'s' if len(jobs) != 1 else ''}..."
     )
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    if preview_dir is not None:
+        preview_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"
     ) as f:

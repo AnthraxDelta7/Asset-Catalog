@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStyle,
     QTableWidget,
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from asset_catalogue import blender_render, settings, updater
+from asset_catalogue import blender_render, library_health, library_stats, settings, updater
 from asset_catalogue.version import __version__
 from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
@@ -84,6 +85,10 @@ class FilterPanel(QWidget):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._on_change)
         layout.addWidget(self.search_edit)
+
+        self.favorites_checkbox = QCheckBox("★ Favorites only")
+        self.favorites_checkbox.toggled.connect(self._on_change)
+        layout.addWidget(self.favorites_checkbox)
 
         layout.addWidget(QLabel("Type"))
         self.type_combo = QComboBox()
@@ -132,6 +137,9 @@ class FilterPanel(QWidget):
 
     def selected_search(self) -> str | None:
         return self.search_edit.text().strip() or None
+
+    def favorites_only(self) -> bool:
+        return self.favorites_checkbox.isChecked()
 
     def selected_type(self) -> str | None:
         return self.type_combo.currentData()
@@ -257,7 +265,8 @@ class ThumbnailGrid(QListWidget):
         self.blockSignals(True)
         self.clear()
         for asset in assets:
-            item = QListWidgetItem(asset.filename)
+            label = f"★ {asset.filename}" if asset.favorite else asset.filename
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, asset.id)
             item.setIcon(QIcon(self._load_thumbnail(asset, catalogue)))
             item.setToolTip(f"{asset.pack_name} / {asset.filename}\n{asset.asset_type}")
@@ -408,6 +417,7 @@ class DetailPanel(QWidget):
         on_export_browse,
         on_quick_export,
         on_generate_thumbnail,
+        on_toggle_favorite,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -422,6 +432,7 @@ class DetailPanel(QWidget):
         self._on_export_browse = on_export_browse
         self._on_quick_export = on_quick_export
         self._on_generate_thumbnail = on_generate_thumbnail
+        self._on_toggle_favorite = on_toggle_favorite
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -430,6 +441,14 @@ class DetailPanel(QWidget):
         self.title_label = QLabel("No asset selected")
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
+
+        # A quick personal flag independent of tags -- only shown for a
+        # single-selected asset (multi-select favoriting goes through the
+        # grid's right-click menu, see MainWindow._build_grid_context_menu).
+        self.favorite_button = QPushButton("☆ Add to Favorites")
+        self.favorite_button.clicked.connect(self._toggle_favorite)
+        self.favorite_button.setVisible(False)
+        layout.addWidget(self.favorite_button)
 
         # A small clickable "Pack: <name>" line -- clicking it filters the
         # grid down to just that pack, a quick way to jump from "this one
@@ -581,6 +600,7 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(False)
         self.add_button.setEnabled(False)
         self.show_in_library_button.setEnabled(False)
+        self.favorite_button.setVisible(False)
         self.generate_thumbnail_button.setVisible(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
@@ -597,9 +617,10 @@ class DetailPanel(QWidget):
         self.tag_list.clear()
         self._set_idle_state()
 
-    def _pack_link_html(self, pack_name: str) -> str:
+    def _pack_link_html(self, pack_name: str, rating: int | None = None) -> str:
         escaped = html.escape(pack_name)
-        return f'Pack: <a href="{escaped}">{escaped}</a>'
+        stars = f" {'★' * rating}{'☆' * (5 - rating)}" if rating else ""
+        return f'Pack: <a href="{escaped}">{escaped}</a>{stars}'
 
     def show_multi_selection(self, assets: list[AssetSummary]) -> None:
         self._asset_id = None
@@ -608,7 +629,12 @@ class DetailPanel(QWidget):
         self.title_label.setText(f"{len(assets)} assets selected")
 
         pack_names = {asset.pack_name for asset in assets}
-        self.pack_label.setText(self._pack_link_html(next(iter(pack_names))) if len(pack_names) == 1 else "")
+        if len(pack_names) == 1:
+            self.pack_label.setText(self._pack_link_html(assets[0].pack_name, assets[0].pack_rating))
+            self.pack_label.setToolTip(assets[0].pack_notes or "Click to filter the grid to this pack")
+        else:
+            self.pack_label.setText("")
+            self.pack_label.setToolTip("Click to filter the grid to this pack")
 
         common_tags = sorted(set.intersection(*(set(asset.tags) for asset in assets))) if assets else []
         self.tag_list.clear()
@@ -628,6 +654,7 @@ class DetailPanel(QWidget):
         self.new_tag_input.setEnabled(True)
         self.add_button.setEnabled(True)
         self.show_in_library_button.setEnabled(False)
+        self.favorite_button.setVisible(False)
         self.generate_thumbnail_button.setVisible(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
@@ -639,9 +666,12 @@ class DetailPanel(QWidget):
         self._current_asset = asset
         self._multi_asset_ids = []
         self.title_label.setText(Path(asset.filename).stem)
-        self.pack_label.setText(self._pack_link_html(asset.pack_name))
+        self.pack_label.setText(self._pack_link_html(asset.pack_name, asset.pack_rating))
+        self.pack_label.setToolTip(asset.pack_notes or "Click to filter the grid to this pack")
         file_format = Path(asset.filename).suffix.lstrip(".").upper() or "(none)"
         self.meta_label.setText(f"type: {asset.asset_type}   format: {file_format}")
+        self.favorite_button.setVisible(True)
+        self.favorite_button.setText("★ Favorited" if asset.favorite else "☆ Add to Favorites")
         self.tag_list.clear()
         self.tag_list.addItems(asset.tags)
         self.tag_list.setEnabled(True)
@@ -693,6 +723,11 @@ class DetailPanel(QWidget):
         if self._current_asset is None:
             return
         self._on_generate_thumbnail(self._current_asset.id, self._current_asset.asset_type)
+
+    def _toggle_favorite(self) -> None:
+        if self._current_asset is None:
+            return
+        self._on_toggle_favorite(self._current_asset.id, not self._current_asset.favorite)
 
     def _stop_playback_and_hide(self) -> None:
         self._media_player.stop()
@@ -1214,6 +1249,8 @@ class PackEditDialog(QDialog):
         self.licence: str | None = detail.licence
         self.source_url: str | None = detail.source_url
         self.corrections: dict = {}
+        self.notes: str | None = detail.notes
+        self.rating: int | None = detail.rating
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1227,7 +1264,21 @@ class PackEditDialog(QDialog):
         self.source_url_edit = QLineEdit(detail.source_url or "")
         form.addRow("Source URL:", self.source_url_edit)
 
+        self.rating_spin = QSpinBox()
+        self.rating_spin.setRange(0, 5)
+        self.rating_spin.setValue(detail.rating or 0)
+        self.rating_spin.setSpecialValueText("Unrated")
+        self.rating_spin.setSuffix(" / 5")
+        form.addRow("Rating:", self.rating_spin)
+
         layout.addLayout(form)
+
+        layout.addWidget(QLabel("Notes (personal, not shown to anyone else):"))
+        self.notes_edit = QPlainTextEdit(detail.notes or "")
+        self.notes_edit.setPlaceholderText("e.g. \"great for sci-fi corridors\", \"textures are low-res\"")
+        self.notes_edit.setMaximumHeight(70)
+        layout.addWidget(self.notes_edit)
+
         layout.addWidget(QLabel(f"{detail.asset_count} asset(s) in this pack."))
 
         corrections_label = QLabel("Render corrections (applied to Blender thumbnails/conversions):")
@@ -1263,6 +1314,8 @@ class PackEditDialog(QDialog):
         self.licence = self.licence_edit.text().strip() or None
         self.source_url = self.source_url_edit.text().strip() or None
         self.corrections = corrections
+        self.notes = self.notes_edit.toPlainText().strip() or None
+        self.rating = self.rating_spin.value() or None
         self.accept()
 
 
@@ -1442,6 +1495,33 @@ class CreditsReportDialog(QDialog):
         if not chosen:
             return
         Path(chosen).write_text(self.report_view.toPlainText(), encoding="utf-8")
+
+
+class LibraryStatsDialog(QDialog):
+    """A read-only snapshot of the library's size and composition -- total
+    assets/size, breakdowns by type and thumbnail status, and the largest
+    packs by size. Purely informational (no editing here), so it's just a
+    formatted report rather than an interactive table.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Library Statistics")
+        self.resize(480, 420)
+
+        layout = QVBoxLayout(self)
+        self.report_view = QPlainTextEdit()
+        self.report_view.setReadOnly(True)
+        font = self.report_view.font()
+        font.setFamily("Consolas")
+        self.report_view.setFont(font)
+        layout.addWidget(self.report_view, stretch=1)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+        self.report_view.setPlainText(library_stats.format_report(catalogue.get_library_stats()))
 
 
 class _BackgroundWorker(QThread):
@@ -1869,6 +1949,305 @@ class PendingConversionsDialog(QDialog):
         self._run_job(job, f"Cleaning up {count} asset(s)...", on_ok)
 
 
+class TrashDialog(QDialog):
+    """What "Move to Trash"/"Move N to Trash" (the grid's delete action --
+    see MainWindow._remove_selected_assets) actually feeds: assets are
+    hidden from the normal grid but nothing is deleted until explicitly
+    confirmed here, either per-row/selection (Delete Permanently Selected)
+    or all at once (Empty Trash). Restoring is instant and needs no
+    confirmation -- it's just clearing a flag, no files are touched either
+    way until an actual delete happens.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self._worker: _BackgroundWorker | None = None
+        self._asset_ids: list[int] = []
+        self.setWindowTitle("Trash")
+        self.resize(640, 420)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Assets moved to Trash stay in the catalogue -- thumbnails and archived "
+            "library copies are untouched until you actually delete them here. "
+            "Select one or more rows to act on just those, or use the buttons below "
+            "for everything at once."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Pack", "File", "Trashed At"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, stretch=1)
+
+        selection_row = QHBoxLayout()
+        self.restore_button = QPushButton("Restore Selected")
+        self.restore_button.clicked.connect(self._restore_selected)
+        self.delete_button = QPushButton("Delete Selected Permanently")
+        self.delete_button.clicked.connect(self._delete_selected_permanently)
+        selection_row.addWidget(self.restore_button)
+        selection_row.addWidget(self.delete_button)
+        layout.addLayout(selection_row)
+
+        bulk_row = QHBoxLayout()
+        self.empty_button = QPushButton("Empty Trash (Delete All Permanently)")
+        self.empty_button.clicked.connect(self._empty_trash)
+        bulk_row.addWidget(self.empty_button)
+        bulk_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        bulk_row.addWidget(close_button)
+        layout.addLayout(bulk_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        assets = self._catalogue.list_trashed_assets()
+        self._asset_ids = [asset.id for asset in assets]
+        self.table.setRowCount(len(assets))
+        for i, asset in enumerate(assets):
+            self.table.setItem(i, 0, QTableWidgetItem(asset.pack_name))
+            self.table.setItem(i, 1, QTableWidgetItem(asset.filename))
+            self.table.setItem(i, 2, QTableWidgetItem(asset.deleted_at or ""))
+        self.table.resizeColumnsToContents()
+        has_rows = bool(assets)
+        self.restore_button.setEnabled(has_rows)
+        self.delete_button.setEnabled(has_rows)
+        self.empty_button.setEnabled(has_rows)
+        if not assets:
+            self.accept()
+
+    def _selected_asset_ids(self) -> list[int]:
+        selected_rows = {index.row() for index in self.table.selectedIndexes()}
+        return [self._asset_ids[row] for row in selected_rows]
+
+    def _run_job(self, fn, progress_text: str, on_ok) -> None:
+        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
+        progress.show()
+        worker = _BackgroundWorker(fn)
+
+        def handle_ok(result) -> None:
+            progress.close()
+            on_ok(result)
+
+        def handle_fail(message: str) -> None:
+            progress.close()
+            QMessageBox.critical(self, "Asset Catalogue", message)
+
+        worker.progress.connect(progress.append, Qt.QueuedConnection)
+        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
+        worker.failed.connect(handle_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _restore_selected(self) -> None:
+        asset_ids = self._selected_asset_ids()
+        if not asset_ids:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        count = self._catalogue.restore_assets(asset_ids)
+        QMessageBox.information(self, "Asset Catalogue", f"Restored {count} asset(s).")
+        self._refresh()
+
+    def _delete_selected_permanently(self) -> None:
+        asset_ids = self._selected_asset_ids()
+        if not asset_ids:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Permanently",
+            f"Permanently delete {len(asset_ids)} asset(s)? This deletes the catalogue "
+            "entries, thumbnails, and any archived library copy -- the original files "
+            "in your staging folder are untouched, but this cannot be undone here.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def job(report):
+            return self._catalogue.remove_assets_bg(asset_ids, on_progress=report)
+
+        def on_ok(stats) -> None:
+            QMessageBox.information(self, "Asset Catalogue", f"Permanently deleted {stats.removed} asset(s).")
+            self._refresh()
+
+        self._run_job(job, f"Deleting {len(asset_ids)} asset(s)...", on_ok)
+
+    def _empty_trash(self) -> None:
+        count = len(self._asset_ids)
+        if count == 0:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Empty Trash",
+            f"Permanently delete all {count} trashed asset(s)? This deletes the "
+            "catalogue entries, thumbnails, and any archived library copy -- the "
+            "original files in your staging folder are untouched, but this cannot "
+            "be undone here.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        asset_ids = list(self._asset_ids)
+
+        def job(report):
+            report(f"Deleting {count} asset(s)...")
+            return self._catalogue.remove_assets_bg(asset_ids, on_progress=report)
+
+        def on_ok(stats) -> None:
+            QMessageBox.information(self, "Asset Catalogue", f"Permanently deleted {stats.removed} asset(s).")
+            self._refresh()
+
+        self._run_job(job, f"Emptying Trash ({count} asset(s))...", on_ok)
+
+
+class LibraryHealthDialog(QDialog):
+    """A read-only scan for the ways the catalogue's records can drift from
+    reality on disk -- a missing archived copy, a thumbnail file gone
+    despite thumbnail_status saying 'done', or a staging source that's
+    disappeared since ingest. Surfaced as an actionable list with two
+    one-click fixes rather than a raw dump, but a genuinely broken asset
+    (both staging and library copy gone) has no automatic fix -- Trash or
+    Remove is the honest next step for those, done manually via the grid.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self._worker: _BackgroundWorker | None = None
+        self._issue_asset_ids: list[int] = []
+        self._issue_types: list[str] = []
+        self.setWindowTitle("Library Health Check")
+        self.resize(680, 440)
+
+        layout = QVBoxLayout(self)
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Pack", "File", "Issue", "Detail"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, stretch=1)
+
+        fix_row = QHBoxLayout()
+        self.reset_thumb_button = QPushButton("Reset Selected Thumbnail Status")
+        self.reset_thumb_button.setToolTip(
+            "For 'missing thumbnail file' rows -- marks them pending again so the "
+            "next thumbnail pass re-renders them."
+        )
+        self.reset_thumb_button.clicked.connect(self._reset_selected_thumbnails)
+        fix_row.addWidget(self.reset_thumb_button)
+        self.rearchive_button = QPushButton("Re-archive Selected from Staging")
+        self.rearchive_button.setToolTip(
+            "For 'missing library copy' rows -- re-copies from the staging source, "
+            "if it's still there."
+        )
+        self.rearchive_button.clicked.connect(self._rearchive_selected)
+        fix_row.addWidget(self.rearchive_button)
+        layout.addLayout(fix_row)
+
+        bottom_row = QHBoxLayout()
+        rescan_button = QPushButton("Re-scan")
+        rescan_button.clicked.connect(self._refresh)
+        bottom_row.addWidget(rescan_button)
+        bottom_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        bottom_row.addWidget(close_button)
+        layout.addLayout(bottom_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        report = self._catalogue.check_library_health()
+        self._issue_asset_ids = [issue.asset_id for issue in report.issues]
+        self._issue_types = [issue.issue_type for issue in report.issues]
+        self.table.setRowCount(len(report.issues))
+        for i, issue in enumerate(report.issues):
+            self.table.setItem(i, 0, QTableWidgetItem(issue.pack_name))
+            self.table.setItem(i, 1, QTableWidgetItem(issue.filename))
+            self.table.setItem(i, 2, QTableWidgetItem(issue.issue_type.replace("_", " ")))
+            self.table.setItem(i, 3, QTableWidgetItem(issue.detail))
+        self.table.resizeColumnsToContents()
+        if report.issues:
+            self.summary_label.setText(
+                f"{len(report.issues)} issue(s) found across {report.checked_count} asset(s) checked."
+            )
+        else:
+            self.summary_label.setText(f"No issues found -- {report.checked_count} asset(s) checked.")
+        has_issues = bool(report.issues)
+        self.reset_thumb_button.setEnabled(has_issues)
+        self.rearchive_button.setEnabled(has_issues)
+
+    def _selected_ids_for_issue(self, issue_type: str) -> list[int]:
+        selected_rows = {index.row() for index in self.table.selectedIndexes()}
+        return [
+            self._issue_asset_ids[row]
+            for row in selected_rows
+            if self._issue_types[row] == issue_type
+        ]
+
+    def _reset_selected_thumbnails(self) -> None:
+        asset_ids = self._selected_ids_for_issue(library_health.MISSING_THUMBNAIL_FILE)
+        if not asset_ids:
+            QMessageBox.information(
+                self, "Asset Catalogue",
+                "Select one or more 'missing thumbnail file' rows first.",
+            )
+            return
+        count = self._catalogue.reset_broken_thumbnails(asset_ids)
+        QMessageBox.information(
+            self, "Asset Catalogue",
+            f"Reset {count} asset(s) to pending -- the next thumbnail pass will re-render them.",
+        )
+        self._refresh()
+
+    def _rearchive_selected(self) -> None:
+        asset_ids = self._selected_ids_for_issue(library_health.MISSING_LIBRARY_COPY)
+        if not asset_ids:
+            QMessageBox.information(
+                self, "Asset Catalogue",
+                "Select one or more 'missing library copy' rows first.",
+            )
+            return
+
+        progress = ProgressLogDialog("Asset Catalogue", f"Re-archiving {len(asset_ids)} asset(s)...", self)
+        progress.show()
+        worker = _BackgroundWorker(lambda report: self._catalogue.rearchive_assets_bg(asset_ids))
+
+        def handle_ok(count) -> None:
+            progress.close()
+            QMessageBox.information(
+                self, "Asset Catalogue",
+                f"Re-archived {count} of {len(asset_ids)} asset(s) "
+                f"({len(asset_ids) - count} had no staging source left to copy from).",
+            )
+            self._refresh()
+
+        def handle_fail(message: str) -> None:
+            progress.close()
+            QMessageBox.critical(self, "Asset Catalogue", message)
+
+        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
+        worker.failed.connect(handle_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, catalogue: Catalogue) -> None:
         super().__init__()
@@ -1908,6 +2287,7 @@ class MainWindow(QMainWindow):
             self._export_selected_to_project,
             self._quick_export,
             self._handle_generate_thumbnail,
+            self._handle_toggle_favorite,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -1964,7 +2344,7 @@ class MainWindow(QMainWindow):
         # self.grid doesn't exist yet at this point in __init__ -- a lambda
         # defers the lookup to trigger-time instead of connect-time.
         select_all_action.triggered.connect(lambda: self.grid.selectAll())
-        remove_action = edit_menu.addAction("Remove Selected...")
+        remove_action = edit_menu.addAction("Move Selected to Trash")
         remove_action.setShortcut(QKeySequence.Delete)
         remove_action.triggered.connect(self._remove_selected_assets)
 
@@ -1986,6 +2366,12 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         credits_action = tools_menu.addAction("Generate Credits Report...")
         credits_action.triggered.connect(self._open_credits_dialog)
+        stats_action = tools_menu.addAction("Library Statistics...")
+        stats_action.triggered.connect(self._open_library_stats_dialog)
+        trash_action = tools_menu.addAction("View Trash...")
+        trash_action.triggered.connect(self._open_trash_dialog)
+        health_action = tools_menu.addAction("Check Library Integrity...")
+        health_action.triggered.connect(self._open_library_health_dialog)
 
         thumbnails_menu = menu_bar.addMenu("&Thumbnails")
         gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
@@ -2216,6 +2602,20 @@ class MainWindow(QMainWindow):
     def _open_credits_dialog(self) -> None:
         dialog = CreditsReportDialog(self._catalogue, self)
         dialog.exec()
+
+    def _open_library_stats_dialog(self) -> None:
+        dialog = LibraryStatsDialog(self._catalogue, self)
+        dialog.exec()
+
+    def _open_trash_dialog(self) -> None:
+        dialog = TrashDialog(self._catalogue, self)
+        dialog.exec()
+        self._refresh_grid()
+
+    def _open_library_health_dialog(self) -> None:
+        dialog = LibraryHealthDialog(self._catalogue, self)
+        dialog.exec()
+        self._refresh_grid()
 
     def _check_for_updates(self, silent: bool) -> None:
         """silent=True is the automatic on-launch check -- stays quiet if
@@ -2488,6 +2888,14 @@ class MainWindow(QMainWindow):
             self._refresh_grid,
         )
 
+    def _handle_toggle_favorite(self, asset_id: int, favorite: bool) -> None:
+        self._catalogue.set_favorite([asset_id], favorite)
+        self._refresh_grid()
+
+    def _set_favorite_for_selection(self, asset_ids: list[int], favorite: bool) -> None:
+        self._catalogue.set_favorite(asset_ids, favorite)
+        self._refresh_grid()
+
     def _cleanup_all_pending_conversions(self) -> None:
         pending_count = self._catalogue.count_pending_conversions()
         if pending_count == 0:
@@ -2508,6 +2916,17 @@ class MainWindow(QMainWindow):
             lambda count: f"Deleted {count} pre-conversion original(s).",
             self._refresh_grid,
         )
+
+    def _open_model_preview(self, filename: str, preview_path: Path | None) -> None:
+        if preview_path is None:
+            return
+        # Imported lazily, not at module top -- pyqtgraph/PyOpenGL/trimesh
+        # are only ever loaded into memory if someone actually opens a 3D
+        # preview, not on every app launch.
+        from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+        dialog = Model3DPreviewDialog(filename, preview_path, self)
+        dialog.exec()
 
     def _open_pending_conversions_dialog(self) -> None:
         dialog = PendingConversionsDialog(self._catalogue, self)
@@ -2587,6 +3006,7 @@ class MainWindow(QMainWindow):
             tag=self.filter_panel.selected_tag(),
             extension=self.filter_panel.selected_format(),
             search=self.filter_panel.selected_search(),
+            favorites_only=self.filter_panel.favorites_only(),
         )
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)
@@ -2652,6 +3072,11 @@ class MainWindow(QMainWindow):
             asset_id = selected[0].data(Qt.UserRole)
             asset = next((a for a in self._current_assets if a.id == asset_id), None)
             if asset is not None:
+                fav_label = "★ Remove from Favorites" if asset.favorite else "☆ Add to Favorites"
+                fav_action = menu.addAction(fav_label)
+                fav_action.triggered.connect(
+                    lambda: self._set_favorite_for_selection([asset.id], not asset.favorite)
+                )
                 show_action = menu.addAction("Show in Library Folder")
                 show_action.triggered.connect(
                     lambda: self._show_in_library_folder(asset.pack_name, asset.relative_path)
@@ -2667,6 +3092,17 @@ class MainWindow(QMainWindow):
                     regen_action.triggered.connect(
                         lambda: self._regenerate_thumbnails([asset.id])
                     )
+                if asset.asset_type == "model":
+                    preview_path = self._catalogue.model_preview_path_for(asset.content_hash)
+                    preview_action = menu.addAction("3D Preview (Orbit/Zoom)...")
+                    preview_action.triggered.connect(
+                        lambda: self._open_model_preview(asset.filename, preview_path)
+                    )
+                    preview_action.setEnabled(preview_path is not None)
+                    if preview_path is None:
+                        preview_action.setToolTip(
+                            "No cached preview yet -- Regenerate Thumbnail first."
+                        )
                 if asset.asset_type == "model" and not asset.relative_path.lower().endswith(".glb"):
                     convert_action = menu.addAction("Convert to glTF (.glb)...")
                     convert_action.triggered.connect(
@@ -2682,6 +3118,14 @@ class MainWindow(QMainWindow):
                     play_action.setEnabled(self.detail_panel.is_audio_playable())
                 menu.addSeparator()
         else:
+            add_fav_action = menu.addAction(f"★ Add {len(selected)} to Favorites")
+            add_fav_action.triggered.connect(
+                lambda: self._set_favorite_for_selection(list(selected_ids), True)
+            )
+            remove_fav_action = menu.addAction(f"☆ Remove {len(selected)} from Favorites")
+            remove_fav_action.triggered.connect(
+                lambda: self._set_favorite_for_selection(list(selected_ids), False)
+            )
             thumbnail_eligible_ids = [
                 asset.id
                 for asset in self._current_assets
@@ -2706,15 +3150,14 @@ class MainWindow(QMainWindow):
                 convert_action.triggered.connect(
                     lambda: self._convert_assets_to_gltf(eligible_ids)
                 )
-            if thumbnail_eligible_ids or eligible_ids:
-                menu.addSeparator()
+            menu.addSeparator()
 
         export_label = "Export to Project..." if len(selected) == 1 else f"Export {len(selected)} to Project..."
         export_action = menu.addAction(export_label)
         export_action.triggered.connect(self._export_selected_to_project)
         menu.addSeparator()
 
-        remove_label = "Delete from Library" if len(selected) == 1 else f"Delete {len(selected)} from Library"
+        remove_label = "Move to Trash" if len(selected) == 1 else f"Move {len(selected)} to Trash"
         remove_action = menu.addAction(remove_label)
         remove_action.triggered.connect(self._remove_selected_assets)
 
@@ -2775,26 +3218,21 @@ class MainWindow(QMainWindow):
         self.detail_panel.refresh_export_button()
 
     def _remove_selected_assets(self) -> None:
+        """Moves the selection to Trash rather than deleting outright --
+        catalogue rows, thumbnails, and the archived library copy all stay
+        exactly as they are, just hidden from the normal grid (see
+        removal.trash_assets). Reversible via Tools > View Trash..., so no
+        confirmation prompt is needed -- unlike a real, file-touching
+        delete (Remove Pack, or the Trash dialog's own Delete Permanently).
+        """
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
         if not selected_ids:
             QMessageBox.information(self, "Asset Catalogue", "No assets selected.")
             return
-        confirm = QMessageBox.question(
-            self,
-            "Remove Assets",
-            f"Remove {len(selected_ids)} asset(s) from the catalogue?\n\n"
-            "This removes them from the catalogue database and deletes their "
-            "thumbnails and any archived library copy -- the original files in "
-            "your staging folder are untouched.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
-        self._run_background_job(
-            lambda report: self._catalogue.remove_assets_bg(selected_ids, on_progress=report),
-            f"Removing {len(selected_ids)} asset(s)...",
-            lambda stats: f"Removed {stats.removed} asset(s) from the catalogue.",
-            self._rebuild_filter_panel,
+        count = self._catalogue.trash_assets(selected_ids)
+        self._refresh_grid()
+        self.statusBar().showMessage(
+            f"Moved {count} asset(s) to Trash (Tools > View Trash... to restore)."
         )
 
     def _on_tags_changed(self) -> None:
@@ -2836,7 +3274,7 @@ class MainWindow(QMainWindow):
         self._run_background_job(
             lambda report: self._catalogue.update_pack_bg(
                 dialog.pack_id, dialog.new_name, dialog.creator, dialog.licence,
-                dialog.source_url, dialog.corrections,
+                dialog.source_url, dialog.corrections, dialog.notes, dialog.rating,
             ),
             "Saving pack...",
             format_result,

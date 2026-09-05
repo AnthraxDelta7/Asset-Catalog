@@ -56,6 +56,23 @@ def rename_pack(conn: sqlite3.Connection, assets_dir: Path, pack_id: int, new_na
         shutil.move(str(old_folder), str(new_folder))
 
 
+def set_notes_and_rating(
+    conn: sqlite3.Connection, pack_id: int, notes: str | None, rating: int | None
+) -> None:
+    """A personal, freeform record of what a pack is actually good for --
+    separate from creator/licence/source_url (facts about the pack) since
+    notes/rating are the user's own opinion, most useful when digging back
+    through a large purchased-pack backlog later. rating is 1-5 stars, or
+    None for unrated -- 0 is treated the same as None (never stored as an
+    explicit "zero stars").
+    """
+    conn.execute(
+        "UPDATE packs SET notes = ?, rating = ? WHERE id = ?",
+        (notes or None, rating or None, pack_id),
+    )
+    conn.commit()
+
+
 def get_corrections(conn: sqlite3.Connection, pack_id: int) -> dict:
     row = conn.execute("SELECT corrections FROM packs WHERE id = ?", (pack_id,)).fetchone()
     if row is None or not row["corrections"]:

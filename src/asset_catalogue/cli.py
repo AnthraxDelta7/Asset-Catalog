@@ -14,6 +14,8 @@ from asset_catalogue import (
     exporting,
     ingest,
     library_assets,
+    library_health,
+    library_stats,
     packs,
     removal,
     settings,
@@ -547,6 +549,22 @@ def cmd_pack_set_metadata(args: argparse.Namespace) -> None:
     print(f"Metadata for '{args.pack_name}': creator={creator}, licence={licence}, source_url={source_url}")
 
 
+def cmd_pack_notes(args: argparse.Namespace) -> None:
+    conn = _connect()
+    pack_id = _get_pack_id(conn, args.pack_name)
+    row = conn.execute("SELECT notes, rating FROM packs WHERE id = ?", (pack_id,)).fetchone()
+
+    notes = args.notes if args.notes is not None else row["notes"]
+    rating = args.rating if args.rating is not None else row["rating"]
+    if args.clear_notes:
+        notes = None
+    if args.clear_rating:
+        rating = None
+
+    packs.set_notes_and_rating(conn, pack_id, notes, rating)
+    print(f"'{args.pack_name}': rating={rating or 'unrated'}, notes={notes or '(none)'}")
+
+
 def cmd_pack_remove(args: argparse.Namespace) -> None:
     conn = _connect()
     pack_id = _get_pack_id(conn, args.pack_name)
@@ -646,6 +664,11 @@ def cmd_credits(args: argparse.Namespace) -> None:
     print(credits.generate_report(conn, project_root), end="")
 
 
+def cmd_stats(args: argparse.Namespace) -> None:
+    conn = _connect()
+    print(library_stats.format_report(library_stats.compute_stats(conn)))
+
+
 def cmd_remove(args: argparse.Namespace) -> None:
     if not any([args.asset_id, args.pack, args.type, args.tag, args.all]):
         raise SystemExit(
@@ -707,6 +730,72 @@ def cmd_remove(args: argparse.Namespace) -> None:
         conn, s.thumbnail_dir(), s.assets_dir(), [row["id"] for row in rows]
     )
     print(f"Removed {stats.removed} asset(s) from the catalogue.")
+
+
+def cmd_check(args: argparse.Namespace) -> None:
+    conn = _connect()
+    s = settings.load()
+    staging_folder = Path(s.staging_folder) if s.staging_folder else None
+    report = library_health.check_integrity(conn, staging_folder, s.assets_dir(), s.thumbnail_dir())
+    if not report.issues:
+        print(f"No issues found -- {report.checked_count} asset(s) checked.")
+        return
+    for issue in report.issues:
+        print(f"  [{issue.asset_id}] {issue.pack_name} / {issue.filename}: {issue.issue_type} -- {issue.detail}")
+    print(f"{len(report.issues)} issue(s) found across {report.checked_count} asset(s) checked.")
+    if args.fix:
+        broken_thumb_ids = [i.asset_id for i in report.issues if i.issue_type == library_health.MISSING_THUMBNAIL_FILE]
+        missing_copy_ids = [i.asset_id for i in report.issues if i.issue_type == library_health.MISSING_LIBRARY_COPY]
+        if broken_thumb_ids:
+            reset = library_health.reset_broken_thumbnails(conn, broken_thumb_ids)
+            print(f"Reset {reset} broken thumbnail status(es) to pending.")
+        if missing_copy_ids and staging_folder is not None:
+            rearchived = library_health.rearchive_assets(conn, staging_folder, s.assets_dir(), missing_copy_ids)
+            print(f"Re-archived {rearchived} of {len(missing_copy_ids)} missing library copy(ies).")
+
+
+def cmd_trash_move(args: argparse.Namespace) -> None:
+    conn = _connect()
+    count = removal.trash_assets(conn, args.asset_id)
+    print(f"Moved {count} asset(s) to Trash (still in the catalogue -- see 'trash list').")
+
+
+def cmd_trash_list(args: argparse.Namespace) -> None:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT assets.id, assets.filename, assets.deleted_at, packs.name AS pack_name "
+        "FROM assets JOIN packs ON packs.id = assets.pack_id "
+        "WHERE assets.deleted_at IS NOT NULL ORDER BY assets.deleted_at DESC"
+    ).fetchall()
+    if not rows:
+        print("Trash is empty.")
+        return
+    for row in rows:
+        print(f"  [{row['id']}] {row['pack_name']} / {row['filename']} (trashed {row['deleted_at']})")
+    print(f"{len(rows)} asset(s) in Trash.")
+
+
+def cmd_trash_restore(args: argparse.Namespace) -> None:
+    conn = _connect()
+    asset_ids = args.asset_id if args.asset_id else removal.list_trashed_asset_ids(conn)
+    count = removal.restore_assets(conn, asset_ids)
+    print(f"Restored {count} asset(s).")
+
+
+def cmd_trash_empty(args: argparse.Namespace) -> None:
+    conn = _connect()
+    asset_ids = args.asset_id if args.asset_id else removal.list_trashed_asset_ids(conn)
+    if not asset_ids:
+        print("Trash is empty.")
+        return
+    if not args.yes:
+        answer = input(f"Permanently delete {len(asset_ids)} trashed asset(s)? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+    s = settings.load()
+    stats = removal.remove_assets(conn, s.thumbnail_dir(), s.assets_dir(), asset_ids)
+    print(f"Permanently deleted {stats.removed} asset(s).")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -989,6 +1078,16 @@ def build_parser() -> argparse.ArgumentParser:
     set_metadata_parser.add_argument("--clear-source-url", action="store_true")
     set_metadata_parser.set_defaults(func=cmd_pack_set_metadata)
 
+    set_notes_parser = pack_sub.add_parser(
+        "notes", help="Set a pack's personal notes and/or 1-5 star rating"
+    )
+    set_notes_parser.add_argument("pack_name")
+    set_notes_parser.add_argument("--notes")
+    set_notes_parser.add_argument("--rating", type=int, choices=range(1, 6))
+    set_notes_parser.add_argument("--clear-notes", action="store_true")
+    set_notes_parser.add_argument("--clear-rating", action="store_true")
+    set_notes_parser.set_defaults(func=cmd_pack_notes)
+
     pack_rename_parser = pack_sub.add_parser(
         "rename", help="Rename a pack (moves its archived library folder to match)"
     )
@@ -1040,6 +1139,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     credits_parser.set_defaults(func=cmd_credits)
 
+    stats_parser = subparsers.add_parser(
+        "stats", help="Show library size and composition (assets, size, largest packs)"
+    )
+    stats_parser.set_defaults(func=cmd_stats)
+
+    check_parser = subparsers.add_parser(
+        "check",
+        help="Check for drift between the catalogue's records and reality on disk "
+        "(missing archived copies, missing thumbnail files, missing staging sources)",
+    )
+    check_parser.add_argument(
+        "--fix", action="store_true",
+        help="Apply the two safe automatic fixes (reset broken thumbnail status, "
+        "re-archive from staging where still possible)",
+    )
+    check_parser.set_defaults(func=cmd_check)
+
     remove_parser = subparsers.add_parser(
         "remove",
         help="Remove assets from the catalogue (does not touch the original source files)",
@@ -1057,6 +1173,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="Skip the confirmation prompt"
     )
     remove_parser.set_defaults(func=cmd_remove)
+
+    trash_parser = subparsers.add_parser(
+        "trash", help="Soft-delete assets (hidden from listings, nothing is deleted until purged)"
+    )
+    trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
+
+    trash_move_parser = trash_sub.add_parser(
+        "move", help="Move assets to Trash -- reversible, no files touched"
+    )
+    trash_move_parser.add_argument(
+        "--asset-id", type=int, action="append", required=True, help="Repeatable"
+    )
+    trash_move_parser.set_defaults(func=cmd_trash_move)
+
+    trash_list_parser = trash_sub.add_parser("list", help="List trashed assets")
+    trash_list_parser.set_defaults(func=cmd_trash_list)
+
+    trash_restore_parser = trash_sub.add_parser("restore", help="Restore trashed assets")
+    trash_restore_parser.add_argument(
+        "--asset-id", type=int, action="append", help="Repeatable; omit to restore everything in Trash"
+    )
+    trash_restore_parser.set_defaults(func=cmd_trash_restore)
+
+    trash_empty_parser = trash_sub.add_parser(
+        "empty", help="Permanently delete trashed assets (catalogue entry, thumbnail, library copy)"
+    )
+    trash_empty_parser.add_argument(
+        "--asset-id", type=int, action="append", help="Repeatable; omit to empty the whole Trash"
+    )
+    trash_empty_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    trash_empty_parser.set_defaults(func=cmd_trash_empty)
 
     return parser
 

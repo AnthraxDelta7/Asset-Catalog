@@ -68,6 +68,76 @@ def test_tag_asset_and_untag_asset(catalogue_with_asset: tuple[Catalogue, int]) 
     assert catalogue.get_asset_tags(asset_id) == []
 
 
+def test_set_favorite_and_favorites_only_filter(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    assert catalogue.get_asset(asset_id).favorite is False
+    assert catalogue.list_assets(favorites_only=True) == []
+
+    catalogue.set_favorite([asset_id], True)
+    assert catalogue.get_asset(asset_id).favorite is True
+    assert len(catalogue.list_assets(favorites_only=True)) == 1
+
+    catalogue.set_favorite([asset_id], False)
+    assert catalogue.get_asset(asset_id).favorite is False
+    assert catalogue.list_assets(favorites_only=True) == []
+
+
+def test_trash_hides_from_list_assets_but_not_get_asset(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    assert len(catalogue.list_assets()) == 1
+
+    catalogue.trash_assets([asset_id])
+    assert catalogue.list_assets() == []
+    assert catalogue.count_trashed_assets() == 1
+    trashed = catalogue.list_trashed_assets()
+    assert len(trashed) == 1 and trashed[0].id == asset_id
+    # get_asset is an identity lookup, not a listing -- still finds a
+    # trashed asset (e.g. so the trash dialog can look it up by id).
+    assert catalogue.get_asset(asset_id) is not None
+
+    catalogue.restore_assets([asset_id])
+    assert len(catalogue.list_assets()) == 1
+    assert catalogue.count_trashed_assets() == 0
+
+
+def test_update_pack_bg_sets_notes_and_rating(
+    catalogue_with_asset: tuple[Catalogue, int], monkeypatch, tmp_path: Path
+) -> None:
+    # update_pack_bg opens its own connection via settings.load().db_path()
+    # (background-thread-safe -- see catalogue.py's "Background-safe
+    # operations" section), so it needs settings pointed at the exact same
+    # on-disk database the catalogue_with_asset fixture already opened.
+    catalogue, asset_id = catalogue_with_asset
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(
+        staging_folder=str(catalogue.staging_folder()),
+        library_folder=str(catalogue._thumbnail_dir.parent),
+    ))
+
+    detail = catalogue.get_pack_detail("Pack")
+    catalogue.update_pack_bg(
+        detail.id, detail.name, detail.creator, detail.licence, detail.source_url,
+        detail.corrections, notes="great pack", rating=5,
+    )
+    updated = catalogue.get_pack_detail("Pack")
+    assert updated.notes == "great pack"
+    assert updated.rating == 5
+    # The asset summary's denormalized pack_rating/pack_notes track it too
+    # (used by the detail panel without a separate pack lookup).
+    asset = catalogue.get_asset(asset_id)
+    assert asset.pack_rating == 5
+    assert asset.pack_notes == "great pack"
+
+
+def test_get_library_stats(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    stats = catalogue.get_library_stats()
+    assert stats.total_assets == 1
+    assert stats.pack_count == 1
+
+
 def test_thumbnail_path_for_returns_none_when_not_rendered(catalogue_with_asset: tuple[Catalogue, int]) -> None:
     catalogue, asset_id = catalogue_with_asset
     asset = catalogue.get_asset(asset_id)
@@ -122,3 +192,19 @@ def test_export_assets_bg_end_to_end(catalogue_with_asset: tuple[Catalogue, int]
     stats = catalogue.export_assets_bg([asset_id], project_root)
     assert stats.copied == 1
     assert (project_root / "exported_assets" / "Pack" / "a.png").is_file()
+
+
+def test_model_preview_path_for(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    from asset_catalogue import model_preview
+
+    catalogue, asset_id = catalogue_with_asset
+    asset = catalogue.get_asset(asset_id)
+    # No preview .glb has been generated for this asset -- nothing cached yet.
+    assert catalogue.model_preview_path_for(asset.content_hash) is None
+
+    # Once one exists on disk (as blender_thumbnail_script.py would have
+    # written it alongside the static thumbnail), it's found.
+    preview_path = model_preview.preview_path(catalogue._preview_dir, asset.content_hash)
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    preview_path.write_bytes(b"glTF")
+    assert catalogue.model_preview_path_for(asset.content_hash) == preview_path

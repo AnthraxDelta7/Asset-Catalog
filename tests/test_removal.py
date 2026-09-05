@@ -63,3 +63,56 @@ def test_remove_pack_deletes_pack_row_and_whole_library_folder(
     assert stats.removed_assets == 1
     assert conn.execute("SELECT 1 FROM packs WHERE id = ?", (pack_id,)).fetchone() is None
     assert not (assets_dir / "Pack").exists()
+
+
+def test_trash_assets_hides_without_touching_files(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    pack_id, asset_id = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+    content_hash = conn.execute(
+        "SELECT content_hash FROM assets WHERE id = ?", (asset_id,)
+    ).fetchone()["content_hash"]
+    thumb_path = thumbnails.thumbnail_path(thumbnail_dir, content_hash)
+    library_path = assets_dir / "Pack" / "a.png"
+
+    count = removal.trash_assets(conn, [asset_id])
+    assert count == 1
+    row = conn.execute("SELECT deleted_at FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    assert row["deleted_at"] is not None
+    assert thumb_path.is_file() and library_path.is_file(), "trash must not touch any files"
+
+    # Already-trashed ids aren't double-counted on a second call.
+    assert removal.trash_assets(conn, [asset_id]) == 0
+
+
+def test_restore_assets_clears_deleted_at(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    pack_id, asset_id = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+    removal.trash_assets(conn, [asset_id])
+
+    count = removal.restore_assets(conn, [asset_id])
+    assert count == 1
+    row = conn.execute("SELECT deleted_at FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    assert row["deleted_at"] is None
+
+    # Already-active ids aren't double-counted.
+    assert removal.restore_assets(conn, [asset_id]) == 0
+
+
+def test_list_trashed_asset_ids_only_returns_trashed(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    _, asset_id_a = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir, "PackA")
+    _, asset_id_b = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir, "PackB")
+
+    assert removal.list_trashed_asset_ids(conn) == []
+    removal.trash_assets(conn, [asset_id_a])
+    assert removal.list_trashed_asset_ids(conn) == [asset_id_a]
+
+    # remove_assets (permanent, e.g. "Delete Permanently" from the Trash
+    # dialog) works the same on a trashed asset as any other -- deleted_at
+    # is just a visibility flag, not a different code path for hard delete.
+    stats = removal.remove_assets(conn, thumbnail_dir, assets_dir, [asset_id_a])
+    assert stats.removed == 1
+    assert removal.list_trashed_asset_ids(conn) == []

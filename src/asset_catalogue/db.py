@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS packs (
     licence TEXT,
     source_url TEXT,
     date_added TEXT NOT NULL,
-    corrections TEXT
+    corrections TEXT,
+    notes TEXT,
+    rating INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -24,7 +26,9 @@ CREATE TABLE IF NOT EXISTS assets (
     file_size INTEGER NOT NULL,
     content_hash TEXT NOT NULL UNIQUE,
     asset_type TEXT NOT NULL,
-    thumbnail_status TEXT NOT NULL DEFAULT 'pending'
+    thumbnail_status TEXT NOT NULL DEFAULT 'pending',
+    favorite INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -79,6 +83,19 @@ CREATE TABLE IF NOT EXISTS pending_conversions (
 """
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Adds a column to an existing table if it's not already there --
+    ALTER TABLE ... ADD COLUMN is a cheap, non-destructive operation in
+    SQLite (existing rows just get the column's default/NULL), so this is
+    safe to call unconditionally on every connect() rather than needing a
+    versioned migration system. A fresh database never hits this at all --
+    it gets the column straight from SCHEMA above.
+    """
+    existing_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing_columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -98,4 +115,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
         conn.commit()
 
     conn.executescript(SCHEMA)
+
+    _ensure_column(conn, "packs", "notes", "notes TEXT")
+    _ensure_column(conn, "packs", "rating", "rating INTEGER")
+    _ensure_column(conn, "assets", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "assets", "deleted_at", "deleted_at TEXT")
+    conn.commit()
+
     return conn

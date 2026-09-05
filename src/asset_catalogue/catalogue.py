@@ -15,6 +15,9 @@ from asset_catalogue import (
     exporting,
     ingest,
     library_assets,
+    library_health,
+    library_stats,
+    model_preview,
     packs,
     removal,
     settings,
@@ -32,6 +35,10 @@ class AssetSummary:
     thumbnail_status: str
     content_hash: str
     relative_path: str
+    favorite: bool = False
+    pack_rating: int | None = None
+    pack_notes: str | None = None
+    deleted_at: str | None = None
     tags: list[str] = field(default_factory=list)
 
 
@@ -52,6 +59,8 @@ class PackDetail:
     source_url: str | None
     corrections: dict
     asset_count: int
+    notes: str | None = None
+    rating: int | None = None
 
 
 class Catalogue:
@@ -65,11 +74,17 @@ class Catalogue:
         staging_folder: Path | None,
         thumbnail_dir: Path,
         assets_dir: Path,
+        preview_dir: Path | None = None,
     ) -> None:
         self._conn = conn
         self._staging_folder = staging_folder
         self._thumbnail_dir = thumbnail_dir
         self._assets_dir = assets_dir
+        # Sibling of thumbnail_dir by default (matches settings.preview_dir()
+        # / thumbnail_dir() both living directly under library_folder) --
+        # callers that don't care about the interactive 3D preview (most
+        # tests) never need to pass this explicitly.
+        self._preview_dir = preview_dir if preview_dir is not None else thumbnail_dir.parent / "previews"
 
     @classmethod
     def open(cls) -> Catalogue:
@@ -82,7 +97,7 @@ class Catalogue:
         Path(s.library_folder).mkdir(parents=True, exist_ok=True)
         conn = db.connect(s.db_path())
         staging_folder = Path(s.staging_folder) if s.staging_folder else None
-        return cls(conn, staging_folder, s.thumbnail_dir(), s.assets_dir())
+        return cls(conn, staging_folder, s.thumbnail_dir(), s.assets_dir(), s.preview_dir())
 
     def close(self) -> None:
         self._conn.close()
@@ -125,7 +140,7 @@ class Catalogue:
 
     def get_pack_detail(self, pack_name: str) -> PackDetail | None:
         row = self._conn.execute(
-            "SELECT id, name, creator, licence, source_url, corrections "
+            "SELECT id, name, creator, licence, source_url, corrections, notes, rating "
             "FROM packs WHERE name = ?",
             (pack_name,),
         ).fetchone()
@@ -143,6 +158,31 @@ class Catalogue:
             source_url=row["source_url"],
             corrections=corrections,
             asset_count=asset_count,
+            notes=row["notes"],
+            rating=row["rating"],
+        )
+
+    _ASSET_SUMMARY_COLUMNS = (
+        "assets.id, assets.filename, assets.asset_type, "
+        "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
+        "assets.favorite, assets.deleted_at, packs.name AS pack_name, "
+        "packs.rating AS pack_rating, packs.notes AS pack_notes"
+    )
+
+    def _row_to_asset_summary(self, row: sqlite3.Row) -> AssetSummary:
+        return AssetSummary(
+            id=row["id"],
+            filename=row["filename"],
+            pack_name=row["pack_name"],
+            asset_type=row["asset_type"],
+            thumbnail_status=row["thumbnail_status"],
+            content_hash=row["content_hash"],
+            relative_path=row["relative_path"],
+            favorite=bool(row["favorite"]),
+            pack_rating=row["pack_rating"],
+            pack_notes=row["pack_notes"],
+            deleted_at=row["deleted_at"],
+            tags=self.get_asset_tags(row["id"]),
         )
 
     def list_assets(
@@ -152,14 +192,15 @@ class Catalogue:
         tag: str | None = None,
         extension: str | None = None,
         search: str | None = None,
+        favorites_only: bool = False,
     ) -> list[AssetSummary]:
         query = (
-            "SELECT assets.id, assets.filename, assets.asset_type, "
-            "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
-            "packs.name AS pack_name "
+            f"SELECT {self._ASSET_SUMMARY_COLUMNS} "
             "FROM assets JOIN packs ON packs.id = assets.pack_id"
         )
-        clauses: list[str] = []
+        # Soft-deleted (trashed) assets never show up in the normal grid --
+        # see list_trashed_assets for the dedicated trash view.
+        clauses: list[str] = ["assets.deleted_at IS NULL"]
         params: list[str] = []
         if tag:
             query += (
@@ -177,6 +218,8 @@ class Catalogue:
         if extension:
             clauses.append("assets.extension = ?")
             params.append(extension)
+        if favorites_only:
+            clauses.append("assets.favorite = 1")
         if search:
             # Escape LIKE's own wildcards so a filename that happens to
             # contain a literal "%" or "_" is matched literally, not
@@ -184,45 +227,21 @@ class Catalogue:
             escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             clauses.append("assets.filename LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
+        query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY packs.name, assets.relative_path"
 
         rows = self._conn.execute(query, params).fetchall()
-        return [
-            AssetSummary(
-                id=row["id"],
-                filename=row["filename"],
-                pack_name=row["pack_name"],
-                asset_type=row["asset_type"],
-                thumbnail_status=row["thumbnail_status"],
-                content_hash=row["content_hash"],
-                relative_path=row["relative_path"],
-                tags=self.get_asset_tags(row["id"]),
-            )
-            for row in rows
-        ]
+        return [self._row_to_asset_summary(row) for row in rows]
 
     def get_asset(self, asset_id: int) -> AssetSummary | None:
         row = self._conn.execute(
-            "SELECT assets.id, assets.filename, assets.asset_type, "
-            "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
-            "packs.name AS pack_name "
+            f"SELECT {self._ASSET_SUMMARY_COLUMNS} "
             "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
             (asset_id,),
         ).fetchone()
         if row is None:
             return None
-        return AssetSummary(
-            id=row["id"],
-            filename=row["filename"],
-            pack_name=row["pack_name"],
-            asset_type=row["asset_type"],
-            thumbnail_status=row["thumbnail_status"],
-            content_hash=row["content_hash"],
-            relative_path=row["relative_path"],
-            tags=self.get_asset_tags(row["id"]),
-        )
+        return self._row_to_asset_summary(row)
 
     def get_asset_tags(self, asset_id: int) -> list[str]:
         rows = self._conn.execute(
@@ -234,6 +253,10 @@ class Catalogue:
 
     def thumbnail_path_for(self, content_hash: str) -> Path | None:
         path = thumbnails.thumbnail_path(self._thumbnail_dir, content_hash)
+        return path if path.exists() else None
+
+    def model_preview_path_for(self, content_hash: str) -> Path | None:
+        path = model_preview.preview_path(self._preview_dir, content_hash)
         return path if path.exists() else None
 
     def library_asset_path_if_archived(self, pack_name: str, relative_path: str) -> Path | None:
@@ -252,6 +275,28 @@ class Catalogue:
     def generate_credits_report(self, project_root: Path | str | None = None) -> str:
         return credits.generate_report(self._conn, project_root)
 
+    def get_library_stats(self) -> library_stats.LibraryStats:
+        return library_stats.compute_stats(self._conn)
+
+    def check_library_health(self) -> library_health.HealthReport:
+        return library_health.check_integrity(
+            self._conn, self._staging_folder, self._assets_dir, self._thumbnail_dir
+        )
+
+    def reset_broken_thumbnails(self, asset_ids: list[int]) -> int:
+        return library_health.reset_broken_thumbnails(self._conn, asset_ids)
+
+    def rearchive_assets_bg(self, asset_ids: list[int]) -> int:
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            return library_health.rearchive_assets(
+                conn, self._staging_folder, self._assets_dir, asset_ids
+            )
+        finally:
+            conn.close()
+
     def tag_asset(self, asset_id: int, tag_name: str, category: str | None = None) -> None:
         tag_id = tagging.get_or_create_tag(self._conn, tag_name, category)
         tagging.tag_asset(self._conn, asset_id, tag_id)
@@ -261,6 +306,40 @@ class Catalogue:
         if row is None:
             return
         tagging.untag_asset(self._conn, asset_id, row["id"])
+
+    def trash_assets(self, asset_ids: list[int]) -> int:
+        """Soft-delete -- see removal.trash_assets. A single fast UPDATE
+        touching no files, so (like set_favorite) this runs on self._conn
+        directly rather than as a background job.
+        """
+        return removal.trash_assets(self._conn, asset_ids)
+
+    def restore_assets(self, asset_ids: list[int]) -> int:
+        return removal.restore_assets(self._conn, asset_ids)
+
+    def list_trashed_assets(self) -> list[AssetSummary]:
+        rows = self._conn.execute(
+            f"SELECT {self._ASSET_SUMMARY_COLUMNS} "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id "
+            "WHERE assets.deleted_at IS NOT NULL ORDER BY assets.deleted_at DESC"
+        ).fetchall()
+        return [self._row_to_asset_summary(row) for row in rows]
+
+    def count_trashed_assets(self) -> int:
+        return len(removal.list_trashed_asset_ids(self._conn))
+
+    def set_favorite(self, asset_ids: list[int], favorite: bool) -> None:
+        """A quick personal flag independent of tags -- tags are for
+        categorization, favorite is for "I liked this specific one" out of
+        a big purchased-pack backlog. A single fast UPDATE, so (like
+        tag_asset) this runs on self._conn directly rather than as a
+        background job.
+        """
+        self._conn.executemany(
+            "UPDATE assets SET favorite = ? WHERE id = ?",
+            [(1 if favorite else 0, asset_id) for asset_id in asset_ids],
+        )
+        self._conn.commit()
 
     # -- Background-safe operations -----------------------------------
     #
@@ -373,16 +452,20 @@ class Catalogue:
         licence: str | None,
         source_url: str | None,
         corrections: dict,
+        notes: str | None = None,
+        rating: int | None = None,
     ) -> None:
         """Renames (if changed, moving the archived library folder to
-        match), updates creator/licence/source_url, and replaces the render
-        corrections -- one call for the whole "Edit Pack" dialog's fields.
+        match), updates creator/licence/source_url, replaces the render
+        corrections, and updates notes/rating -- one call for the whole
+        "Edit Pack" dialog's fields.
         """
         conn = db.connect(settings.load().db_path())
         try:
             packs.rename_pack(conn, self._assets_dir, pack_id, name)
             packs.set_metadata(conn, pack_id, creator, licence, source_url)
             packs.set_corrections(conn, pack_id, corrections)
+            packs.set_notes_and_rating(conn, pack_id, notes, rating)
         finally:
             conn.close()
 
@@ -419,6 +502,7 @@ class Catalogue:
                 blender_exe,
                 asset_id=asset_id,
                 asset_ids=asset_ids,
+                preview_dir=self._preview_dir,
                 on_progress=on_progress,
             )
         finally:
@@ -574,6 +658,7 @@ class Catalogue:
                     self._thumbnail_dir,
                     blender_exe,
                     asset_id=asset_id,
+                    preview_dir=self._preview_dir,
                     on_progress=on_progress,
                 )
             return result
@@ -609,6 +694,7 @@ class Catalogue:
                     self._thumbnail_dir,
                     blender_exe,
                     asset_ids=result.converted_asset_ids,
+                    preview_dir=self._preview_dir,
                     on_progress=on_progress,
                 )
             return result
@@ -634,6 +720,7 @@ class Catalogue:
                             self._thumbnail_dir,
                             blender_exe,
                             asset_id=asset_id,
+                            preview_dir=self._preview_dir,
                             on_progress=on_progress,
                         )
                     except RuntimeError:
@@ -678,6 +765,7 @@ class Catalogue:
                 blender_exe,
                 pack_name=pack,
                 force=force,
+                preview_dir=self._preview_dir,
                 on_progress=on_progress,
             )
         finally:

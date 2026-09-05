@@ -93,6 +93,24 @@ def frame_and_render(mesh_objects: list, output_path: str) -> bool:
     return True
 
 
+def export_preview_glb(mesh_objects: list, output_path: str) -> None:
+    """A lightweight .glb export of the same imported-and-corrected scene
+    the static thumbnail was just rendered from -- powers the app's
+    interactive orbit/zoom preview (see model_preview.py / the UI's model
+    preview dialog). Exported from the same Blender pass as the thumbnail
+    (import is the expensive part), never a second Blender launch.
+    Deliberately not export_apply/draco-compressed -- this asset library
+    already treats .glb as the universal exchange format (see
+    blender_convert_script.py), so a plain, widely-compatible export is
+    exactly what a pure-Python loader like trimesh needs on the other end.
+    """
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in mesh_objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_objects[0]
+    bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True, export_format="GLB")
+
+
 def main() -> None:
     job_list_path = get_job_list_path()
     with open(job_list_path, "r", encoding="utf-8") as f:
@@ -112,6 +130,16 @@ def main() -> None:
                 importer(job["source_path"])
                 mesh_objects = apply_corrections(job.get("corrections") or {})
                 ok = frame_and_render(mesh_objects, job["output_path"])
+                preview_output_path = job.get("preview_output_path")
+                if ok and preview_output_path:
+                    # A failed preview export doesn't fail the whole job --
+                    # the static thumbnail (the required deliverable)
+                    # already succeeded; the interactive preview is a
+                    # secondary nice-to-have.
+                    try:
+                        export_preview_glb(mesh_objects, preview_output_path)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"ASSET_CATALOGUE_ERROR|{asset_id}|preview export: {exc}", flush=True)
             except Exception as exc:  # noqa: BLE001 - report and continue the batch
                 print(f"ASSET_CATALOGUE_ERROR|{asset_id}|{exc}", flush=True)
                 ok = False
