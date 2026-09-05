@@ -46,7 +46,7 @@ def test_check_for_update_returns_info_when_newer_release_exists() -> None:
     newer = ".".join(str(int(part) + 1) if i == 0 else part for i, part in enumerate(__version__.split(".")))
     payload = {
         "tag_name": f"v{newer}",
-        "html_url": "https://github.com/srgreiick/Asset-Catalog/releases/tag/v" + newer,
+        "html_url": "https://github.com/AnthraxDelta7/Asset-Catalog/releases/tag/v" + newer,
         "body": "Some release notes",
     }
     with patch("urllib.request.urlopen", return_value=_fake_response(payload)):

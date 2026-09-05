@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from asset_catalogue.version import __version__
 
-GITHUB_REPO = "srgreiick/Asset-Catalog"
+GITHUB_REPO = "AnthraxDelta7/Asset-Catalog"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 REQUEST_TIMEOUT_SECONDS = 10
 
