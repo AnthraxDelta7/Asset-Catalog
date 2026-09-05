@@ -288,6 +288,14 @@ Every background job (ingest, exporting, removing, converting, and all three thu
 
 Reads and writes through `src/asset_catalogue/catalogue.py`'s `Catalogue` class, not the filesystem, raw SQL, or `ingest`/`thumbnails`/`blender_render` directly, per the seed doc's architecture rule (§3). Ingest and thumbnail generation from the UI go through `Catalogue.*_bg()` methods, which each open and close their own SQLite connection rather than sharing the main one — SQLite connections aren't safe to share across threads, and these run on a background `QThread`. The CLI's `list`/`tags` commands still use their own direct queries (they predate this layer and aren't part of the seed's UI-facing architecture), so if CLI and UI query behavior ever need to match exactly, that's the one place they currently diverge.
 
+## Updates
+
+The app checks quietly in the background on launch for a newer version, and **Help > Check for Updates...** runs the same check on demand (always reporting a real outcome — "you're up to date" or an actual error — rather than staying silent). The check compares this build's own version (`src/asset_catalogue/version.py`, the single source of truth `pyproject.toml` also reads from) against GitHub's latest published release for this repo.
+
+This is deliberately just a **notification**, not a silent auto-updater: a running `.exe` can't overwrite itself on Windows, so real auto-update needs a separate helper process or a relaunch dance — real complexity not worth it yet at this project's scale. When a newer version exists, a dialog offers **Open Release Page** (opens it in your browser to download), **Skip This Version** (remembered in settings — the automatic background check won't mention that specific version again, though a manual check still always reports the real current state), or **Remind Me Later** (does nothing, asks again next launch). The background check fails silently on any error (no network, GitHub unreachable, etc.) — only the manual check surfaces a failure, since a launch-time network hiccup shouldn't interrupt someone who's just trying to catalogue assets.
+
+**Cutting a release:** bump `__version__` in `src/asset_catalogue/version.py`, commit, tag it (`git tag vX.Y.Z`), push the tag, then publish an actual GitHub Release for that tag with the built `dist/AssetCatalogue` folder (zipped) attached — the release object is what the update check actually queries, a pushed tag alone isn't enough.
+
 ## Testing
 
 ```

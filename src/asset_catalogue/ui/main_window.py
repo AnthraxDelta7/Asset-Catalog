@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QUrl, Signal
@@ -38,7 +39,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from asset_catalogue import blender_render, settings
+from asset_catalogue import blender_render, settings, updater
+from asset_catalogue.version import __version__
 from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
 THUMBNAIL_ICON_SIZE = QSize(128, 128)
@@ -1874,6 +1876,7 @@ class MainWindow(QMainWindow):
         self._current_assets: list[AssetSummary] = []
         self._selected_asset_id: int | None = None
         self._active_worker: _BackgroundWorker | None = None
+        self._update_check_worker: _BackgroundWorker | None = None
         self.resize(1100, 700)
         self._update_window_title()
 
@@ -1993,6 +1996,12 @@ class MainWindow(QMainWindow):
         gen_3d_action.triggered.connect(self._generate_model_thumbnails)
         gen_audio_action = thumbnails_menu.addAction("Generate Audio Thumbnails (current pack filter)")
         gen_audio_action.triggered.connect(self._generate_audio_thumbnails)
+
+        help_menu = menu_bar.addMenu("&Help")
+        check_updates_action = help_menu.addAction("Check for Updates...")
+        check_updates_action.triggered.connect(lambda: self._check_for_updates(silent=False))
+        about_action = help_menu.addAction("About Asset Catalogue")
+        about_action.triggered.connect(self._show_about_dialog)
 
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Ingest")
@@ -2207,6 +2216,73 @@ class MainWindow(QMainWindow):
     def _open_credits_dialog(self) -> None:
         dialog = CreditsReportDialog(self._catalogue, self)
         dialog.exec()
+
+    def _check_for_updates(self, silent: bool) -> None:
+        """silent=True is the automatic on-launch check -- stays quiet if
+        already up to date or if the check itself fails (no network, etc.),
+        only ever speaking up when there's actually something to report.
+        silent=False is the manual Help > Check for Updates... action,
+        which always reports a real outcome either way.
+        """
+
+        def job(_report):
+            return updater.check_for_update()
+
+        worker = _BackgroundWorker(job)
+
+        def on_ok(update_info) -> None:
+            if update_info is not None:
+                self._show_update_available(update_info)
+            elif not silent:
+                QMessageBox.information(
+                    self, "Check for Updates", f"You're up to date (v{__version__})."
+                )
+
+        def on_fail(message: str) -> None:
+            if not silent:
+                QMessageBox.warning(
+                    self, "Check for Updates", f"Couldn't check for updates: {message}"
+                )
+
+        worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
+        worker.failed.connect(on_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._update_check_worker = worker
+        worker.start()
+
+    def _show_update_available(self, info: updater.UpdateInfo) -> None:
+        s = settings.load()
+        if s.skipped_update_version == info.latest_version:
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Available")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"A new version is available: v{info.latest_version} "
+            f"(you have v{info.current_version})."
+        )
+        if info.release_notes:
+            box.setDetailedText(info.release_notes)
+        open_button = box.addButton("Open Release Page", QMessageBox.AcceptRole)
+        skip_button = box.addButton("Skip This Version", QMessageBox.DestructiveRole)
+        box.addButton("Remind Me Later", QMessageBox.RejectRole)
+        box.exec()
+
+        if box.clickedButton() is open_button:
+            webbrowser.open(info.release_url)
+        elif box.clickedButton() is skip_button:
+            s.skipped_update_version = info.latest_version
+            settings.save(s)
+
+    def _show_about_dialog(self) -> None:
+        QMessageBox.about(
+            self,
+            "About Asset Catalogue",
+            f"<b>Asset Catalogue</b> v{__version__}<br><br>"
+            "Cataloguing, tagging, previewing and exporting game assets.<br><br>"
+            "Licensed under the GNU GPLv3.",
+        )
 
     def _open_tag_pack_dialog(self) -> None:
         if not self._catalogue.list_packs():
@@ -2781,6 +2857,7 @@ def main() -> None:
 
     window = MainWindow(catalogue)
     window.show()
+    window._check_for_updates(silent=True)
     sys.exit(app.exec())
 
 

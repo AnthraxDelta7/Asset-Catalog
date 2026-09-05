@@ -42,6 +42,11 @@ class Settings:
     # -- without needing a separate opt-in toggle the way the retired
     # Godot-specific remembering used to.
     recent_export_projects: list[str] = field(default_factory=list)
+    # A release version the user explicitly dismissed via "Skip This
+    # Version" in the update-available notice -- the automatic background
+    # check won't nag about that exact version again, but a manual "Check
+    # for Updates" always reports the real current state regardless.
+    skipped_update_version: str | None = None
 
     def db_path(self) -> Path:
         return Path(self.library_folder) / "catalogue.db"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asset-catalogue"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Cataloguing, tagging, previewing and exporting game assets"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
@@ -26,6 +26,9 @@ asset-catalogue-ui = "asset_catalogue.ui.main_window:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "asset_catalogue.version.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
