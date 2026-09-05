@@ -40,7 +40,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from asset_catalogue import blender_render, library_health, library_stats, paths, settings, updater
+from asset_catalogue import (
+    blender_render,
+    library_health,
+    library_stats,
+    paths,
+    self_update,
+    settings,
+    updater,
+)
 from asset_catalogue.version import __version__
 from asset_catalogue.catalogue import AssetSummary, Catalogue, PackDetail, TagSummary
 
@@ -1597,6 +1605,81 @@ class ProgressLogDialog(QDialog):
         scrollbar.setValue(scrollbar.maximum())
 
 
+class UpdateDownloadDialog(QDialog):
+    """Downloads the new release, extracts it, then hands off to
+    self_update's detached relauncher and exits -- this project's builds
+    are 100+MB, so a real determinate progress bar matters here, not just
+    an indeterminate spinner (see ProgressLogDialog, used everywhere else
+    in this app, which is indeterminate on purpose since those jobs don't
+    have a meaningful "percent done"). The download itself runs on a
+    background thread; applying the update is deliberately the very last
+    thing that happens, since it calls sys.exit() -- there is no "after"
+    once that runs.
+    """
+
+    def __init__(self, info: updater.UpdateInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Downloading Update")
+        self.setModal(True)
+        self.resize(420, 110)
+
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel("Starting download...")
+        layout.addWidget(self.status_label)
+        self.bar = QProgressBar(self)
+        self.bar.setRange(0, 100)
+        layout.addWidget(self.bar)
+
+        self._worker: _BackgroundWorker | None = None
+        self._start(info)
+
+    def _start(self, info: updater.UpdateInfo) -> None:
+        exe_name = Path(sys.executable).name
+
+        def job(report):
+            def on_progress(done: int, total: int) -> None:
+                report(f"{done}|{total}")
+
+            zip_path = self_update.download_update(info.download_url, on_progress=on_progress)
+            try:
+                return self_update.extract_update(zip_path, exe_name)
+            finally:
+                zip_path.unlink(missing_ok=True)
+
+        def on_progress_text(text: str) -> None:
+            try:
+                done_str, total_str = text.split("|")
+                done, total = int(done_str), int(total_str)
+            except ValueError:
+                return
+            done_mb = done / 1_000_000
+            if total:
+                self.bar.setValue(int(done * 100 / total))
+                self.status_label.setText(f"{done_mb:.1f} MB / {total / 1_000_000:.1f} MB")
+            else:
+                self.bar.setRange(0, 0)  # server didn't report a size -- indeterminate instead
+                self.status_label.setText(f"{done_mb:.1f} MB downloaded")
+
+        def on_ok(extracted_dir) -> None:
+            self.status_label.setText("Installing update -- Asset Catalogue will restart...")
+            self.accept()
+            # Never returns -- launches the detached relauncher and exits
+            # this process. See self_update.apply_update_and_exit.
+            self_update.apply_update_and_exit(extracted_dir, exe_name)
+
+        def on_fail(message: str) -> None:
+            self.reject()
+            QMessageBox.critical(self.parentWidget(), "Update Failed", message)
+
+        worker = _BackgroundWorker(job)
+        worker.progress.connect(on_progress_text, Qt.QueuedConnection)
+        worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
+        worker.failed.connect(on_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+
 class CalibrationReviewDialog(QDialog):
     """Shown right after a pack's first-ever model ingest, when exactly one
     model was rendered as a calibration preview (see
@@ -2690,14 +2773,26 @@ class MainWindow(QMainWindow):
         )
         if info.release_notes:
             box.setDetailedText(info.release_notes)
-        open_button = box.addButton("Open Release Page", QMessageBox.AcceptRole)
+
+        # One-click download-and-install only makes sense for a packaged
+        # .exe (there's no single "install folder" to replace in a dev
+        # checkout) and only when the release actually has a zip asset
+        # attached -- otherwise, same as before: point at the page.
+        download_button = None
+        if info.download_url is not None and self_update.is_frozen():
+            download_button = box.addButton("Download && Install Update", QMessageBox.AcceptRole)
+        open_button = box.addButton("Open Release Page", QMessageBox.ActionRole)
         skip_button = box.addButton("Skip This Version", QMessageBox.DestructiveRole)
         box.addButton("Remind Me Later", QMessageBox.RejectRole)
         box.exec()
 
-        if box.clickedButton() is open_button:
+        clicked = box.clickedButton()
+        if download_button is not None and clicked is download_button:
+            dialog = UpdateDownloadDialog(info, self)
+            dialog.exec()
+        elif clicked is open_button:
             webbrowser.open(info.release_url)
-        elif box.clickedButton() is skip_button:
+        elif clicked is skip_button:
             s.skipped_update_version = info.latest_version
             settings.save(s)
 

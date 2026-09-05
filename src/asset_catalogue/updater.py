@@ -28,6 +28,12 @@ class UpdateInfo:
     latest_version: str
     release_url: str
     release_notes: str
+    # None if the release has no attached asset yet (e.g. mid-publish) --
+    # callers offering a one-click download/install must treat that as
+    # "not available this time", not an error; Open Release Page still
+    # works regardless, since it doesn't depend on this.
+    download_url: str | None = None
+    download_size: int | None = None
 
 
 def _parse_version(version_string: str) -> tuple[int, ...]:
@@ -82,9 +88,25 @@ def check_for_update() -> UpdateInfo | None:
     if not is_newer(latest_tag, __version__):
         return None
 
+    # This project only ever attaches one asset per release (the zipped
+    # AssetCatalogue-vX.Y.Z-windows.zip build) -- the first .zip found is
+    # it. Anything else (a release with no assets yet, or none matching)
+    # just means no direct download is offered; Open Release Page still
+    # works.
+    download_url = None
+    download_size = None
+    for asset in data.get("assets") or []:
+        name = asset.get("name", "")
+        if name.lower().endswith(".zip"):
+            download_url = asset.get("browser_download_url")
+            download_size = asset.get("size")
+            break
+
     return UpdateInfo(
         current_version=__version__,
         latest_version=latest_tag.lstrip("vV"),
         release_url=release_url,
         release_notes=(data.get("body") or "").strip(),
+        download_url=download_url,
+        download_size=download_size,
     )

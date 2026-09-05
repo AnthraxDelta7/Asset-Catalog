@@ -48,6 +48,13 @@ def test_check_for_update_returns_info_when_newer_release_exists() -> None:
         "tag_name": f"v{newer}",
         "html_url": "https://github.com/AnthraxDelta7/Asset-Catalog/releases/tag/v" + newer,
         "body": "Some release notes",
+        "assets": [
+            {
+                "name": f"AssetCatalogue-v{newer}-windows.zip",
+                "browser_download_url": f"https://github.com/example/releases/download/v{newer}/x.zip",
+                "size": 12345,
+            }
+        ],
     }
     with patch("urllib.request.urlopen", return_value=_fake_response(payload)):
         info = updater.check_for_update()
@@ -55,6 +62,24 @@ def test_check_for_update_returns_info_when_newer_release_exists() -> None:
     assert info.latest_version == newer
     assert info.current_version == __version__
     assert info.release_notes == "Some release notes"
+    assert info.download_url == f"https://github.com/example/releases/download/v{newer}/x.zip"
+    assert info.download_size == 12345
+
+
+def test_check_for_update_download_url_none_when_no_zip_asset() -> None:
+    from asset_catalogue.version import __version__
+
+    newer = ".".join(str(int(part) + 1) if i == 0 else part for i, part in enumerate(__version__.split(".")))
+    payload = {
+        "tag_name": f"v{newer}",
+        "html_url": "https://example.com",
+        "assets": [],
+    }
+    with patch("urllib.request.urlopen", return_value=_fake_response(payload)):
+        info = updater.check_for_update()
+    assert info is not None
+    assert info.download_url is None
+    assert info.download_size is None
 
 
 def test_check_for_update_raises_on_network_failure() -> None:
