@@ -3342,6 +3342,17 @@ def _try_open_catalogue() -> tuple[Catalogue | None, str | None]:
 
 
 def main() -> None:
+    # Must be set before QApplication is constructed to take effect. Each
+    # new pyqtgraph GLViewWidget (the 3D preview -- see
+    # model_preview_dialog.py) otherwise gets its own separate OpenGL
+    # context, but pyqtgraph's compiled shader programs are cached
+    # globally by name, not per-context -- opening a second 3D preview in
+    # the same session reused a program handle that belonged to the
+    # first (now-different) context, raising GL_INVALID_VALUE on every
+    # draw call and, in the packaged .exe, taking the whole app down with
+    # it. Sharing one context across every OpenGL-backed widget in the
+    # app fixes both.
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(Path(__file__).parent / "app_icon.png")))
 

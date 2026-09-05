@@ -125,6 +125,12 @@ Deliberately lightweight rather than a full PBR renderer: `pyqtgraph`'s `GLMeshI
 
 `scipy` specifically matters here: `trimesh` silently falls back to degenerate all-identical vertex normals without it (rather than raising), which showed up as a real bug during development — some models rendered as a solid black silhouette in the viewer despite the static thumbnail looking completely normal, since the shading math collapsed with every normal pointing the same direction. Now a required dependency for exactly this reason.
 
+A few other rendering details worth knowing about, all found and fixed by actually comparing preview output against the real static thumbnail for several assets:
+
+- **Color space:** glTF's `baseColorFactor` is defined in linear space, but this simple vertex-color shader has no HDR/tonemapping step — displaying that value directly (skipping the sRGB encode a real glTF/PBR renderer always does) made every asset look far too dark, often solid black for anything with a moderately dark material. Baked colors are now explicitly sRGB-encoded before display.
+- **Up axis:** Blender's glTF exporter always writes Y-up files regardless of the pack's own `up_axis` correction, but `pyqtgraph`'s orbit camera assumes Z-up (same convention as Blender's own viewport) — without correcting for that mismatch, a model's "up" in the 3D preview didn't match its "up" in the static thumbnail or in the calibration-preview dialog. Loaded geometry is now rotated back into Z-up so all three agree.
+- **Second-preview crash:** opening a second 3D preview in the same app session used to throw `GL_INVALID_VALUE` on every draw call (and could take the whole packaged app down with it) — each `GLViewWidget` got its own separate OpenGL context, but `pyqtgraph` caches compiled shader programs globally by name, not per-context, so the second widget tried reusing a program handle that belonged to the first, already-different context. Fixed by sharing one GL context across the whole app (`QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)`, set before the `QApplication` is constructed).
+
 ## Per-pack calibration
 
 Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7). A brand-new pack with model assets already gets this workflow's first step done automatically at ingest — see "Thumbnails are generated automatically" above:
