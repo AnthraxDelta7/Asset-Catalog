@@ -12,6 +12,7 @@ from asset_catalogue import (
     credits,
     db,
     exporting,
+    godot_export,
     ingest,
     library_assets,
     library_health,
@@ -110,6 +111,7 @@ def cmd_settings_show(args: argparse.Namespace) -> None:
         print(f"  -> database:   {s.db_path()}")
         print(f"  -> thumbnails: {s.thumbnail_dir()}")
     print(f"blender_path:   {s.blender_path}")
+    print(f"godot_path:     {s.godot_path}")
 
 
 def cmd_settings_set(args: argparse.Namespace) -> None:
@@ -120,6 +122,8 @@ def cmd_settings_set(args: argparse.Namespace) -> None:
         s.library_folder = args.library_folder
     if args.blender_path is not None:
         s.blender_path = args.blender_path
+    if args.godot_path is not None:
+        s.godot_path = args.godot_path
     settings.save(s)
     print(f"Saved to {settings.SETTINGS_PATH}")
 
@@ -217,6 +221,47 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
         args.pack_name,
     )
     _print_ingest_result(args.pack_name, stats)
+
+
+def cmd_godot_extract(args: argparse.Namespace) -> None:
+    """A pre-ingest step, not part of ingest itself: exports every scene in
+    a staged Godot project to a real, textured .glb sitting right next to
+    its source .tscn. A subsequent `ingest`/`ingest-zip` run then picks
+    those up as ordinary model assets on its own -- see godot_export.py
+    for why this needs the real Godot editor rather than just parsing the
+    mesh file directly (Godot packs commonly assign textures at the scene/
+    material level, not embedded in the mesh file).
+    """
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    godot_exe, error = godot_export.resolve_godot(s.godot_path)
+    if godot_exe is None:
+        raise SystemExit(error)
+
+    search_root = Path(s.staging_folder) / args.staged_folder
+    if not search_root.is_dir():
+        raise SystemExit(f"Not a folder in staging: {search_root}")
+
+    project_roots = godot_export.find_godot_project_roots(search_root)
+    if not project_roots:
+        raise SystemExit(f"No Godot project (project.godot) found under: {search_root}")
+
+    for project_root in project_roots:
+        scenes = godot_export.find_scenes(project_root)
+        print(f"{project_root.relative_to(Path(s.staging_folder))}: exporting {len(scenes)} scene(s)...")
+        stats = godot_export.export_scenes_to_glb(
+            godot_exe, project_root, scenes, not args.no_colliders, on_progress=print
+        )
+        print(
+            f"  {stats.exported} exported, {stats.skipped_empty} skipped (no mesh content), "
+            f"{stats.failed} failed"
+        )
+        for failure in stats.failures:
+            print(f"  FAILED: {failure}")
 
 
 def cmd_tag_pack(args: argparse.Namespace) -> None:
@@ -870,6 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
         "on a new machine or a shared location to pick up an existing library",
     )
     set_parser.add_argument("--blender-path")
+    set_parser.add_argument("--godot-path", help="Only needed for the godot-extract command")
     set_parser.set_defaults(func=cmd_settings_set)
 
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a pack from the staging folder")
@@ -893,6 +939,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_zip_parser.add_argument("--licence")
     ingest_zip_parser.add_argument("--source-url")
     ingest_zip_parser.set_defaults(func=cmd_ingest_zip)
+
+    godot_extract_parser = subparsers.add_parser(
+        "godot-extract",
+        help="Export every scene in a staged Godot project to a textured .glb (run before ingest)",
+    )
+    godot_extract_parser.add_argument(
+        "staged_folder", help="Folder inside staging to search for Godot project(s) in"
+    )
+    godot_extract_parser.add_argument(
+        "--no-colliders",
+        action="store_true",
+        help="Skip collision shapes entirely instead of exporting a low-poly stand-in mesh for each",
+    )
+    godot_extract_parser.set_defaults(func=cmd_godot_extract)
 
     list_parser = subparsers.add_parser("list", help="List catalogued assets")
     list_parser.add_argument("--pack")

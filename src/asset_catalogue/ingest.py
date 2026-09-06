@@ -61,6 +61,10 @@ ENGINE_PROJECT_FOLDER_NAMES: set[str] = {
         "Library", "Temp", "Obj", "Logs", "UserSettings", "ProjectSettings",
         # Unreal
         "Binaries", "Intermediate", "Saved", "DerivedDataCache",
+        # Godot -- .godot (4.x) / .import (3.x) hold the editor's own
+        # re-import cache (compressed textures, baked shaders, etc.), not
+        # source content; can be sizable and is regenerated on demand.
+        ".godot", ".import",
         # General VCS noise, commonly bundled by accident
         ".git", ".svn", ".vs",
     )

@@ -65,13 +65,15 @@ def test_ingest_pack_skips_engine_project_files_and_folders(conn: sqlite3.Connec
     (pack_root / "meta_sidecar.meta").write_bytes(b"unity meta")
     (pack_root / "Library").mkdir()
     (pack_root / "Library" / "junk.bin").write_bytes(b"engine cache junk")
+    (pack_root / ".godot").mkdir()
+    (pack_root / ".godot" / "cache.bin").write_bytes(b"godot re-import cache junk")
 
     pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
     stats = ingest.ingest_pack(conn, pack_root, pack_id)
 
     assert stats.new == 1
     assert stats.skipped_unrecognized_files == 1
-    assert stats.skipped_engine_folders == 1
+    assert stats.skipped_engine_folders == 2
     filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
     assert filenames == {"real_asset.png"}
 

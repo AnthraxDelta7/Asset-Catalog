@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from asset_catalogue import (
     blender_render,
+    godot_export,
     library_health,
     library_stats,
     paths,
@@ -827,7 +828,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None, error_message: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 340)
+        self.resize(520, 400)
         s = settings.load()
 
         layout = QVBoxLayout(self)
@@ -866,12 +867,35 @@ class SettingsDialog(QDialog):
         blender_row.addWidget(blender_auto)
         form.addRow("Blender path:", blender_row)
 
+        self.godot_edit = QLineEdit(s.godot_path or "")
+        if not s.godot_path:
+            # Godot has no standard install location the way Blender does
+            # (it's usually just a portable, version-named .exe wherever it
+            # was downloaded to) -- auto-detect only really covers the case
+            # of it being on PATH, so this placeholder will often stay
+            # empty even when a real install exists. Set the path here
+            # explicitly rather than relying on it.
+            auto_found = godot_export.find_godot(None)
+            if auto_found is not None:
+                self.godot_edit.setPlaceholderText(f"(auto-detected) {auto_found}")
+        godot_row = QHBoxLayout()
+        godot_browse = QPushButton("Browse...")
+        godot_browse.clicked.connect(self._browse_godot)
+        godot_auto = QPushButton("Auto-detect")
+        godot_auto.clicked.connect(self._auto_detect_godot)
+        godot_row.addWidget(self.godot_edit)
+        godot_row.addWidget(godot_browse)
+        godot_row.addWidget(godot_auto)
+        form.addRow("Godot path:", godot_row)
+
         layout.addLayout(form)
 
         hint = QLabel(
             "Staging folder: where unprocessed packs sit before ingest.\n"
             "Library folder: portable -- holds catalogue.db and thumbnails/. Point at an "
             "existing one (copied from another machine, a shared drive) to pick it up as-is.\n"
+            "Godot path: only needed for Tools > Extract Godot Scenes to GLB... (extracting "
+            "textured meshes from a staged Godot project before ingesting it).\n"
             "Export to Project remembers your recently used project folders on its own -- "
             "nothing to configure here."
         )
@@ -911,6 +935,20 @@ class SettingsDialog(QDialog):
             return
         self.blender_edit.setText(str(found))
 
+    def _browse_godot(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Select Godot executable", self.godot_edit.text(), "Godot (*.exe);;All files (*)"
+        )
+        if chosen:
+            self.godot_edit.setText(chosen)
+
+    def _auto_detect_godot(self) -> None:
+        found = godot_export.find_godot(None)
+        if found is None:
+            QMessageBox.warning(self, "Settings", "Could not auto-detect Godot.")
+            return
+        self.godot_edit.setText(str(found))
+
     def _on_accept(self) -> None:
         if not self.staging_edit.text().strip() or not self.library_edit.text().strip():
             QMessageBox.warning(self, "Settings", "Staging folder and library folder are both required.")
@@ -919,6 +957,7 @@ class SettingsDialog(QDialog):
         s.staging_folder = self.staging_edit.text().strip()
         s.library_folder = self.library_edit.text().strip()
         s.blender_path = self.blender_edit.text().strip() or None
+        s.godot_path = self.godot_edit.text().strip() or None
         settings.save(s)
         self.accept()
 
@@ -1387,6 +1426,108 @@ class BatchIngestDialog(QDialog):
             source_url = dialog.source_url or ""
 
         self.items = items
+        self.accept()
+
+
+class GodotExtractDialog(QDialog):
+    """Scans a staged folder for Godot project(s) (anything with its own
+    project.godot) and, for whichever are checked, exports every scene to
+    a real, textured .glb sitting right next to its source .tscn -- a
+    pre-ingest step. ingest_pack's own recursive walk then picks those .glb
+    files up afterward as ordinary, already-recognized model assets, so
+    nothing about the ingest pipeline needs to know Godot was involved.
+    See godot_export.py for why this shells out to the real Godot editor
+    rather than trying to parse the mesh/material linkup ourselves.
+    """
+
+    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self.setWindowTitle("Extract Godot Scenes to GLB")
+        self.resize(480, 420)
+
+        self.project_folder_names: list[str] = []
+        self.include_colliders: bool = True
+
+        layout = QVBoxLayout(self)
+
+        browse_button = QPushButton("Browse Staging Folder...")
+        browse_button.clicked.connect(self._browse_staging)
+        layout.addWidget(browse_button)
+
+        self.projects_list = QListWidget()
+        layout.addWidget(self.projects_list, stretch=1)
+
+        self.include_colliders_checkbox = QCheckBox("Include colliders as low-poly meshes")
+        self.include_colliders_checkbox.setChecked(True)
+        layout.addWidget(self.include_colliders_checkbox)
+
+        hint = QLabel(
+            "Pick a folder in staging containing one or more Godot projects. Each "
+            "checked project has every .tscn scene exported to a .glb next to it, "
+            "using the real Godot editor headlessly so materials/textures assigned "
+            "in the scene are preserved -- Ingest Pack / Batch Ingest picks the "
+            "results up afterward like any other model file. A scene with no "
+            "mesh content (UI, autoloads) is skipped automatically. Collision "
+            "shapes (CollisionShape3D) have no visual mesh of their own, so "
+            "leaving the checkbox above on adds a low-poly stand-in for each one "
+            "-- the same debug shape the Godot editor itself shows -- so it "
+            "survives the export instead of being silently dropped."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Extract")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_staging(self) -> None:
+        staging_folder = self._catalogue.staging_folder()
+        if staging_folder is None:
+            QMessageBox.warning(self, "Extract Godot Scenes", "No staging folder configured.")
+            return
+        browser = StagingBrowserDialog(staging_folder, self)
+        if browser.exec() != QDialog.Accepted or browser.selected_relative_path is None:
+            return
+        if browser.selected_is_zip:
+            QMessageBox.warning(
+                self, "Extract Godot Scenes", "Pick a folder, not a zip -- extract it first."
+            )
+            return
+
+        try:
+            found = self._catalogue.find_godot_projects(browser.selected_relative_path)
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Extract Godot Scenes", str(exc))
+            return
+
+        self.projects_list.clear()
+        if not found:
+            QMessageBox.information(
+                self,
+                "Extract Godot Scenes",
+                f"No Godot project (project.godot) found under:\n{browser.selected_relative_path}",
+            )
+            return
+        for relative_path in found:
+            item = QListWidgetItem(relative_path)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.projects_list.addItem(item)
+
+    def _on_accept(self) -> None:
+        checked = [
+            self.projects_list.item(i).text()
+            for i in range(self.projects_list.count())
+            if self.projects_list.item(i).checkState() == Qt.Checked
+        ]
+        if not checked:
+            QMessageBox.warning(self, "Extract Godot Scenes", "Check at least one Godot project.")
+            return
+        self.project_folder_names = checked
+        self.include_colliders = self.include_colliders_checkbox.isChecked()
         self.accept()
 
 
@@ -2701,6 +2842,9 @@ class MainWindow(QMainWindow):
         export_action = tools_menu.addAction("Export Selected to Project...")
         export_action.triggered.connect(self._export_selected_to_project)
         tools_menu.addSeparator()
+        godot_extract_action = tools_menu.addAction("Extract Godot Scenes to GLB...")
+        godot_extract_action.triggered.connect(self._open_godot_extract_dialog)
+        tools_menu.addSeparator()
         tag_pack_action = tools_menu.addAction("Tag Pack...")
         tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
         tools_menu.addSeparator()
@@ -2937,6 +3081,42 @@ class MainWindow(QMainWindow):
             format_result,
             self._rebuild_filter_panel,
             on_complete=on_complete,
+        )
+
+    def _open_godot_extract_dialog(self) -> None:
+        if self._catalogue.staging_folder() is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+        dialog = GodotExtractDialog(self._catalogue, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        project_folder_names = dialog.project_folder_names
+        include_colliders = dialog.include_colliders
+        job = lambda report: self._catalogue.extract_godot_scenes_batch_bg(
+            project_folder_names, include_colliders, on_progress=report
+        )
+
+        def format_result(results: list) -> str:
+            total_exported = sum(stats.exported for _, stats in results)
+            total_skipped = sum(stats.skipped_empty for _, stats in results)
+            total_failed = sum(stats.failed for _, stats in results)
+            lines = [
+                f"Exported {total_exported} scene(s) to .glb from {len(results)} "
+                f"project(s), {total_skipped} skipped (no mesh content), {total_failed} failed"
+            ]
+            for project_folder_name, stats in results:
+                if stats.failures:
+                    lines.append(f"- {project_folder_name}: " + "; ".join(stats.failures))
+            return "\n".join(lines)
+
+        self._run_background_job(
+            job,
+            f"Extracting Godot scenes from {len(project_folder_names)} project(s)...",
+            format_result,
+            lambda: None,
         )
 
     def _show_calibration_review(self, pack_name: str, stats) -> None:

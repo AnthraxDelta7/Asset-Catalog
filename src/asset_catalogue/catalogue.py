@@ -13,6 +13,7 @@ from asset_catalogue import (
     credits,
     db,
     exporting,
+    godot_export,
     ingest,
     library_assets,
     library_health,
@@ -353,6 +354,50 @@ class Catalogue:
         if blender_exe is None:
             raise RuntimeError(error)
         return blender_exe
+
+    def resolve_godot(self) -> Path:
+        godot_exe, error = godot_export.resolve_godot(settings.load().godot_path)
+        if godot_exe is None:
+            raise RuntimeError(error)
+        return godot_exe
+
+    def find_godot_projects(self, staged_folder_name: str) -> list[str]:
+        """Relative-to-staging-folder paths of every Godot project
+        (anything with its own project.godot) found inside a staged
+        folder, itself included -- a staged pack occasionally bundles more
+        than one Godot project.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        search_root = self._staging_folder / staged_folder_name
+        roots = godot_export.find_godot_project_roots(search_root)
+        return [str(root.relative_to(self._staging_folder)) for root in roots]
+
+    def extract_godot_scenes_batch_bg(
+        self,
+        project_folder_names: list[str],
+        include_colliders: bool = True,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> list[tuple[str, godot_export.GodotExportStats]]:
+        """Runs godot_export.export_scenes_to_glb once per selected Godot
+        project (each project root gets its own headless Godot process,
+        since res:// is fixed per run), writing .glb files into the staged
+        pack folder itself -- ingest_pack's own recursive walk then picks
+        them up as ordinary, already-recognized model assets, so nothing
+        about ingest.py needs to know Godot was involved.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        godot_exe = self.resolve_godot()
+        results = []
+        for project_folder_name in project_folder_names:
+            project_root = self._staging_folder / project_folder_name
+            scenes = godot_export.find_scenes(project_root)
+            stats = godot_export.export_scenes_to_glb(
+                godot_exe, project_root, scenes, include_colliders, on_progress=on_progress
+            )
+            results.append((project_folder_name, stats))
+        return results
 
     def ingest_pack_bg(
         self,

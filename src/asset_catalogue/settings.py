@@ -35,6 +35,7 @@ class Settings:
     staging_folder: str | None = None
     library_folder: str | None = None
     blender_path: str | None = None
+    godot_path: str | None = None
     # Most-recently-used project folders for "Export to Project", newest
     # first, capped at a handful of entries (see main_window.py's
     # _remember_export_project). Powers the DetailPanel's Export button --
