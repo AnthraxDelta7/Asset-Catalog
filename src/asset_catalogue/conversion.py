@@ -22,6 +22,7 @@ class ConversionResult:
     ok: bool
     error: str | None = None
     smart_texture_notes: list[str] = field(default_factory=list)
+    broken_materials: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -34,6 +35,7 @@ class ConversionBatchResult:
     failed: int = 0
     errors: list[str] = field(default_factory=list)
     smart_texture_notes: list[str] = field(default_factory=list)
+    broken_materials: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def _resolve_conversion_row(conn: sqlite3.Connection, asset_id: int) -> sqlite3.Row | None:
@@ -186,11 +188,16 @@ def convert_asset_to_gltf(
         for line in output.splitlines()
         if line.startswith(f"ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|{asset_id}|")
     ]
+    broken_materials = [
+        (asset_id, row["filename"], line.split("|", 2)[-1])
+        for line in output.splitlines()
+        if line.startswith(f"ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|{asset_id}|")
+    ]
 
     _apply_successful_conversion(
         conn, staging_folder, assets_dir, asset_id, row, new_relative_path, output_path
     )
-    return ConversionResult(True, smart_texture_notes=smart_texture_notes)
+    return ConversionResult(True, smart_texture_notes=smart_texture_notes, broken_materials=broken_materials)
 
 
 def convert_assets_to_gltf(
@@ -275,9 +282,16 @@ def convert_assets_to_gltf(
                 continue
             if line.startswith("ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|"):
                 _, smart_asset_id_str, note = line.split("|", 2)
-                filename = job_context.get(int(smart_asset_id_str), (None,))[0]
-                display_name = filename["filename"] if filename is not None else f"asset {smart_asset_id_str}"
+                row = job_context.get(int(smart_asset_id_str), (None,))[0]
+                display_name = row["filename"] if row is not None else f"asset {smart_asset_id_str}"
                 result.smart_texture_notes.append(f"{display_name}: {note}")
+                continue
+            if line.startswith("ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|"):
+                _, broken_asset_id_str, material_name = line.split("|", 2)
+                broken_asset_id = int(broken_asset_id_str)
+                row = job_context.get(broken_asset_id, (None,))[0]
+                display_name = row["filename"] if row is not None else f"asset {broken_asset_id_str}"
+                result.broken_materials.append((broken_asset_id, display_name, material_name))
                 continue
             if not line.startswith("ASSET_CATALOGUE_CONVERT_RESULT|"):
                 continue

@@ -9,6 +9,7 @@ from asset_catalogue import (
     archives,
     audio_thumbnails,
     blender_render,
+    broken_textures,
     conversion,
     credits,
     db,
@@ -635,6 +636,88 @@ class Catalogue:
         conn = db.connect(settings.load().db_path())
         try:
             packs.set_corrections(conn, pack_id, corrections)
+        finally:
+            conn.close()
+
+    def pack_id_for_asset(self, asset_id: int) -> int | None:
+        row = self._conn.execute("SELECT pack_id FROM assets WHERE id = ?", (asset_id,)).fetchone()
+        return row["pack_id"] if row is not None else None
+
+    def set_texture_override_bg(self, pack_id: int, material_name: str, relative_path: str) -> None:
+        """Merges one material_name -> relative_path entry into a pack's
+        texture_overrides, preserving everything else already in its
+        corrections -- the "Missing Textures" review dialog's Browse
+        action, and the asset detail panel's own Fix Texture entry point,
+        both funnel through here rather than duplicating Edit Pack
+        Metadata's own Manual texture overrides logic; same underlying
+        storage either way, just reachable right where a broken material
+        was actually found.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            corrections = packs.get_corrections(conn, pack_id)
+            overrides = dict(corrections.get("texture_overrides") or {})
+            overrides[material_name] = relative_path
+            corrections["texture_overrides"] = overrides
+            packs.set_corrections(conn, pack_id, corrections)
+            # Clear it from the review list right away, across every asset
+            # in the pack sharing this material -- the override itself is
+            # pack+material-name scoped, so waiting for each asset to be
+            # individually re-rendered before it drops off the list would
+            # be misleading (the fix already applies, the row just hasn't
+            # caught up yet).
+            broken_textures.delete_for_pack_material(conn, pack_id, material_name)
+        finally:
+            conn.close()
+
+    def add_texture_extra_bg(self, pack_id: int, material_name: str, relative_path: str) -> None:
+        """Merges one material_name -> relative_path entry into a pack's
+        texture_extras -- an extra image (a mask, say) embedded into the
+        exported .glb via Emission with strength forced to 0 (see
+        blender_common.py's _apply_texture_extras), not wired into Base
+        Color like set_texture_override_bg. For a file the user wants
+        travelling with the asset for later hand-wiring (the vendor's own
+        recolor shader, say), not one this app can correctly auto-apply.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            corrections = packs.get_corrections(conn, pack_id)
+            extras = dict(corrections.get("texture_extras") or {})
+            extras[material_name] = relative_path
+            corrections["texture_extras"] = extras
+            packs.set_corrections(conn, pack_id, corrections)
+        finally:
+            conn.close()
+
+    def list_broken_texture_materials(self) -> list[sqlite3.Row]:
+        """Every (asset, material) pair currently known to reference a
+        broken texture, as of each asset's last render -- what the
+        "Missing Textures" review dialog lists. See broken_textures.py.
+        """
+        return broken_textures.list_all(self._conn)
+
+    def list_broken_texture_materials_for_asset(self, asset_id: int) -> list[str]:
+        """Just the material names still broken for one asset -- what
+        gates the detail panel's Fix Texture button (only shown when this
+        is non-empty).
+        """
+        return broken_textures.list_for_asset(self._conn, asset_id)
+
+    def acknowledge_no_texture_bg(self, pack_id: int, material_name: str) -> None:
+        """Records that material_name is intentionally left without a
+        texture for this pack -- see blender_common.py's
+        acknowledged_materials, which stops it from being reported as
+        broken on every future render, the same way a texture override
+        would, just without actually assigning a file.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            corrections = packs.get_corrections(conn, pack_id)
+            acknowledged = set(corrections.get("acknowledged_materials") or [])
+            acknowledged.add(material_name)
+            corrections["acknowledged_materials"] = sorted(acknowledged)
+            packs.set_corrections(conn, pack_id, corrections)
+            broken_textures.delete_for_pack_material(conn, pack_id, material_name)
         finally:
             conn.close()
 

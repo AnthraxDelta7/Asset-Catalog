@@ -13,7 +13,10 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
 def test_connect_creates_expected_schema(tmp_path: Path) -> None:
     conn = db.connect(tmp_path / "new.db")
     tables = _table_names(conn)
-    for expected in ("packs", "assets", "tags", "asset_tags", "exports", "excluded_tags", "pending_conversions"):
+    for expected in (
+        "packs", "assets", "tags", "asset_tags", "exports", "excluded_tags",
+        "pending_conversions", "broken_texture_materials",
+    ):
         assert expected in tables
     assert "imports" not in tables
     conn.close()

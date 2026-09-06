@@ -118,12 +118,6 @@ def _mesh_materials(mesh_objects) -> dict:
     return materials
 
 
-def _material_has_any_image_texture(material) -> bool:
-    if not material.use_nodes:
-        return False
-    return any(node.type == "TEX_IMAGE" for node in material.node_tree.nodes)
-
-
 def resolve_material_metadata(mesh_objects) -> dict:
     """material_name -> {"has_texture": bool, "base_color_factor": [r, g, b]}
     for every material actually used across mesh_objects, read straight off
@@ -169,11 +163,28 @@ def resolve_material_metadata(mesh_objects) -> dict:
 
 
 def _assign_base_color_texture(material, texture_path: Path) -> bool:
+    """Wires texture_path into material's Base Color, used by a manual
+    texture override (_apply_texture_overrides). If Base Color already
+    had an image node linked (typically the original, broken one an
+    override exists specifically to replace), that node is removed
+    entirely rather than just unlinked -- confirmed as a real bug
+    otherwise: an orphaned broken-image node left sitting in the tree,
+    disconnected but still present, kept being counted as "this material
+    still references a broken image" by has_broken_texture/
+    _broken_materials (both scan every TEX_IMAGE node in the material,
+    not just whatever Base Color currently points at), so a successfully
+    applied override still showed up as unresolved.
+    """
     if not material.use_nodes:
         material.use_nodes = True
     bsdf = material.node_tree.nodes.get("Principled BSDF")
     if bsdf is None:
         return False
+    base_color_input = bsdf.inputs["Base Color"]
+    if base_color_input.is_linked:
+        previous_node = base_color_input.links[0].from_node
+        if previous_node.type == "TEX_IMAGE":
+            material.node_tree.nodes.remove(previous_node)
     image = bpy.data.images.load(str(texture_path))
     tex_node = material.node_tree.nodes.new("ShaderNodeTexImage")
     tex_node.image = image
@@ -211,6 +222,73 @@ def _apply_texture_overrides(mesh_objects, pack_root: Path, overrides: dict) -> 
     return notes, handled
 
 
+def _apply_texture_extras(mesh_objects, pack_root: Path, extras: dict) -> list[str]:
+    """Embeds one supplementary image file per material into the .glb
+    export -- for a mask or extra map (see corrections' texture_extras)
+    the user wants available later (e.g. to hand-wire the vendor's own
+    recolor shader themselves) but that this app has no way to correctly
+    auto-apply on its own. Never alters the material's actual rendered
+    appearance.
+
+    Blender's glTF exporter only bundles an image that's actually
+    reachable from the material's node graph -- confirmed directly: a
+    wired-but-unconnected Image Texture node is silently dropped from the
+    export entirely, present in the .blend scene but absent from the
+    resulting glTF images/textures arrays. So this wires it into
+    Emission Color instead, with Emission Strength forced to 0 --
+    verified against a real export that a 0-strength emissive texture
+    still gets embedded, but produces an omitted (default, meaning
+    black/zero-contribution) emissiveFactor, i.e. genuinely no visual
+    effect in any spec-compliant viewer.
+
+    Only when Emission isn't already doing something real, though: a
+    material already using it for an actual glow effect is left alone
+    rather than risking silently overwriting it, and reported as skipped
+    rather than failing quietly. Checked via Emission *Color*, not
+    Strength -- confirmed against a real pack that Blender's Principled
+    BSDF defaults Emission Strength to 1.0, not 0.0, so nearly every
+    material that has never touched Emission at all would otherwise look
+    "already in use" and the guard would misfire almost everywhere.
+    Emission Color defaults to pure black, so strength(1.0) * color(0,0,0)
+    is still genuinely zero contribution regardless of the strength
+    value -- black-and-unlinked is the actual "never touched" signal,
+    not the strength. This is also why only one supplementary file per
+    material is supported -- there's no second "free" slot in the core
+    glTF material model that's this safe to commandeer without spec-
+    extension complexity.
+    """
+    if not extras:
+        return []
+    materials = _mesh_materials(mesh_objects)
+    notes = []
+    for material_name, relative_path in extras.items():
+        material = materials.get(material_name)
+        if material is None or not relative_path:
+            continue
+        if not material.use_nodes:
+            material.use_nodes = True
+        bsdf = material.node_tree.nodes.get("Principled BSDF")
+        if bsdf is None:
+            continue
+        emission_strength = bsdf.inputs["Emission Strength"]
+        emission_color = bsdf.inputs["Emission Color"]
+        already_emissive = emission_color.is_linked or any(c > 0 for c in emission_color.default_value[:3])
+        if already_emissive:
+            notes.append(f"'{material_name}': supplementary file skipped (Emission already in use)")
+            continue
+        texture_path = pack_root / relative_path
+        if not texture_path.is_file():
+            continue
+        image = bpy.data.images.load(str(texture_path))
+        tex_node = material.node_tree.nodes.new("ShaderNodeTexImage")
+        tex_node.image = image
+        tex_node.label = "AssetCatalogueSupplementaryFile"
+        material.node_tree.links.new(tex_node.outputs["Color"], emission_color)
+        emission_strength.default_value = 0.0
+        notes.append(f"'{material_name}': embedded supplementary file {texture_path.name}")
+    return notes
+
+
 def _relink_broken_images(broken_images, pack_root: Path) -> list[str]:
     """Attempts to fix each broken image by finding a file with the exact
     same basename anywhere else in the pack -- the common real-world
@@ -233,40 +311,53 @@ def _relink_broken_images(broken_images, pack_root: Path) -> list[str]:
     return notes
 
 
-def _inject_missing_textures(mesh_objects, pack_root: Path, skip_materials: set[str]) -> list[str]:
-    """For any material with no image texture node at all (never had one,
-    not just broken), searches the pack for a texture file whose name
-    matches the material's own name by convention (see
-    texture_matching.find_texture_match) and wires it into Base Color if
-    found. Never touches a material that already has any image texture
-    node, working or broken -- this only ever fills in something that was
-    completely absent, confirmed against a real pack where most modular-
-    kit material names corresponded exactly to a texture file the source
-    FBX just never referenced, sitting right alongside dozens of other,
-    unrelated material names (character/plant/prop parts) that legitimately
-    have no texture counterpart at all and are correctly left untouched.
+def _broken_materials(mesh_objects, broken_images: set, acknowledged: set[str]) -> list[str]:
+    """Names (deduped, order-preserving) of every material whose Base
+    Color still points at a broken image after relink has already run --
+    the actual thing worth surfacing to a human (see the review-dialog
+    workflow this feeds), since find_broken_texture_images() alone only
+    says *something* in the scene is broken, not which materials.
+
+    Deliberately checks only the Base Color link, not every TEX_IMAGE
+    node in the material -- a manual override (see _assign_base_color_
+    texture) only ever fixes Base Color, so flagging a material over a
+    broken normal/AO/etc. map would offer a "Browse..." fix that can't
+    actually address what's broken. This also sidesteps a real bug that
+    scanning every node hit: an orphaned, no-longer-linked image node
+    left over from a previous fix (now cleaned up by
+    _assign_base_color_texture, but a materials-with-more-complex-history
+    could still carry one) would otherwise keep counting as broken even
+    once Base Color itself points somewhere valid.
+
+    acknowledged filters out a material the user has already explicitly
+    said "no texture, that's fine" for (see corrections'
+    acknowledged_materials) -- otherwise every future render of every
+    asset sharing that material would keep re-flagging a decision that's
+    already been made.
     """
-    texture_files = texture_matching.find_image_files(pack_root)
-    if not texture_files:
-        return []
-
-    notes = []
+    names: list[str] = []
     for name, material in _mesh_materials(mesh_objects).items():
-        if name in skip_materials or _material_has_any_image_texture(material):
+        if name in acknowledged or not material.use_nodes:
             continue
-        match = texture_matching.find_texture_match(name, texture_files)
-        if match is None:
+        bsdf = material.node_tree.nodes.get("Principled BSDF")
+        if bsdf is None:
             continue
-        if _assign_base_color_texture(material, match):
-            notes.append(f"'{name}' -> {match.name}")
-    return notes
+        base_color_input = bsdf.inputs["Base Color"]
+        if not base_color_input.is_linked:
+            continue
+        from_node = base_color_input.links[0].from_node
+        if from_node.type == "TEX_IMAGE" and from_node.image in broken_images:
+            names.append(name)
+    return names
 
 
-def apply_corrections(corrections: dict, pack_root: Path | None = None) -> tuple[list, bool, list[str]]:
+def apply_corrections(
+    corrections: dict, pack_root: Path | None = None
+) -> tuple[list, bool, list[str], list[str]]:
     """Applies pack-level corrections to whatever was just imported (every
     object that isn't Camera/Light -- those only exist in the thumbnail
     script's scene, harmless to exclude by name here regardless). Returns
-    (mesh_objects, has_broken_texture, smart_texture_notes):
+    (mesh_objects, has_broken_texture, smart_texture_notes, broken_materials):
     - mesh_objects, for the caller's next step (framing for a render, or
       nothing special for an export).
     - has_broken_texture: whether ANY mesh still references an image that
@@ -275,13 +366,26 @@ def apply_corrections(corrections: dict, pack_root: Path | None = None) -> tuple
       regardless of whether that fallback correction is turned on, to
       report it back to the user.
     - smart_texture_notes: one human-readable line per texture manually
-      overridden, auto-relinked, or auto-matched by name -- see
-      _apply_texture_overrides / _relink_broken_images /
-      _inject_missing_textures. Always attempted when pack_root is given,
-      unless disable_smart_texture_matching is set (an explicit, easy
-      rollback switch for a pack where an automatic match turned out
-      wrong) -- manual overrides still apply even then, since those are
-      the user's own explicit instruction, not a guess.
+      overridden, embedded as a supplementary file, or auto-relinked --
+      see _apply_texture_overrides / _apply_texture_extras /
+      _relink_broken_images. Relink is always attempted when pack_root is
+      given, unless disable_smart_texture_matching is set (an explicit,
+      easy rollback switch) -- manual overrides still apply even then,
+      since those are the user's own explicit instruction, not a guess.
+      This used to also include a name-based guess at a texture for a
+      material that never had one at all ("RecessA" -> a same-named file
+      found elsewhere in the pack) -- removed after repeatedly guessing
+      wrong on real packs (a shared material name across unrelated
+      meshes, or a same-suffixed file that turned out to be something
+      other than a usable color texture). Nothing here guesses anymore;
+      see broken_materials below for how an actually-broken reference
+      gets surfaced to a human instead.
+    - broken_materials: names of materials still referencing a broken
+      image even after relink -- what the review-dialog "missing
+      texture" workflow (main_window.py) actually acts on, letting a
+      human browse to the right file or mark it as intentionally
+      textureless (see corrections' acknowledged_materials, which
+      filters a name back out of this list once they have).
     """
     imported = [obj for obj in bpy.data.objects if obj.name not in ("Camera", "Light")]
 
@@ -307,17 +411,21 @@ def apply_corrections(corrections: dict, pack_root: Path | None = None) -> tuple
     smart_texture_notes: list[str] = []
 
     if pack_root is not None:
-        override_notes, handled_materials = _apply_texture_overrides(
+        override_notes, _handled_materials = _apply_texture_overrides(
             mesh_objects, pack_root, corrections.get("texture_overrides") or {}
         )
         smart_texture_notes.extend(override_notes)
+        smart_texture_notes.extend(
+            _apply_texture_extras(mesh_objects, pack_root, corrections.get("texture_extras") or {})
+        )
 
         if not corrections.get("disable_smart_texture_matching"):
             smart_texture_notes.extend(_relink_broken_images(set(find_broken_texture_images()), pack_root))
-            smart_texture_notes.extend(_inject_missing_textures(mesh_objects, pack_root, handled_materials))
 
     broken_images = set(find_broken_texture_images())  # recomputed -- a relink above may have fixed some
     has_broken_texture = any(_mesh_uses_any_image(obj, broken_images) for obj in mesh_objects)
+    acknowledged = set(corrections.get("acknowledged_materials") or [])
+    broken_materials = _broken_materials(mesh_objects, broken_images, acknowledged)
 
     if has_broken_texture and corrections.get("broken_texture_fallback"):
         # Surgical, not blanket like material_fallback above: only the
@@ -334,4 +442,4 @@ def apply_corrections(corrections: dict, pack_root: Path | None = None) -> tuple
                 obj.data.materials.append(material)
 
     bpy.context.view_layer.update()
-    return mesh_objects, has_broken_texture, smart_texture_notes
+    return mesh_objects, has_broken_texture, smart_texture_notes, broken_materials

@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS pending_conversions (
     original_file_size INTEGER NOT NULL,
     converted_at TEXT NOT NULL
 );
+
+-- One row per (asset, material) still referencing a broken texture
+-- reference as of that asset's last render -- what the "Missing Textures"
+-- review dialog and the detail panel's Fix Texture button both read from.
+-- Replaced wholesale for an asset on every render (see broken_textures.py's
+-- replace_for_asset), not just added to -- self-correcting the same way
+-- assets.needs_glb_conversion is, so a re-render that fixes something
+-- clears it here without a separate cleanup step.
+CREATE TABLE IF NOT EXISTS broken_texture_materials (
+    asset_id INTEGER NOT NULL REFERENCES assets(id),
+    material_name TEXT NOT NULL,
+    PRIMARY KEY (asset_id, material_name)
+);
 """
 
 

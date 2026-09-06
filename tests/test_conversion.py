@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from asset_catalogue import conversion, ingest, library_assets
 
@@ -74,6 +76,89 @@ def test_apply_successful_conversion_clears_needs_glb_conversion(
     updated = conn.execute("SELECT needs_glb_conversion, extension FROM assets WHERE id = ?", (asset_id,)).fetchone()
     assert updated["needs_glb_conversion"] == 0
     assert updated["extension"] == ".glb"
+
+
+def _make_convertible_model_asset(conn: sqlite3.Connection, staging_folder: Path) -> tuple[int, Path]:
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    original = pack_root / "model.fbx"
+    original.write_bytes(b"original fbx bytes")
+    original_hash = ingest.hash_file(original)
+    cursor = conn.execute(
+        "INSERT INTO assets (pack_id, relative_path, filename, extension, file_size, "
+        "content_hash, asset_type) VALUES (?, 'model.fbx', 'model.fbx', '.fbx', ?, ?, 'model')",
+        (pack_id, original.stat().st_size, original_hash),
+    )
+    conn.commit()
+    return cursor.lastrowid, pack_root
+
+
+def test_convert_asset_to_gltf_reports_broken_materials(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    """broken_materials mirrors smart_texture_notes' own parsing
+    (ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL lines from Blender's
+    stdout), added alongside the "Missing Textures" review workflow so a
+    conversion -- not just a thumbnail render -- can also report a
+    material still needing a human's attention. subprocess.run is mocked
+    entirely (no real Blender involved); the mock also writes the output
+    .glb the real Blender run would have produced, since
+    _apply_successful_conversion (called once the mocked "ok" result
+    comes back) expects it to already exist on disk.
+    """
+    asset_id, pack_root = _make_convertible_model_asset(conn, staging_folder)
+
+    def fake_run(*_args, **_kwargs):
+        (pack_root / "model.glb").write_bytes(b"fake converted glb bytes")
+        return SimpleNamespace(
+            stdout=(
+                f"ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|{asset_id}|BrokenMat\n"
+                f"ASSET_CATALOGUE_CONVERT_RESULT|{asset_id}|ok\n"
+            ),
+            stderr="",
+        )
+
+    with patch("asset_catalogue.conversion.subprocess.run", side_effect=fake_run):
+        result = conversion.convert_asset_to_gltf(
+            conn, staging_folder, assets_dir, Path("blender.exe"), asset_id
+        )
+
+    assert result.ok is True
+    assert result.broken_materials == [(asset_id, "model.fbx", "BrokenMat")]
+
+
+def test_convert_assets_to_gltf_batch_reports_broken_materials(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    """Same as the single-asset test above, but through the batch path
+    (subprocess.Popen with streamed stdout, not subprocess.run) -- the
+    two conversion entry points parse ASSET_CATALOGUE_CONVERT_BROKEN_
+    MATERIAL lines independently, so a fix to one wouldn't necessarily
+    catch a regression in the other.
+    """
+    asset_id, pack_root = _make_convertible_model_asset(conn, staging_folder)
+
+    def fake_popen(*_args, **_kwargs):
+        (pack_root / "model.glb").write_bytes(b"fake converted glb bytes")
+        process = MagicMock()
+        process.stdout = iter(
+            [
+                f"ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|{asset_id}|BrokenMat\n",
+                f"ASSET_CATALOGUE_CONVERT_RESULT|{asset_id}|ok\n",
+            ]
+        )
+        process.wait.return_value = None
+        process.returncode = 0
+        return process
+
+    with patch("asset_catalogue.conversion.subprocess.Popen", side_effect=fake_popen):
+        result = conversion.convert_assets_to_gltf(
+            conn, staging_folder, assets_dir, Path("blender.exe"), [asset_id]
+        )
+
+    assert result.converted == 1
+    assert result.broken_materials == [(asset_id, "model.fbx", "BrokenMat")]
 
 
 def _make_asset_with_pending_conversion(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path) -> int:

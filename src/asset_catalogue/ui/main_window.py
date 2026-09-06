@@ -472,6 +472,7 @@ class DetailPanel(QWidget):
         on_show_in_library,
         on_revert_conversion,
         on_cleanup_conversion,
+        on_fix_texture,
         on_filter_by_pack,
         on_export_browse,
         on_quick_export,
@@ -487,6 +488,7 @@ class DetailPanel(QWidget):
         self._on_show_in_library = on_show_in_library
         self._on_revert_conversion = on_revert_conversion
         self._on_cleanup_conversion = on_cleanup_conversion
+        self._on_fix_texture = on_fix_texture
         self._on_filter_by_pack = on_filter_by_pack
         self._on_export_browse = on_export_browse
         self._on_quick_export = on_quick_export
@@ -563,6 +565,17 @@ class DetailPanel(QWidget):
         layout.addLayout(conversion_row)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
+
+        # Only shown for a single-selected model asset that currently has
+        # at least one material still referencing a broken texture (see
+        # broken_textures.py) -- the same per-material Browse/No Texture
+        # Needed/Skip actions as MissingTexturesDialog, scoped to just this
+        # asset's own broken materials, for fixing one spotted in the grid
+        # without going through the full review list first.
+        self.fix_texture_button = QPushButton("Fix Texture...")
+        self.fix_texture_button.clicked.connect(self._fix_texture)
+        self.fix_texture_button.setVisible(False)
+        layout.addWidget(self.fix_texture_button)
 
         layout.addWidget(QLabel("Tags"))
         self.tag_list = QListWidget()
@@ -717,6 +730,7 @@ class DetailPanel(QWidget):
         self.generate_thumbnail_button.setVisible(False)
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
+        self.fix_texture_button.setVisible(False)
         self._update_export_button(True)
         self._stop_playback_and_hide()
 
@@ -747,6 +761,7 @@ class DetailPanel(QWidget):
         pending = self._catalogue.has_pending_conversion(asset.id)
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
+        self.fix_texture_button.setVisible(bool(self._catalogue.list_broken_texture_materials_for_asset(asset.id)))
         self._update_export_button(True)
 
         self._media_player.stop()
@@ -830,6 +845,10 @@ class DetailPanel(QWidget):
     def _cleanup_conversion(self) -> None:
         if self._asset_id is not None:
             self._on_cleanup_conversion(self._asset_id)
+
+    def _fix_texture(self) -> None:
+        if self._asset_id is not None:
+            self._on_fix_texture(self._asset_id)
 
 
 def _format_broken_texture_note(filenames: list[str]) -> str:
@@ -2741,6 +2760,276 @@ class PendingConversionsDialog(QDialog):
         self._run_job(job, f"Cleaning up {count} asset(s)...", on_ok)
 
 
+class MissingTexturesDialog(QDialog):
+    """Review for materials that still reference a broken texture even
+    after automatic relink (an exact-filename match, nothing guessed) --
+    what the status bar's missing-textures badge opens. This is the
+    human-in-the-loop replacement for the name-based auto-matching this
+    app used to attempt on its own: guessing which file went with which
+    material turned out wrong often enough on real packs (a material name
+    shared by several unrelated meshes, or a same-suffixed file that
+    wasn't actually a usable color texture) that browsing to the right
+    file yourself is the more trustworthy default now.
+
+    Fixing one row applies to every other row sharing the same material
+    in the same pack automatically -- a texture override is pack- and
+    material-name-scoped by design (see Catalogue.set_texture_override_bg),
+    so there's no separate "apply to all" step to hunt for.
+    """
+
+    def __init__(
+        self, catalogue: Catalogue, parent: QWidget | None = None, asset_id_filter: int | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._catalogue = catalogue
+        self._worker: _BackgroundWorker | None = None
+        self._rows: list[sqlite3.Row] = []
+        # Set when opened from the detail panel's own Fix Texture button
+        # (see MainWindow._handle_fix_texture) -- narrows the list to just
+        # one asset's own broken materials instead of the whole catalogue,
+        # the "I spotted this one thing, let me fix just it" entry point
+        # alongside the full review dialog reachable from the status bar.
+        self._asset_id_filter = asset_id_filter
+        self.setWindowTitle("Missing Textures")
+        self.resize(680, 420)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "These materials still reference a texture that couldn't be found, even "
+            "after trying to relink it to a same-named file elsewhere in the pack. "
+            "Browse to the right file yourself, mark a material as intentionally "
+            "textureless so it stops being flagged, or skip it for now -- fixing one "
+            "row also fixes every other asset using that same material in this pack."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Pack", "Asset", "Material"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, stretch=1)
+
+        selection_row = QHBoxLayout()
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self._browse_selected)
+        self.add_extra_button = QPushButton("Add Supplementary File...")
+        self.add_extra_button.setToolTip(
+            "Embed an extra file (a mask, another map) into the exported .glb for this "
+            "material -- travels with the asset for later hand-wiring, but isn't wired "
+            "into anything automatically and doesn't clear this row (Base Color is still "
+            "unresolved)."
+        )
+        self.add_extra_button.clicked.connect(self._add_supplementary_file_selected)
+        self.no_texture_button = QPushButton("No Texture Needed")
+        self.no_texture_button.clicked.connect(self._no_texture_needed_selected)
+        self.skip_button = QPushButton("Skip")
+        self.skip_button.clicked.connect(self._skip_selected)
+        selection_row.addWidget(self.browse_button)
+        selection_row.addWidget(self.add_extra_button)
+        selection_row.addWidget(self.no_texture_button)
+        selection_row.addWidget(self.skip_button)
+        layout.addLayout(selection_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        bottom_row.addWidget(close_button)
+        layout.addLayout(bottom_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._rows = self._catalogue.list_broken_texture_materials()
+        if self._asset_id_filter is not None:
+            self._rows = [row for row in self._rows if row["asset_id"] == self._asset_id_filter]
+        self.table.setRowCount(len(self._rows))
+        for i, row in enumerate(self._rows):
+            self.table.setItem(i, 0, QTableWidgetItem(row["pack_name"]))
+            self.table.setItem(i, 1, QTableWidgetItem(row["filename"]))
+            self.table.setItem(i, 2, QTableWidgetItem(row["material_name"]))
+        self.table.resizeColumnsToContents()
+        has_rows = bool(self._rows)
+        self.browse_button.setEnabled(has_rows)
+        self.add_extra_button.setEnabled(has_rows)
+        self.no_texture_button.setEnabled(has_rows)
+        self.skip_button.setEnabled(has_rows)
+        if not self._rows:
+            self.accept()
+
+    def _selected_rows(self) -> list[sqlite3.Row]:
+        selected_indices = sorted({index.row() for index in self.table.selectedIndexes()})
+        return [self._rows[i] for i in selected_indices]
+
+    def _run_job(self, fn, progress_text: str, on_ok) -> None:
+        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
+        progress.show()
+        worker = _BackgroundWorker(fn)
+
+        def handle_ok(result) -> None:
+            progress.close()
+            on_ok(result)
+
+        def handle_fail(message: str) -> None:
+            progress.close()
+            QMessageBox.critical(self, "Asset Catalogue", message)
+
+        worker.progress.connect(progress.append, Qt.QueuedConnection)
+        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
+        worker.failed.connect(handle_fail, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _browse_selected(self) -> None:
+        selected = self._selected_rows()
+        if len(selected) != 1:
+            QMessageBox.information(
+                self, "Asset Catalogue", "Select exactly one row -- a browsed file applies to one material at a time."
+            )
+            return
+        row = selected[0]
+
+        staging_folder = self._catalogue.staging_folder()
+        pack_root = staging_folder / row["pack_folder"] if staging_folder is not None else None
+        start_dir = str(pack_root) if pack_root is not None else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, f"Select texture for '{row['material_name']}'", start_dir,
+            "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if pack_root is not None:
+            try:
+                relative_path = str(Path(file_path).resolve().relative_to(pack_root.resolve()))
+            except ValueError:
+                QMessageBox.warning(
+                    self, "Asset Catalogue",
+                    "That file isn't inside this pack's staging folder -- pick a texture "
+                    "that's actually part of the pack.",
+                )
+                return
+        else:
+            relative_path = file_path
+
+        # Every asset in this pack currently listed against this same
+        # material -- fixing the override already covers all of them
+        # (see Catalogue.set_texture_override_bg), this just re-renders
+        # each one so the fix shows up in its thumbnail/preview too.
+        # Looked up unfiltered (not self._rows), since a Fix Texture...
+        # launch from the detail panel narrows self._rows to one asset,
+        # but the override itself still applies pack-wide.
+        all_rows = self._catalogue.list_broken_texture_materials()
+        affected_asset_ids = [
+            r["asset_id"] for r in all_rows
+            if r["pack_id"] == row["pack_id"] and r["material_name"] == row["material_name"]
+        ]
+
+        def job(report):
+            self._catalogue.set_texture_override_bg(row["pack_id"], row["material_name"], relative_path)
+            report(f"Re-rendering {len(affected_asset_ids)} asset(s)...")
+            self._catalogue.regenerate_model_thumbnail_bg(asset_ids=affected_asset_ids, on_progress=report)
+
+        def on_ok(_result) -> None:
+            self._refresh()
+
+        self._run_job(job, f"Applying texture to '{row['material_name']}'...", on_ok)
+
+    def _add_supplementary_file_selected(self) -> None:
+        selected = self._selected_rows()
+        if len(selected) != 1:
+            QMessageBox.information(
+                self, "Asset Catalogue",
+                "Select exactly one row -- a supplementary file applies to one material at a time.",
+            )
+            return
+        row = selected[0]
+
+        staging_folder = self._catalogue.staging_folder()
+        pack_root = staging_folder / row["pack_folder"] if staging_folder is not None else None
+        start_dir = str(pack_root) if pack_root is not None else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, f"Select a supplementary file for '{row['material_name']}'", start_dir,
+            "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        if pack_root is not None:
+            try:
+                relative_path = str(Path(file_path).resolve().relative_to(pack_root.resolve()))
+            except ValueError:
+                QMessageBox.warning(
+                    self, "Asset Catalogue",
+                    "That file isn't inside this pack's staging folder -- pick a file "
+                    "that's actually part of the pack.",
+                )
+                return
+        else:
+            relative_path = file_path
+
+        all_rows = self._catalogue.list_broken_texture_materials()
+        affected_asset_ids = [
+            r["asset_id"] for r in all_rows
+            if r["pack_id"] == row["pack_id"] and r["material_name"] == row["material_name"]
+        ]
+        # This material might not appear in the broken-materials list at
+        # all (a supplementary file is a valid thing to attach to a
+        # material whose Base Color already works fine) -- always at
+        # least re-render the one asset this row is actually about.
+        if row["asset_id"] not in affected_asset_ids:
+            affected_asset_ids.append(row["asset_id"])
+
+        def job(report):
+            self._catalogue.add_texture_extra_bg(row["pack_id"], row["material_name"], relative_path)
+            report(f"Re-rendering {len(affected_asset_ids)} asset(s)...")
+            self._catalogue.regenerate_model_thumbnail_bg(asset_ids=affected_asset_ids, on_progress=report)
+
+        def on_ok(_result) -> None:
+            QMessageBox.information(
+                self, "Asset Catalogue",
+                f"Embedded as a supplementary file for '{row['material_name']}' -- note this doesn't "
+                "resolve a still-broken Base Color; use Browse... for that.",
+            )
+            self._refresh()
+
+        self._run_job(job, f"Embedding supplementary file for '{row['material_name']}'...", on_ok)
+
+    def _no_texture_needed_selected(self) -> None:
+        selected = self._selected_rows()
+        if not selected:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        # Dedupe (pack_id, material_name) -- several selected rows can
+        # share the same material across different assets.
+        pairs = {(row["pack_id"], row["material_name"]) for row in selected}
+        for pack_id, material_name in pairs:
+            self._catalogue.acknowledge_no_texture_bg(pack_id, material_name)
+        self._refresh()
+
+    def _skip_selected(self) -> None:
+        # Deliberately not persisted -- just drops the row(s) from this
+        # session's list. They reappear next time a render reports the
+        # same material still broken, which is the point: "not now" isn't
+        # "never", unlike No Texture Needed.
+        selected = self._selected_rows()
+        if not selected:
+            QMessageBox.information(self, "Asset Catalogue", "Select at least one row first.")
+            return
+        self._rows = [row for row in self._rows if row not in selected]
+        self.table.setRowCount(len(self._rows))
+        for i, row in enumerate(self._rows):
+            self.table.setItem(i, 0, QTableWidgetItem(row["pack_name"]))
+            self.table.setItem(i, 1, QTableWidgetItem(row["filename"]))
+            self.table.setItem(i, 2, QTableWidgetItem(row["material_name"]))
+        if not self._rows:
+            self.accept()
+
+
 class TrashDialog(QDialog):
     """What "Move to Trash"/"Move N to Trash" (the grid's delete action --
     see MainWindow._remove_selected_assets) actually feeds: assets are
@@ -3076,6 +3365,7 @@ class MainWindow(QMainWindow):
             self._show_in_library_folder,
             self._handle_revert_conversion,
             self._handle_cleanup_conversion,
+            self._handle_fix_texture,
             self._filter_by_pack,
             self._export_selected_to_project,
             self._quick_export,
@@ -3116,6 +3406,21 @@ class MainWindow(QMainWindow):
         self.pending_conversions_button.clicked.connect(self._open_pending_conversions_dialog)
         self.pending_conversions_button.setVisible(False)
         self.statusBar().addPermanentWidget(self.pending_conversions_button)
+
+        # Same "persistent, click-to-act" pattern as the pending-conversions
+        # badge above, for materials still referencing a broken texture even
+        # after automatic relink -- see MissingTexturesDialog.
+        self.missing_textures_button = QPushButton()
+        self.missing_textures_button.setFlat(True)
+        self.missing_textures_button.setCursor(Qt.PointingHandCursor)
+        self.missing_textures_button.setStyleSheet(
+            "QPushButton { color: #d9a441; border: none; padding: 2px 8px; }"
+            "QPushButton:hover { text-decoration: underline; }"
+        )
+        self.missing_textures_button.setToolTip("Click to review and fix missing textures")
+        self.missing_textures_button.clicked.connect(self._open_missing_textures_dialog)
+        self.missing_textures_button.setVisible(False)
+        self.statusBar().addPermanentWidget(self.missing_textures_button)
 
         self._refresh_grid()
 
@@ -3788,6 +4093,11 @@ class MainWindow(QMainWindow):
             self._on_conversion_changed,
         )
 
+    def _handle_fix_texture(self, asset_id: int) -> None:
+        dialog = MissingTexturesDialog(self._catalogue, self, asset_id_filter=asset_id)
+        dialog.exec()
+        self._refresh_grid()
+
     def _handle_cleanup_conversion(self, asset_id: int) -> None:
         confirm = QMessageBox.question(
             self,
@@ -3965,6 +4275,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self._refresh_grid()
 
+    def _open_missing_textures_dialog(self) -> None:
+        dialog = MissingTexturesDialog(self._catalogue, self)
+        dialog.exec()
+        self._refresh_grid()
+
     def _filter_by_pack(self, pack_name: str) -> None:
         match = self.filter_panel.pack_list.findItems(pack_name, Qt.MatchExactly)
         if match:
@@ -4070,6 +4385,7 @@ class MainWindow(QMainWindow):
         self.grid.select_asset_id(self._selected_asset_id)
         self.statusBar().showMessage(f"{len(self._current_assets)} asset(s)")
         self._update_pending_conversions_badge()
+        self._update_missing_textures_badge()
 
     def _update_pending_conversions_badge(self) -> None:
         count = self._catalogue.count_pending_conversions()
@@ -4079,6 +4395,15 @@ class MainWindow(QMainWindow):
             self.pending_conversions_button.setVisible(True)
         else:
             self.pending_conversions_button.setVisible(False)
+
+    def _update_missing_textures_badge(self) -> None:
+        count = len(self._catalogue.list_broken_texture_materials())
+        if count:
+            noun = "texture" if count == 1 else "textures"
+            self.missing_textures_button.setText(f"⚠ {count} missing {noun} -- click to review")
+            self.missing_textures_button.setVisible(True)
+        else:
+            self.missing_textures_button.setVisible(False)
 
     def _on_grid_selection_changed(self) -> None:
         selected = self.grid.selectedItems()

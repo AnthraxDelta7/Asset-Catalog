@@ -344,45 +344,62 @@ def test_extract_godot_scenes_batch_bg_raises_when_godot_unavailable(
             catalogue.extract_godot_scenes_batch_bg(["AnyPack"])
 
 
-def test_scan_format_duplicates_extracts_a_zip_source_first(catalogue: Catalogue) -> None:
-    """A pack source that's still a bare .zip sitting in staging (not yet
-    extracted to a folder) must be scanned too, not silently treated as
-    having no duplicates -- a real bug this pins down: the format-choice
-    prompt never appeared at all for a zip-sourced pack, only for one
-    already extracted to a folder first, since the scan used to bail out
-    with an empty result the moment pack_root wasn't already a directory.
+def _insert_model_asset(catalogue: Catalogue, pack_id: int, filename: str, thumbnail_status: str) -> int:
+    cursor = catalogue._conn.execute(
+        "INSERT INTO assets (pack_id, relative_path, filename, extension, file_size, "
+        "content_hash, asset_type, thumbnail_status) VALUES (?, ?, ?, '.fbx', 10, ?, 'model', ?)",
+        (pack_id, filename, filename, f"hash-{filename}", thumbnail_status),
+    )
+    catalogue._conn.commit()
+    return cursor.lastrowid
+
+
+def test_next_pending_model_asset_id_finds_another_pending_model(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    preview_id = _insert_model_asset(catalogue, pack_id, "preview.fbx", "done")
+    pending_id = _insert_model_asset(catalogue, pack_id, "pending.fbx", "pending")
+
+    assert catalogue.next_pending_model_asset_id(pack_id, preview_id) == pending_id
+
+
+def test_next_pending_model_asset_id_excludes_the_given_asset_even_if_pending(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    asset_id = _insert_model_asset(catalogue, pack_id, "only.fbx", "pending")
+
+    assert catalogue.next_pending_model_asset_id(pack_id, asset_id) is None
+
+
+def test_count_pending_model_assets(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    _insert_model_asset(catalogue, pack_id, "a.fbx", "pending")
+    _insert_model_asset(catalogue, pack_id, "b.fbx", "pending")
+    _insert_model_asset(catalogue, pack_id, "c.fbx", "done")
+
+    assert catalogue.count_pending_model_assets(pack_id) == 2
+
+
+def _point_settings_at_catalogue(catalogue: Catalogue, tmp_path: Path, monkeypatch) -> None:
+    """set_texture_override_bg/acknowledge_no_texture_bg open their own
+    connection via settings.load().db_path() (background-thread-safe,
+    same reasoning as every other _bg method) -- needs settings pointed
+    at the exact same on-disk database the catalogue fixture already
+    created, same pattern as extract_godot_scenes_batch_bg's own test
+    above.
     """
-    import zipfile
-
-    zip_path = catalogue.staging_folder() / "Pack.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("Model.fbx", b"fbx data")
-        zf.writestr("Model.glb", b"glb data")
-
-    assert catalogue.scan_format_duplicates("Pack.zip") == {".fbx", ".glb"}
-
-
-def test_scan_format_duplicates_zip_extraction_is_idempotent(catalogue: Catalogue) -> None:
-    """Scanning, then ingesting moments later, must not re-extract (and
-    thereby silently wipe out) whatever the scan's own extraction already
-    produced -- same idempotent-merge guarantee ingest_pack_bg's own zip
-    handling already had, now shared via _resolve_pack_root.
-    """
-    import zipfile
-
-    zip_path = catalogue.staging_folder() / "Pack.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("Model.fbx", b"fbx data")
-
-    catalogue.scan_format_duplicates("Pack.zip")
-    extracted_dir = catalogue.staging_folder() / "Pack"
-    assert extracted_dir.is_dir()
-    marker = extracted_dir / "extra.txt"
-    marker.write_text("must survive a second resolve call")
-
-    catalogue.scan_format_duplicates("Pack.zip")
-
-    assert marker.exists()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(Path(catalogue._thumbnail_dir).parent),
+        )
+    )
 
 
 def _insert_model_asset(catalogue: Catalogue, pack_id: int, filename: str, thumbnail_status: str) -> int:
@@ -424,3 +441,125 @@ def test_count_pending_model_assets(catalogue_with_asset: tuple[Catalogue, int])
     _insert_model_asset(catalogue, pack_id, "c.fbx", "done")
 
     assert catalogue.count_pending_model_assets(pack_id) == 2
+
+
+def test_pack_id_for_asset(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    pack_id = catalogue.pack_id_for_asset(asset_id)
+    assert pack_id is not None
+    assert catalogue.get_pack_detail("Pack").id == pack_id
+
+
+def test_pack_id_for_asset_none_for_unknown_id(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, _asset_id = catalogue_with_asset
+    assert catalogue.pack_id_for_asset(999) is None
+
+
+def test_set_texture_override_bg_merges_without_clobbering_other_corrections(
+    catalogue_with_asset: tuple[Catalogue, int], tmp_path: Path, monkeypatch
+) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    _point_settings_at_catalogue(catalogue, tmp_path, monkeypatch)
+    pack_id = catalogue.pack_id_for_asset(asset_id)
+
+    catalogue.set_pack_corrections_bg(pack_id, {"scale": 2.0, "texture_overrides": {"Existing": "a.png"}})
+    catalogue.set_texture_override_bg(pack_id, "BrokenMat", "Textures/found.png")
+
+    corrections = catalogue.get_pack_detail("Pack").corrections
+    assert corrections["scale"] == 2.0  # untouched
+    assert corrections["texture_overrides"] == {"Existing": "a.png", "BrokenMat": "Textures/found.png"}
+
+
+def test_add_texture_extra_bg_merges_without_clobbering_other_corrections(
+    catalogue_with_asset: tuple[Catalogue, int], tmp_path: Path, monkeypatch
+) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    _point_settings_at_catalogue(catalogue, tmp_path, monkeypatch)
+    pack_id = catalogue.pack_id_for_asset(asset_id)
+
+    catalogue.set_pack_corrections_bg(pack_id, {"scale": 2.0, "texture_extras": {"Existing": "a.png"}})
+    catalogue.add_texture_extra_bg(pack_id, "Trim", "Textures/mask.png")
+
+    corrections = catalogue.get_pack_detail("Pack").corrections
+    assert corrections["scale"] == 2.0
+    assert corrections["texture_extras"] == {"Existing": "a.png", "Trim": "Textures/mask.png"}
+
+
+def test_acknowledge_no_texture_bg_adds_without_duplicating(
+    catalogue_with_asset: tuple[Catalogue, int], tmp_path: Path, monkeypatch
+) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    _point_settings_at_catalogue(catalogue, tmp_path, monkeypatch)
+    pack_id = catalogue.pack_id_for_asset(asset_id)
+
+    catalogue.acknowledge_no_texture_bg(pack_id, "Accent")
+    catalogue.acknowledge_no_texture_bg(pack_id, "Accent")  # idempotent
+    catalogue.acknowledge_no_texture_bg(pack_id, "Trim")
+
+    corrections = catalogue.get_pack_detail("Pack").corrections
+    assert corrections["acknowledged_materials"] == ["Accent", "Trim"]
+
+
+def test_scan_format_duplicates_extracts_a_zip_source_first(catalogue: Catalogue) -> None:
+    """A pack source that's still a bare .zip sitting in staging (not yet
+    extracted to a folder) must be scanned too, not silently treated as
+    having no duplicates -- a real bug this pins down: the format-choice
+    prompt never appeared at all for a zip-sourced pack, only for one
+    already extracted to a folder first, since the scan used to bail out
+    with an empty result the moment pack_root wasn't already a directory.
+    """
+    import zipfile
+
+    zip_path = catalogue.staging_folder() / "Pack.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Model.fbx", b"fbx data")
+        zf.writestr("Model.glb", b"glb data")
+
+    assert catalogue.scan_format_duplicates("Pack.zip") == {".fbx", ".glb"}
+
+
+def test_scan_format_duplicates_zip_extraction_is_idempotent(catalogue: Catalogue) -> None:
+    """Scanning, then ingesting moments later, must not re-extract (and
+    thereby silently wipe out) whatever the scan's own extraction already
+    produced -- same idempotent-merge guarantee ingest_pack_bg's own zip
+    handling already had, now shared via _resolve_pack_root.
+    """
+    import zipfile
+
+    zip_path = catalogue.staging_folder() / "Pack.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Model.fbx", b"fbx data")
+
+    catalogue.scan_format_duplicates("Pack.zip")
+    extracted_dir = catalogue.staging_folder() / "Pack"
+    assert extracted_dir.is_dir()
+    marker = extracted_dir / "extra.txt"
+    marker.write_text("must survive a second resolve call")
+
+    catalogue.scan_format_duplicates("Pack.zip")
+
+    assert marker.exists()
+
+
+def test_list_broken_texture_materials_reflects_broken_textures_module(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    """Catalogue.list_broken_texture_materials(_for_asset) are thin
+    passthroughs to broken_textures.py (already covered directly in
+    test_broken_textures.py) -- this just confirms the wiring itself:
+    the right connection reaches the right module-level function, not
+    the underlying logic again.
+    """
+    from asset_catalogue import broken_textures
+
+    catalogue, asset_id = catalogue_with_asset
+    assert catalogue.list_broken_texture_materials() == []
+    assert catalogue.list_broken_texture_materials_for_asset(asset_id) == []
+
+    broken_textures.replace_for_asset(catalogue._conn, asset_id, ["MaterialA"])
+
+    all_rows = catalogue.list_broken_texture_materials()
+    assert len(all_rows) == 1
+    assert all_rows[0]["asset_id"] == asset_id
+    assert all_rows[0]["material_name"] == "MaterialA"
+    assert catalogue.list_broken_texture_materials_for_asset(asset_id) == ["MaterialA"]

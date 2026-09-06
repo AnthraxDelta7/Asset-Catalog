@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import audio_thumbnails, model_preview, paths, thumbnails
+from asset_catalogue import audio_thumbnails, broken_textures, model_preview, paths, thumbnails
 
 ProgressCallback = Callable[[str], None]
 
@@ -95,13 +95,18 @@ class ModelThumbnailStats:
     # a real, visible heads-up rather than a silent gray/wrong-looking
     # thumbnail that just looks like this app is broken.
     broken_texture_filenames: list[str] = field(default_factory=list)
-    # One line per texture manually overridden, auto-relinked (a broken
+    # One line per texture manually overridden or auto-relinked (a broken
     # absolute-path reference pointed at a same-named file found elsewhere
-    # in the pack), or auto-matched by name (a material with no texture at
-    # all wired to a same-named file) -- see blender_common.py's
-    # apply_corrections. Reported so an automatic match is never silent,
-    # even though it's applied by default.
+    # in the pack) -- see blender_common.py's apply_corrections. Reported
+    # so an automatic relink is never silent, even though it's applied by
+    # default.
     smart_texture_notes: list[str] = field(default_factory=list)
+    # (asset_id, filename, material_name) for every material still
+    # referencing a broken image even after relink -- what the "missing
+    # texture" review dialog (main_window.py) actually acts on, letting a
+    # human browse to the right file per material rather than the app
+    # guessing one. See blender_common.py's _broken_materials.
+    broken_materials: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def build_job_list(
@@ -231,6 +236,7 @@ def generate_model_thumbnails(
 
         seen_ids: set[int] = set()
         smart_texture_asset_ids: set[int] = set()
+        broken_materials_by_asset: dict[int, list[str]] = {}
         assert process.stdout is not None
         for line in process.stdout:
             line = line.strip()
@@ -240,6 +246,14 @@ def generate_model_thumbnails(
                 filename = filenames_by_id.get(int(smart_asset_id_str), f"asset {smart_asset_id_str}")
                 stats.smart_texture_notes.append(f"{filename}: {note}")
                 report(f"  Texture match: {filename}: {note}")
+                continue
+            if line.startswith("ASSET_CATALOGUE_BROKEN_MATERIAL|"):
+                _, broken_asset_id_str, material_name = line.split("|", 2)
+                broken_asset_id = int(broken_asset_id_str)
+                broken_materials_by_asset.setdefault(broken_asset_id, []).append(material_name)
+                filename = filenames_by_id.get(broken_asset_id, f"asset {broken_asset_id}")
+                stats.broken_materials.append((broken_asset_id, filename, material_name))
+                report(f"  Missing texture: {filename} ({material_name})")
                 continue
             if not line.startswith("ASSET_CATALOGUE_RESULT|"):
                 continue
@@ -266,6 +280,7 @@ def generate_model_thumbnails(
                 (new_status, 1 if needs_conversion else 0, asset_id),
             )
             conn.commit()
+            broken_textures.replace_for_asset(conn, asset_id, broken_materials_by_asset.get(asset_id, []))
             filename = filenames_by_id.get(asset_id, f"asset {asset_id}")
             if status == "ok":
                 stats.generated += 1
@@ -314,6 +329,7 @@ class AutoThumbnailStats:
     preview_asset_id: int | None = None
     broken_texture_filenames: list[str] = field(default_factory=list)
     smart_texture_notes: list[str] = field(default_factory=list)
+    broken_materials: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def generate_pack_thumbnails(
@@ -392,6 +408,7 @@ def generate_pack_thumbnails(
         stats.failed += model_stats.failed
         stats.broken_texture_filenames.extend(model_stats.broken_texture_filenames)
         stats.smart_texture_notes.extend(model_stats.smart_texture_notes)
+        stats.broken_materials.extend(model_stats.broken_materials)
         return stats
 
     preview_stats = generate_model_thumbnails(
@@ -402,6 +419,7 @@ def generate_pack_thumbnails(
     stats.failed += preview_stats.failed
     stats.broken_texture_filenames.extend(preview_stats.broken_texture_filenames)
     stats.smart_texture_notes.extend(preview_stats.smart_texture_notes)
+    stats.broken_materials.extend(preview_stats.broken_materials)
     stats.calibration_preview = True
     stats.models_pending = len(model_ids) - 1
     stats.preview_asset_id = model_ids[0]

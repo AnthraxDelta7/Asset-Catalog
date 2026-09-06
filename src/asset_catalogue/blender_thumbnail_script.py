@@ -136,12 +136,14 @@ def main() -> None:
             try:
                 importer(job["source_path"])
                 pack_root = job.get("pack_root")
-                mesh_objects, has_broken_texture, smart_texture_notes = apply_corrections(
+                mesh_objects, has_broken_texture, smart_texture_notes, broken_materials = apply_corrections(
                     job.get("corrections") or {},
                     Path(pack_root) if pack_root else None,
                 )
                 for note in smart_texture_notes:
                     print(f"ASSET_CATALOGUE_SMART_TEXTURE|{asset_id}|{note}", flush=True)
+                for material_name in broken_materials:
+                    print(f"ASSET_CATALOGUE_BROKEN_MATERIAL|{asset_id}|{material_name}", flush=True)
                 ok = frame_and_render(mesh_objects, job["output_path"])
                 preview_output_path = job.get("preview_output_path")
                 if ok and preview_output_path:
