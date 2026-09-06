@@ -8,8 +8,12 @@ blender_common` despite this not being part of the normal package.
 import math
 import os
 import sys
+from pathlib import Path
 
 import bpy
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import texture_matching
 
 FALLBACK_MATERIAL_NAME = "AssetCatalogueFallback"
 
@@ -101,16 +105,139 @@ def _get_or_create_fallback_material():
     return material
 
 
-def apply_corrections(corrections: dict) -> tuple[list, bool]:
+def _mesh_materials(mesh_objects) -> dict:
+    """name -> material, one entry per distinct material actually used
+    across mesh_objects (a material can be shared by several objects;
+    each is only ever processed once).
+    """
+    materials = {}
+    for obj in mesh_objects:
+        for material in obj.data.materials:
+            if material is not None and material.name not in materials:
+                materials[material.name] = material
+    return materials
+
+
+def _material_has_any_image_texture(material) -> bool:
+    if not material.use_nodes:
+        return False
+    return any(node.type == "TEX_IMAGE" for node in material.node_tree.nodes)
+
+
+def _assign_base_color_texture(material, texture_path: Path) -> bool:
+    if not material.use_nodes:
+        material.use_nodes = True
+    bsdf = material.node_tree.nodes.get("Principled BSDF")
+    if bsdf is None:
+        return False
+    image = bpy.data.images.load(str(texture_path))
+    tex_node = material.node_tree.nodes.new("ShaderNodeTexImage")
+    tex_node.image = image
+    material.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+    return True
+
+
+def _apply_texture_overrides(mesh_objects, pack_root: Path, overrides: dict) -> tuple[list[str], set[str]]:
+    """Explicit material_name -> texture-path (relative to pack_root)
+    overrides, applied before any automatic matching -- lets a user
+    manually point at the right texture when the naming-convention
+    matcher can't find one on its own. Returns (notes, handled_material_
+    names); the caller skips both automatic passes for any name in the
+    second set, whether or not applying it actually succeeded, so a
+    materials with an override entry is never also second-guessed by the
+    automatic matcher.
+    """
+    if not overrides:
+        return [], set()
+    materials = _mesh_materials(mesh_objects)
+    notes = []
+    handled = set()
+    for material_name, relative_path in overrides.items():
+        material = materials.get(material_name)
+        if material is None:
+            continue
+        handled.add(material_name)
+        if not relative_path:
+            continue
+        texture_path = pack_root / relative_path
+        if not texture_path.is_file():
+            continue
+        if _assign_base_color_texture(material, texture_path):
+            notes.append(f"'{material_name}' -> {texture_path.name} (manual override)")
+    return notes, handled
+
+
+def _relink_broken_images(broken_images, pack_root: Path) -> list[str]:
+    """Attempts to fix each broken image by finding a file with the exact
+    same basename anywhere else in the pack -- the common real-world
+    cause of a broken reference is an absolute path baked in from the
+    original author's own machine at export time, and the actual file is
+    often still present in the pack, just not at that exact path
+    (confirmed against a real downloaded pack). Returns a human-readable
+    note per image successfully relinked.
+    """
+    notes = []
+    for image in broken_images:
+        basename = Path(image.filepath).name
+        found = texture_matching.find_file_by_basename(basename, pack_root)
+        if found is None:
+            continue
+        image.filepath = str(found)
+        image.reload()
+        if tuple(image.size) != (0, 0):
+            notes.append(f"relinked {basename}")
+    return notes
+
+
+def _inject_missing_textures(mesh_objects, pack_root: Path, skip_materials: set[str]) -> list[str]:
+    """For any material with no image texture node at all (never had one,
+    not just broken), searches the pack for a texture file whose name
+    matches the material's own name by convention (see
+    texture_matching.find_texture_match) and wires it into Base Color if
+    found. Never touches a material that already has any image texture
+    node, working or broken -- this only ever fills in something that was
+    completely absent, confirmed against a real pack where most modular-
+    kit material names corresponded exactly to a texture file the source
+    FBX just never referenced, sitting right alongside dozens of other,
+    unrelated material names (character/plant/prop parts) that legitimately
+    have no texture counterpart at all and are correctly left untouched.
+    """
+    texture_files = texture_matching.find_image_files(pack_root)
+    if not texture_files:
+        return []
+
+    notes = []
+    for name, material in _mesh_materials(mesh_objects).items():
+        if name in skip_materials or _material_has_any_image_texture(material):
+            continue
+        match = texture_matching.find_texture_match(name, texture_files)
+        if match is None:
+            continue
+        if _assign_base_color_texture(material, match):
+            notes.append(f"'{name}' -> {match.name}")
+    return notes
+
+
+def apply_corrections(corrections: dict, pack_root: Path | None = None) -> tuple[list, bool, list[str]]:
     """Applies pack-level corrections to whatever was just imported (every
     object that isn't Camera/Light -- those only exist in the thumbnail
     script's scene, harmless to exclude by name here regardless). Returns
-    (mesh_objects, has_broken_texture) -- the mesh objects for the caller's
-    next step (framing for a render, or nothing special for an export),
-    and whether ANY of them references an image that failed to load,
-    checked unconditionally (not gated behind broken_texture_fallback)
-    since a caller needs to know this regardless of whether the fallback
-    correction is actually turned on, to report it back to the user.
+    (mesh_objects, has_broken_texture, smart_texture_notes):
+    - mesh_objects, for the caller's next step (framing for a render, or
+      nothing special for an export).
+    - has_broken_texture: whether ANY mesh still references an image that
+      failed to load, checked unconditionally (not gated behind
+      broken_texture_fallback) since a caller needs to know this
+      regardless of whether that fallback correction is turned on, to
+      report it back to the user.
+    - smart_texture_notes: one human-readable line per texture manually
+      overridden, auto-relinked, or auto-matched by name -- see
+      _apply_texture_overrides / _relink_broken_images /
+      _inject_missing_textures. Always attempted when pack_root is given,
+      unless disable_smart_texture_matching is set (an explicit, easy
+      rollback switch for a pack where an automatic match turned out
+      wrong) -- manual overrides still apply even then, since those are
+      the user's own explicit instruction, not a guess.
     """
     imported = [obj for obj in bpy.data.objects if obj.name not in ("Camera", "Light")]
 
@@ -132,8 +259,20 @@ def apply_corrections(corrections: dict) -> tuple[list, bool]:
                 obj.data.materials.clear()
                 obj.data.materials.append(material)
 
-    broken_images = set(find_broken_texture_images())
     mesh_objects = [obj for obj in imported if obj.type == "MESH"]
+    smart_texture_notes: list[str] = []
+
+    if pack_root is not None:
+        override_notes, handled_materials = _apply_texture_overrides(
+            mesh_objects, pack_root, corrections.get("texture_overrides") or {}
+        )
+        smart_texture_notes.extend(override_notes)
+
+        if not corrections.get("disable_smart_texture_matching"):
+            smart_texture_notes.extend(_relink_broken_images(set(find_broken_texture_images()), pack_root))
+            smart_texture_notes.extend(_inject_missing_textures(mesh_objects, pack_root, handled_materials))
+
+    broken_images = set(find_broken_texture_images())  # recomputed -- a relink above may have fixed some
     has_broken_texture = any(_mesh_uses_any_image(obj, broken_images) for obj in mesh_objects)
 
     if has_broken_texture and corrections.get("broken_texture_fallback"):
@@ -151,4 +290,4 @@ def apply_corrections(corrections: dict) -> tuple[list, bool]:
                 obj.data.materials.append(material)
 
     bpy.context.view_layer.update()
-    return mesh_objects, has_broken_texture
+    return mesh_objects, has_broken_texture, smart_texture_notes

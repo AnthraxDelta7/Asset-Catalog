@@ -99,6 +99,7 @@ class IngestStats:
     models_pending: int = 0
     preview_asset_id: int | None = None
     broken_texture_filenames: list[str] = field(default_factory=list)
+    smart_texture_notes: list[str] = field(default_factory=list)
 
 
 def get_or_create_pack(

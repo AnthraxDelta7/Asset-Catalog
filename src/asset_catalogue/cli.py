@@ -73,6 +73,18 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f'  asset-catalogue pack set-corrections "{pack_name}" --broken-texture-fallback '
             "replaces just those with a flat gray instead of rendering them pink/wrong."
         )
+    if stats.smart_texture_notes:
+        shown = stats.smart_texture_notes[:5]
+        remainder = len(stats.smart_texture_notes) - len(shown)
+        print(f"  Auto-matched {len(stats.smart_texture_notes)} texture(s) by name:")
+        for note in shown:
+            print(f"    - {note}")
+        if remainder > 0:
+            print(f"    - and {remainder} more")
+        print(
+            f'  asset-catalogue pack set-corrections "{pack_name}" '
+            "--disable-smart-texture-matching turns this off for this pack if a match looks wrong."
+        )
 
 
 def _auto_generate_thumbnails(
@@ -564,11 +576,24 @@ def cmd_pack_set_corrections(args: argparse.Namespace) -> None:
         corrections["material_fallback"] = args.material_fallback
     if args.broken_texture_fallback is not None:
         corrections["broken_texture_fallback"] = args.broken_texture_fallback
+    if args.disable_smart_texture_matching is not None:
+        corrections["disable_smart_texture_matching"] = args.disable_smart_texture_matching
+    if args.texture_override:
+        overrides = dict(corrections.get("texture_overrides") or {})
+        for entry in args.texture_override:
+            if "=" not in entry:
+                raise SystemExit(f"--texture-override must be MATERIAL=PATH, got: {entry!r}")
+            material_name, relative_path = entry.split("=", 1)
+            overrides[material_name] = relative_path
+        corrections["texture_overrides"] = overrides
+    if args.clear_texture_overrides:
+        corrections["texture_overrides"] = {}
 
     if not corrections:
         raise SystemExit(
             "No corrections given. Pass --up-axis, --scale, --material-fallback, "
-            "or --broken-texture-fallback."
+            "--broken-texture-fallback, --disable-smart-texture-matching, or "
+            "--texture-override."
         )
 
     packs.set_corrections(conn, pack_id, corrections)
@@ -1144,6 +1169,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Replace only meshes whose texture failed to load with a flat gray fallback "
         "(unlike --material-fallback, leaves everything else in the pack untouched)",
+    )
+    set_corrections_parser.add_argument(
+        "--disable-smart-texture-matching",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Turn off this pack's automatic texture relinking/matching-by-name (on by "
+        "default) -- an easy rollback if an automatic match ever looks wrong. Manual "
+        "--texture-override entries still apply even with this set",
+    )
+    set_corrections_parser.add_argument(
+        "--texture-override",
+        action="append",
+        metavar="MATERIAL=PATH",
+        help="Repeatable; manually pin a material name to a specific texture file, given as "
+        "a path relative to the pack's own staging folder -- takes priority over automatic "
+        "matching for that material",
+    )
+    set_corrections_parser.add_argument(
+        "--clear-texture-overrides",
+        action="store_true",
+        help="Remove all manual texture overrides for this pack, keeping other corrections",
     )
     set_corrections_parser.add_argument(
         "--clear", action="store_true", help="Remove all corrections for this pack"

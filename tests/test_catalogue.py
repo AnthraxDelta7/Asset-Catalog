@@ -56,6 +56,7 @@ def test_get_asset_and_get_pack_detail(catalogue_with_asset: tuple[Catalogue, in
     assert detail is not None
     assert detail.creator == "Creator"
     assert detail.licence == "MIT"
+    assert detail.pack_folder == "Pack"
     assert detail.asset_count == 1
     assert catalogue.get_pack_detail("Nonexistent") is None
 

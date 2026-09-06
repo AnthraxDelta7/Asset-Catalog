@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -832,6 +833,30 @@ def _format_broken_texture_note(filenames: list[str]) -> str:
     )
 
 
+def _format_smart_texture_note(notes: list[str]) -> str:
+    """Appended to an ingest completion message whenever the automatic
+    texture matcher actually did something -- relinked a broken absolute-
+    path reference to a same-named file found elsewhere in the pack, or
+    wired a same-named texture into a material that had none at all.
+    Always surfaced, since this runs by default: an automatic match should
+    never be a silent change, even though it usually improves the result
+    (verified against a real pack). 'Disable smart texture matching' (Edit
+    Pack Metadata) turns this off per pack if a match ever looks wrong.
+    """
+    if not notes:
+        return ""
+    shown = notes[:5]
+    remainder = len(notes) - len(shown)
+    lines = "\n".join(f"  - {note}" for note in shown)
+    if remainder:
+        lines += f"\n  - and {remainder} more"
+    return (
+        f"\n\nAuto-matched {len(notes)} texture(s) by name to a file found elsewhere in the "
+        f"pack:\n{lines}\nTurn off 'Smart texture matching' (Edit Pack Metadata) for this pack "
+        "if a match looks wrong, or set a manual texture override for just that material."
+    )
+
+
 def _browse_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
     row = QHBoxLayout()
     button = QPushButton("Browse...")
@@ -1613,10 +1638,18 @@ class CorrectionsFormWidget(QWidget):
     """The up_axis/scale/material_fallback render-correction fields, shared
     by PackEditDialog and the post-ingest calibration review dialog so both
     edit the exact same fields the same way.
+
+    pack_root (the pack's own staging folder, when known) enables the
+    manual texture-override picker's Browse button to compute a path
+    relative to the pack itself, and to reject a file picked from outside
+    it -- an override is only meaningful as "a texture that's part of this
+    pack," the same assumption the automatic matcher makes.
     """
 
-    def __init__(self, initial: dict, parent: QWidget | None = None) -> None:
+    def __init__(self, initial: dict, pack_root: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._pack_root = pack_root
+        self._texture_overrides: dict[str, str] = dict(initial.get("texture_overrides") or {})
         form = QFormLayout(self)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -1649,6 +1682,79 @@ class CorrectionsFormWidget(QWidget):
         )
         form.addRow("", self.broken_texture_fallback_check)
 
+        self.disable_smart_matching_check = QCheckBox("Disable smart texture matching")
+        self.disable_smart_matching_check.setChecked(bool(initial.get("disable_smart_texture_matching")))
+        self.disable_smart_matching_check.setToolTip(
+            "Turns off this pack's automatic texture relinking/matching-by-name entirely "
+            "(on by default) -- an easy rollback if an automatic match ever looks wrong. "
+            "Manual overrides below still apply even with this checked."
+        )
+        form.addRow("", self.disable_smart_matching_check)
+
+        form.addRow(QLabel("Manual texture overrides (material name -> texture file):"))
+        self.overrides_list = QListWidget()
+        self.overrides_list.setMaximumHeight(90)
+        self._refresh_overrides_list()
+        form.addRow(self.overrides_list)
+
+        overrides_buttons = QHBoxLayout()
+        add_override_button = QPushButton("Add...")
+        add_override_button.clicked.connect(self._add_texture_override)
+        remove_override_button = QPushButton("Remove Selected")
+        remove_override_button.clicked.connect(self._remove_selected_override)
+        overrides_buttons.addWidget(add_override_button)
+        overrides_buttons.addWidget(remove_override_button)
+        form.addRow("", overrides_buttons)
+
+    def _refresh_overrides_list(self) -> None:
+        self.overrides_list.clear()
+        for material_name, relative_path in sorted(self._texture_overrides.items()):
+            self.overrides_list.addItem(f"{material_name} -> {relative_path}")
+
+    def _add_texture_override(self) -> None:
+        material_name, ok = QInputDialog.getText(
+            self, "Texture Override", "Material name (exact, case-sensitive):"
+        )
+        if not ok or not material_name.strip():
+            return
+        material_name = material_name.strip()
+
+        start_dir = str(self._pack_root) if self._pack_root is not None else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select texture file", start_dir, "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All files (*)"
+        )
+        if not file_path:
+            return
+
+        if self._pack_root is not None:
+            try:
+                relative_path = str(Path(file_path).resolve().relative_to(self._pack_root.resolve()))
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "Texture Override",
+                    "That file isn't inside this pack's staging folder -- pick a texture "
+                    "that's actually part of the pack.",
+                )
+                return
+        else:
+            # No known pack root (shouldn't normally happen -- a pack
+            # always has a staging folder by the time it can be edited) --
+            # fall back to storing the path as given rather than blocking
+            # the feature outright.
+            relative_path = file_path
+
+        self._texture_overrides[material_name] = relative_path
+        self._refresh_overrides_list()
+
+    def _remove_selected_override(self) -> None:
+        item = self.overrides_list.currentItem()
+        if item is None:
+            return
+        material_name = item.text().split(" -> ", 1)[0]
+        self._texture_overrides.pop(material_name, None)
+        self._refresh_overrides_list()
+
     def read(self) -> tuple[dict | None, str | None]:
         """Returns (corrections, error) -- corrections is None and error is
         a human-readable message if the scale field doesn't parse.
@@ -1669,6 +1775,8 @@ class CorrectionsFormWidget(QWidget):
             corrections["scale"] = scale_value
         corrections["material_fallback"] = self.material_fallback_check.isChecked()
         corrections["broken_texture_fallback"] = self.broken_texture_fallback_check.isChecked()
+        corrections["disable_smart_texture_matching"] = self.disable_smart_matching_check.isChecked()
+        corrections["texture_overrides"] = dict(self._texture_overrides)
         return corrections, None
 
 
@@ -1682,10 +1790,12 @@ class PackEditDialog(QDialog):
     semantics as the other fields.
     """
 
-    def __init__(self, detail: PackDetail, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, detail: PackDetail, pack_root: Path | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Edit Pack -- {detail.name}")
-        self.resize(420, 320)
+        self.resize(420, 380)
         self._pack_id = detail.id
 
         self.new_name: str = detail.name
@@ -1729,7 +1839,7 @@ class PackEditDialog(QDialog):
         corrections_label.setWordWrap(True)
         layout.addWidget(corrections_label)
 
-        self.corrections_widget = CorrectionsFormWidget(detail.corrections)
+        self.corrections_widget = CorrectionsFormWidget(detail.corrections, pack_root)
         layout.addWidget(self.corrections_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2149,7 +2259,12 @@ class CalibrationReviewDialog(QDialog):
         layout.addWidget(self._preview_label)
         self._reload_preview()
 
-        self.corrections_widget = CorrectionsFormWidget(corrections)
+        staging_folder = catalogue.staging_folder()
+        detail = catalogue.get_pack_detail(pack_name)
+        pack_root = (
+            staging_folder / detail.pack_folder if staging_folder is not None and detail is not None else None
+        )
+        self.corrections_widget = CorrectionsFormWidget(corrections, pack_root)
         layout.addWidget(self.corrections_widget)
 
         self._rerender_button = QPushButton("Re-render Preview")
@@ -3052,6 +3167,7 @@ class MainWindow(QMainWindow):
             if stats.blender_unavailable_reason:
                 message += f"\n3D thumbnails skipped: {stats.blender_unavailable_reason}"
             message += _format_broken_texture_note(stats.broken_texture_filenames)
+            message += _format_smart_texture_note(stats.smart_texture_notes)
             return message
 
         def on_complete(result: tuple) -> None:
@@ -3093,6 +3209,9 @@ class MainWindow(QMainWindow):
             all_broken_texture_filenames = [
                 filename for _, stats, _ in results for filename in stats.broken_texture_filenames
             ]
+            all_smart_texture_notes = [
+                note for _, stats, _ in results for note in stats.smart_texture_notes
+            ]
             lines = [
                 f"Ingested {len(results)} pack(s): {total_new} new, {total_duplicate} "
                 f"duplicate, {total_scanned} scanned, {total_archived} archived",
@@ -3106,7 +3225,11 @@ class MainWindow(QMainWindow):
                 if stats.blender_unavailable_reason:
                     line += " -- 3D thumbnails skipped"
                 lines.append(line)
-            return "\n".join(lines) + _format_broken_texture_note(all_broken_texture_filenames)
+            return (
+                "\n".join(lines)
+                + _format_broken_texture_note(all_broken_texture_filenames)
+                + _format_smart_texture_note(all_smart_texture_notes)
+            )
 
         def on_complete(results: list) -> None:
             for pack_name, stats, _updated_fields in results:
@@ -3976,7 +4099,9 @@ class MainWindow(QMainWindow):
         detail = self._catalogue.get_pack_detail(pack_name)
         if detail is None:
             return
-        dialog = PackEditDialog(detail, self)
+        staging_folder = self._catalogue.staging_folder()
+        pack_root = staging_folder / detail.pack_folder if staging_folder is not None else None
+        dialog = PackEditDialog(detail, pack_root, self)
         if dialog.exec() != QDialog.Accepted:
             return
 

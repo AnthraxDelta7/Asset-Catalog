@@ -9,6 +9,7 @@ a = Analysis(
         ('src/asset_catalogue/blender_thumbnail_script.py', 'asset_catalogue'),
         ('src/asset_catalogue/blender_convert_script.py', 'asset_catalogue'),
         ('src/asset_catalogue/blender_common.py', 'asset_catalogue'),
+        ('src/asset_catalogue/texture_matching.py', 'asset_catalogue'),
         ('src/asset_catalogue/godot_export_script.gd', 'asset_catalogue'),
         ('src/asset_catalogue/app_icon.png', 'asset_catalogue'),
     ],

@@ -55,6 +55,7 @@ class TagSummary:
 class PackDetail:
     id: int
     name: str
+    pack_folder: str
     creator: str | None
     licence: str | None
     source_url: str | None
@@ -141,7 +142,7 @@ class Catalogue:
 
     def get_pack_detail(self, pack_name: str) -> PackDetail | None:
         row = self._conn.execute(
-            "SELECT id, name, creator, licence, source_url, corrections, notes, rating "
+            "SELECT id, name, pack_folder, creator, licence, source_url, corrections, notes, rating "
             "FROM packs WHERE name = ?",
             (pack_name,),
         ).fetchone()
@@ -154,6 +155,7 @@ class Catalogue:
         return PackDetail(
             id=row["id"],
             name=row["name"],
+            pack_folder=row["pack_folder"],
             creator=row["creator"],
             licence=row["licence"],
             source_url=row["source_url"],
@@ -495,6 +497,7 @@ class Catalogue:
         stats.models_pending = thumb_stats.models_pending
         stats.preview_asset_id = thumb_stats.preview_asset_id
         stats.broken_texture_filenames = thumb_stats.broken_texture_filenames
+        stats.smart_texture_notes = thumb_stats.smart_texture_notes
 
     def remove_assets_bg(
         self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
