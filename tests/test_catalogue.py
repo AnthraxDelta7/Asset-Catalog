@@ -43,6 +43,21 @@ def test_list_assets_applies_filters(catalogue_with_asset: tuple[Catalogue, int]
     assert len(catalogue.list_assets(search="nomatch")) == 0
 
 
+def test_list_assets_needs_conversion_only_filter(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, asset_id = catalogue_with_asset
+    assert catalogue.list_assets(needs_conversion_only=True) == []
+
+    catalogue._conn.execute("UPDATE assets SET needs_glb_conversion = 1 WHERE id = ?", (asset_id,))
+    catalogue._conn.commit()
+
+    flagged = catalogue.list_assets(needs_conversion_only=True)
+    assert len(flagged) == 1
+    assert flagged[0].id == asset_id
+    assert flagged[0].needs_glb_conversion is True
+    # The flag doesn't hide the asset from the normal, unfiltered listing.
+    assert len(catalogue.list_assets()) == 1
+
+
 def test_get_asset_and_get_pack_detail(catalogue_with_asset: tuple[Catalogue, int]) -> None:
     catalogue, asset_id = catalogue_with_asset
     asset = catalogue.get_asset(asset_id)

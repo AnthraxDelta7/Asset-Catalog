@@ -94,7 +94,8 @@ def _apply_successful_conversion(
     new_hash = ingest.hash_file(output_path)
     conn.execute(
         "UPDATE assets SET relative_path = ?, filename = ?, extension = '.glb', "
-        "content_hash = ?, file_size = ?, thumbnail_status = 'pending' WHERE id = ?",
+        "content_hash = ?, file_size = ?, thumbnail_status = 'pending', "
+        "needs_glb_conversion = 0 WHERE id = ?",
         (
             new_relative_path,
             Path(new_relative_path).name,

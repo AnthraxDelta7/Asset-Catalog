@@ -38,6 +38,44 @@ def test_build_conversion_job_includes_pack_root(conn: sqlite3.Connection, stagi
     assert output_path == pack_root / "model.glb"
 
 
+def test_apply_successful_conversion_clears_needs_glb_conversion(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    """needs_glb_conversion is set by blender_render.py whenever a non-.glb
+    asset's last render needed a texture fix that lives only in the
+    render, not the file -- once conversion.py actually bakes that fix
+    into a real .glb, the flag needs to come back down, or the asset would
+    still show up in "Convert All Flagged" (and the ⚠ grid badge) after
+    there's nothing left to fix.
+    """
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    original = pack_root / "model.fbx"
+    original.write_bytes(b"original fbx bytes")
+    original_hash = ingest.hash_file(original)
+    cursor = conn.execute(
+        "INSERT INTO assets (pack_id, relative_path, filename, extension, file_size, "
+        "content_hash, asset_type, needs_glb_conversion) "
+        "VALUES (?, 'model.fbx', 'model.fbx', '.fbx', ?, ?, 'model', 1)",
+        (pack_id, original.stat().st_size, original_hash),
+    )
+    asset_id = cursor.lastrowid
+    conn.commit()
+
+    output_path = pack_root / "model.glb"
+    output_path.write_bytes(b"fake converted glb bytes")
+    row = conversion._resolve_conversion_row(conn, asset_id)
+
+    conversion._apply_successful_conversion(
+        conn, staging_folder, assets_dir, asset_id, row, "model.glb", output_path
+    )
+
+    updated = conn.execute("SELECT needs_glb_conversion, extension FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    assert updated["needs_glb_conversion"] == 0
+    assert updated["extension"] == ".glb"
+
+
 def _make_asset_with_pending_conversion(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path) -> int:
     """Seeds an asset that looks like it's mid-conversion: its DB row
     already points at the (fake) converted .glb, and a pending_conversions

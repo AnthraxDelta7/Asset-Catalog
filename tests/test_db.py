@@ -61,3 +61,29 @@ def test_connect_migrates_legacy_imports_table_preserving_rows(tmp_path: Path) -
     conn2 = db.connect(db_path)
     assert conn2.execute("SELECT COUNT(*) FROM exports").fetchone()[0] == 1
     conn2.close()
+
+
+def test_connect_adds_needs_glb_conversion_to_a_legacy_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy_no_column.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(
+        """
+        CREATE TABLE packs (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+            pack_folder TEXT NOT NULL, creator TEXT, licence TEXT, source_url TEXT,
+            date_added TEXT NOT NULL, corrections TEXT);
+        CREATE TABLE assets (id INTEGER PRIMARY KEY, pack_id INTEGER NOT NULL,
+            relative_path TEXT NOT NULL, filename TEXT NOT NULL, extension TEXT NOT NULL,
+            file_size INTEGER NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+            asset_type TEXT NOT NULL, thumbnail_status TEXT NOT NULL DEFAULT 'pending');
+        INSERT INTO packs (id, name, pack_folder, date_added) VALUES (1, 'P', 'P', '2020-01-01');
+        INSERT INTO assets (id, pack_id, relative_path, filename, extension, file_size, content_hash, asset_type)
+            VALUES (1, 1, 'a.fbx', 'a.fbx', '.fbx', 10, 'hash1', 'model');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    conn = db.connect(db_path)
+    row = conn.execute("SELECT needs_glb_conversion FROM assets WHERE id = 1").fetchone()
+    assert row["needs_glb_conversion"] == 0
+    conn.close()

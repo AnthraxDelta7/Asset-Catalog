@@ -484,6 +484,63 @@ def cmd_convert_to_gltf(args: argparse.Namespace) -> None:
         print(f"  {error_message}")
 
 
+def cmd_convert_flagged(args: argparse.Namespace) -> None:
+    """The bulk counterpart to `ingest`/`thumbnail generate-models` flagging
+    an asset by name in their own output: every asset library-wide whose
+    last render only looked right because of a texture fix living in the
+    render, not the file itself -- see db.py's needs_glb_conversion column.
+    """
+    s = settings.load()
+    if not s.staging_folder:
+        raise SystemExit(
+            "No staging folder configured. Run: "
+            "asset-catalogue settings set --staging-folder <path>"
+        )
+    blender_exe, error = blender_render.resolve_blender(s.blender_path)
+    if blender_exe is None:
+        raise SystemExit(error)
+
+    conn = _connect()
+    asset_ids = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM assets WHERE needs_glb_conversion = 1 AND deleted_at IS NULL"
+        )
+    ]
+    if not asset_ids:
+        print("No assets currently need conversion.")
+        return
+
+    print(f"About to convert {len(asset_ids)} asset(s) to .glb: {asset_ids}")
+    if not args.yes:
+        answer = input("Continue? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    result = conversion.convert_assets_to_gltf(
+        conn, Path(s.staging_folder), s.assets_dir(), blender_exe, asset_ids
+    )
+    if result.converted_asset_ids:
+        blender_render.generate_model_thumbnails(
+            conn,
+            Path(s.staging_folder),
+            s.thumbnail_dir(),
+            blender_exe,
+            asset_ids=result.converted_asset_ids,
+        )
+    print(
+        f"Converted {result.converted}, skipped {result.skipped} (not a model, or already "
+        f".glb), failed {result.failed}"
+    )
+    for error_message in result.errors:
+        print(f"  {error_message}")
+    if result.smart_texture_notes:
+        print(f"Auto-matched {len(result.smart_texture_notes)} texture(s) by name:")
+        for note in result.smart_texture_notes:
+            print(f"  - {note}")
+
+
 def cmd_convert_revert(args: argparse.Namespace) -> None:
     s = settings.load()
     if not s.staging_folder:
@@ -1116,6 +1173,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repeatable; assets that aren't models or are already .glb are skipped",
     )
     convert_to_gltf_parser.set_defaults(func=cmd_convert_to_gltf)
+
+    convert_flagged_parser = convert_sub.add_parser(
+        "flagged",
+        help="Convert every asset library-wide flagged as needing conversion "
+        "(a texture fix that only lives in the render, not the file)",
+    )
+    convert_flagged_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt"
+    )
+    convert_flagged_parser.set_defaults(func=cmd_convert_flagged)
 
     convert_revert_parser = convert_sub.add_parser(
         "revert", help="Undo a conversion, restoring the pre-conversion original"

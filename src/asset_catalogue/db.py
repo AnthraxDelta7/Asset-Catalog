@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS assets (
     asset_type TEXT NOT NULL,
     thumbnail_status TEXT NOT NULL DEFAULT 'pending',
     favorite INTEGER NOT NULL DEFAULT 0,
-    deleted_at TEXT
+    deleted_at TEXT,
+    needs_glb_conversion INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -120,6 +121,14 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     _ensure_column(conn, "packs", "rating", "rating INTEGER")
     _ensure_column(conn, "assets", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "assets", "deleted_at", "deleted_at TEXT")
+    # Set/cleared by blender_render.generate_model_thumbnails whenever a
+    # non-.glb model's last render needed smart texture matching to look
+    # right (a broken reference relinked, or a bare material matched to a
+    # texture by name) -- that fix lives only in the ephemeral render, not
+    # in the asset's own file, until Convert to glTF bakes it in for real.
+    # See conversion.py's _apply_successful_conversion, which clears this
+    # back to 0 the moment a conversion actually happens.
+    _ensure_column(conn, "assets", "needs_glb_conversion", "needs_glb_conversion INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     return conn

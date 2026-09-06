@@ -40,6 +40,7 @@ class AssetSummary:
     pack_rating: int | None = None
     pack_notes: str | None = None
     deleted_at: str | None = None
+    needs_glb_conversion: bool = False
     tags: list[str] = field(default_factory=list)
 
 
@@ -168,8 +169,8 @@ class Catalogue:
     _ASSET_SUMMARY_COLUMNS = (
         "assets.id, assets.filename, assets.asset_type, "
         "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
-        "assets.favorite, assets.deleted_at, packs.name AS pack_name, "
-        "packs.rating AS pack_rating, packs.notes AS pack_notes"
+        "assets.favorite, assets.deleted_at, assets.needs_glb_conversion, "
+        "packs.name AS pack_name, packs.rating AS pack_rating, packs.notes AS pack_notes"
     )
 
     def _row_to_asset_summary(self, row: sqlite3.Row) -> AssetSummary:
@@ -185,6 +186,7 @@ class Catalogue:
             pack_rating=row["pack_rating"],
             pack_notes=row["pack_notes"],
             deleted_at=row["deleted_at"],
+            needs_glb_conversion=bool(row["needs_glb_conversion"]),
             tags=self.get_asset_tags(row["id"]),
         )
 
@@ -196,6 +198,7 @@ class Catalogue:
         extension: str | None = None,
         search: str | None = None,
         favorites_only: bool = False,
+        needs_conversion_only: bool = False,
     ) -> list[AssetSummary]:
         query = (
             f"SELECT {self._ASSET_SUMMARY_COLUMNS} "
@@ -223,6 +226,8 @@ class Catalogue:
             params.append(extension)
         if favorites_only:
             clauses.append("assets.favorite = 1")
+        if needs_conversion_only:
+            clauses.append("assets.needs_glb_conversion = 1")
         if search:
             # Escape LIKE's own wildcards so a filename that happens to
             # contain a literal "%" or "_" is matched literally, not

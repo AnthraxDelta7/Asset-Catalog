@@ -195,6 +195,7 @@ def generate_model_thumbnails(
         return stats
 
     filenames_by_id = {job["asset_id"]: job["filename"] for job in jobs}
+    extensions_by_id = {job["asset_id"]: job["extension"].lower() for job in jobs}
     report(
         f"Starting Blender to render {len(jobs)} model thumbnail"
         f"{'s' if len(jobs) != 1 else ''}..."
@@ -226,11 +227,13 @@ def generate_model_thumbnails(
         )
 
         seen_ids: set[int] = set()
+        smart_texture_asset_ids: set[int] = set()
         assert process.stdout is not None
         for line in process.stdout:
             line = line.strip()
             if line.startswith("ASSET_CATALOGUE_SMART_TEXTURE|"):
                 _, smart_asset_id_str, note = line.split("|", 2)
+                smart_texture_asset_ids.add(int(smart_asset_id_str))
                 filename = filenames_by_id.get(int(smart_asset_id_str), f"asset {smart_asset_id_str}")
                 stats.smart_texture_notes.append(f"{filename}: {note}")
                 report(f"  Texture match: {filename}: {note}")
@@ -246,8 +249,18 @@ def generate_model_thumbnails(
             asset_id = int(asset_id_str)
             seen_ids.add(asset_id)
             new_status = "done" if status == "ok" else "failed"
+            # An asset needs converting to .glb when this render only looks
+            # right because of a fix that lives in the ephemeral Blender
+            # scene, not the asset's own file -- a relinked/matched texture,
+            # or (still) a broken one. Meaningless for an asset that's
+            # already .glb (Convert refuses those anyway), and explicitly
+            # recomputed either way rather than only ever set, so a re-
+            # render that no longer needs a fix clears it back to 0.
+            already_glb = extensions_by_id.get(asset_id) == ".glb"
+            needs_conversion = (broken_texture or asset_id in smart_texture_asset_ids) and not already_glb
             conn.execute(
-                "UPDATE assets SET thumbnail_status = ? WHERE id = ?", (new_status, asset_id)
+                "UPDATE assets SET thumbnail_status = ?, needs_glb_conversion = ? WHERE id = ?",
+                (new_status, 1 if needs_conversion else 0, asset_id),
             )
             conn.commit()
             filename = filenames_by_id.get(asset_id, f"asset {asset_id}")

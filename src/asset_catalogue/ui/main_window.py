@@ -104,6 +104,14 @@ class FilterPanel(QWidget):
         self.favorites_checkbox.toggled.connect(self._on_change)
         layout.addWidget(self.favorites_checkbox)
 
+        self.needs_conversion_checkbox = QCheckBox("⚠ Needs conversion only")
+        self.needs_conversion_checkbox.setToolTip(
+            "A non-.glb model whose last render only looked right because of a texture fix "
+            "that lives in the render, not the file itself -- Convert to glTF bakes it in for real."
+        )
+        self.needs_conversion_checkbox.toggled.connect(self._on_change)
+        layout.addWidget(self.needs_conversion_checkbox)
+
         layout.addWidget(QLabel("Type"))
         self.type_combo = QComboBox()
         self.type_combo.addItem("All types", None)
@@ -154,6 +162,9 @@ class FilterPanel(QWidget):
 
     def favorites_only(self) -> bool:
         return self.favorites_checkbox.isChecked()
+
+    def needs_conversion_only(self) -> bool:
+        return self.needs_conversion_checkbox.isChecked()
 
     def selected_type(self) -> str | None:
         return self.type_combo.currentData()
@@ -285,11 +296,22 @@ class ThumbnailGrid(QListWidget):
         self.blockSignals(True)
         self.clear()
         for asset in assets:
-            label = f"★ {asset.filename}" if asset.favorite else asset.filename
+            badges = ""
+            if asset.favorite:
+                badges += "★"
+            if asset.needs_glb_conversion:
+                badges += "⚠"
+            label = f"{badges} {asset.filename}" if badges else asset.filename
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, asset.id)
             item.setIcon(QIcon(self._load_thumbnail(asset, catalogue)))
-            item.setToolTip(f"{asset.pack_name} / {asset.filename}\n{asset.asset_type}")
+            tooltip = f"{asset.pack_name} / {asset.filename}\n{asset.asset_type}"
+            if asset.needs_glb_conversion:
+                tooltip += (
+                    "\n⚠ Needs conversion to .glb -- a texture fix on this asset only "
+                    "lives in the render, not the file itself, until converted"
+                )
+            item.setToolTip(tooltip)
             item.setSizeHint(GRID_CELL_SIZE)
             self.addItem(item)
         self.blockSignals(False)
@@ -2990,6 +3012,8 @@ class MainWindow(QMainWindow):
         tools_menu = menu_bar.addMenu("&Tools")
         convert_action = tools_menu.addAction("Convert Selected to glTF (.glb)...")
         convert_action.triggered.connect(self._convert_selected_to_gltf)
+        convert_flagged_action = tools_menu.addAction("Convert All Flagged to glTF (.glb)...")
+        convert_flagged_action.triggered.connect(self._convert_all_flagged_to_gltf)
         export_action = tools_menu.addAction("Export Selected to Project...")
         export_action.triggered.connect(self._export_selected_to_project)
         tools_menu.addSeparator()
@@ -3546,6 +3570,31 @@ class MainWindow(QMainWindow):
             self._on_conversion_changed,
         )
 
+    def _convert_all_flagged_to_gltf(self) -> None:
+        """The bulk counterpart to the per-asset ⚠ badge: every asset across
+        the whole library (not just the current filter) whose last render
+        needed a texture fix that only lives in the render, not the file
+        itself -- see needs_glb_conversion. Reuses _convert_assets_to_gltf
+        wholesale once the id list is gathered; that's the exact same
+        conversion-plus-thumbnail-regen path "Convert Selected" already uses.
+        """
+        flagged = self._catalogue.list_assets(needs_conversion_only=True)
+        if not flagged:
+            QMessageBox.information(
+                self, "Asset Catalogue", "No assets currently need conversion."
+            )
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Convert All Flagged to glTF",
+            f"Convert {len(flagged)} asset(s) to .glb? Each pre-conversion original is kept "
+            "until you Revert or Delete it individually.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._convert_assets_to_gltf([asset.id for asset in flagged])
+
     def _handle_revert_conversion(self, asset_id: int) -> None:
         confirm = QMessageBox.question(
             self,
@@ -3837,6 +3886,7 @@ class MainWindow(QMainWindow):
             extension=self.filter_panel.selected_format(),
             search=self.filter_panel.selected_search(),
             favorites_only=self.filter_panel.favorites_only(),
+            needs_conversion_only=self.filter_panel.needs_conversion_only(),
         )
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)
