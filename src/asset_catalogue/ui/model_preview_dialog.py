@@ -370,11 +370,11 @@ class Model3DPreviewDialog(QDialog):
         self.view.opts["center"] = _to_vector3d(center)
         self.view.setCameraPosition(distance=radius * 3.0)
 
-        # A single-part asset has nothing meaningful to isolate -- the
-        # panel would just be a list with one item and nothing to compare
-        # it against, so it stays out of the way for the common case of a
-        # plain, ordinary asset with no collider/multi-part breakdown.
-        self.parts_panel.setVisible(len(self._part_rows) > 1 or bool(self._textures))
+        # Always shown, even for a single-part asset -- seeing "this file
+        # contains exactly one part, named X" is itself useful confirmation
+        # (that nothing else -- no separate collider, no hidden extra
+        # geometry -- is bundled in), not just something to isolate among
+        # several.
         self.textures_button.setVisible(bool(self._textures))
 
     def _on_part_item_changed(self, changed_item: QListWidgetItem) -> None:

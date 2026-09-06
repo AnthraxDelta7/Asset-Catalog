@@ -125,12 +125,29 @@ def find_godot_project_roots(search_root: Path) -> list[Path]:
 
 
 def find_scenes(project_root: Path) -> list[Path]:
-    """Every .tscn file in the project, in a stable order -- includes
-    non-mesh scenes (UI, autoloads, etc); export_scenes_to_glb skips those
-    after the fact once it can see the exported result has no geometry,
-    rather than trying to guess from the .tscn text upfront.
+    """Every scene file in the project, in a stable order -- both the
+    text-based .tscn format and Godot's equally-valid compressed-binary
+    .scn format (real packs use both; a marketplace pack converted from
+    another engine commonly ships .scn exclusively, confirmed against a
+    real Synty POLYGON pack where a .tscn-only search silently found
+    nothing to export at all). Includes non-mesh scenes (UI, autoloads,
+    etc); export_scenes_to_glb skips those after the fact once it can see
+    the exported result has no geometry, rather than trying to guess from
+    the scene's own content upfront.
+
+    Excludes anything under a .godot/ folder -- Godot's own editor re-
+    import cache, which mirrors every real .scn/.tscn (and every raw
+    imported mesh) as its own auto-generated, hash-named .scn under
+    .godot/imported/. Confirmed against the same real pack above: 200 of
+    305 "scenes" a naive rglob found were exactly this cache, not real
+    content -- indistinguishable from genuine scenes by extension alone,
+    only by living under .godot/.
     """
-    return sorted(project_root.rglob("*.tscn"))
+    tscn_files = project_root.rglob("*.tscn")
+    scn_files = project_root.rglob("*.scn")
+    return sorted(
+        path for path in list(tscn_files) + list(scn_files) if ".godot" not in path.relative_to(project_root).parts
+    )
 
 
 @dataclass

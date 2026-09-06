@@ -32,6 +32,31 @@ def test_find_scenes_finds_tscn_files_recursively(tmp_path: Path) -> None:
     assert set(scenes) == {tmp_path / "main.tscn", sub / "level1.tscn"}
 
 
+def test_find_scenes_also_finds_binary_scn_files(tmp_path: Path) -> None:
+    """A marketplace pack converted from another engine commonly ships
+    Godot's compressed-binary .scn format exclusively, with no .tscn at
+    all -- confirmed against a real Synty POLYGON pack where a .tscn-only
+    search silently found nothing to export.
+    """
+    (tmp_path / "prefab.scn").write_bytes(b"RSCC")
+    scenes = godot_export.find_scenes(tmp_path)
+    assert scenes == [tmp_path / "prefab.scn"]
+
+
+def test_find_scenes_excludes_the_godot_reimport_cache(tmp_path: Path) -> None:
+    """.godot/imported/ mirrors every real scene as its own auto-generated,
+    hash-named .scn -- not real content. Confirmed against the same real
+    pack: 200 of 305 files a naive rglob found were exactly this cache.
+    """
+    (tmp_path / "real.tscn").write_text("")
+    cache_dir = tmp_path / ".godot" / "imported"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "SomeAsset.gltf-abc123.scn").write_bytes(b"RSCC")
+
+    scenes = godot_export.find_scenes(tmp_path)
+    assert scenes == [tmp_path / "real.tscn"]
+
+
 def test_has_real_geometry_true_for_a_real_mesh(tmp_path: Path) -> None:
     import trimesh
 

@@ -91,15 +91,14 @@ def test_hide_likely_colliders_only_affects_flagged_parts(qapp) -> None:
     assert collider_row[0].checkState() == Qt.Checked
 
 
-def test_single_part_asset_hides_the_parts_panel(qapp) -> None:
-    """Nothing to isolate in a one-part asset -- the panel stays out of
-    the way, same as the dialog looked before this feature existed.
+def test_single_part_asset_still_shows_the_parts_panel(qapp) -> None:
+    """Seeing "this file contains exactly one part, named X" is itself
+    useful confirmation that nothing else is bundled in -- the panel isn't
+    gated on there being more than one part to compare.
     """
     from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
 
     dialog = Model3DPreviewDialog("plain.glb", [_make_part("MainMesh", is_collider=False)])
-    # isHidden() (not isVisible()) since the dialog is never actually shown
-    # in this test -- isVisible() is always False for an unshown widget
-    # regardless of its own explicit visibility flag, which would make
-    # this assertion pass trivially even if the panel-hiding logic broke.
-    assert dialog.parts_panel.isHidden() is True
+    assert dialog.parts_panel.isHidden() is False
+    assert dialog.parts_list.count() == 1
+    assert dialog.parts_list.item(0).text() == "MainMesh"
