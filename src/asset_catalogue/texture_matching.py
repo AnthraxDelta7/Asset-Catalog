@@ -31,37 +31,7 @@ from typing import Iterable
 # is never used as a Base Color texture even if it's the only file that
 # matches the material name -- assigning a normal map as a base color
 # would look actively wrong, not just imperfect.
-#
-# "bakedalbedo" is deliberately NOT in this usable set, even though it's
-# unmistakably a color map: it has AO/shadow baked in for one specific
-# mesh's own UV unwrap (confirmed on the real Sci-Fi pack: each bake has a
-# matching "<Name>_low.fbx" reference mesh it was baked from), but the
-# *material name* it's keyed to is shared by many structurally different
-# meshes across a modular kit -- "TiledPanelsA" alone is the material on 9
-# unrelated pieces (a wedge, a cuboid, bevelled blocks, etc.) besides its
-# own low-poly reference mesh. find_texture_match is a blind guess by
-# material name across the whole pack, so injecting that bake onto a
-# mesh it wasn't baked for pastes someone else's baked shadow/seam lines
-# onto geometry they don't correspond to -- confirmed by rendering it: a
-# baked seam with no relation to any real edge on the receiving mesh. A
-# broken-link *relink* (see find_file_by_basename) doesn't have this
-# problem and still uses a bakedalbedo file freely -- relinking restores
-# the exact file that mesh's own material already named, so there's no
-# cross-mesh guessing involved.
-#
-# It gets its own set, separate from _NON_COLOR_MAP_SUFFIXES, because its
-# *presence* changes how a same-key "albedo" candidate is treated too (see
-# find_texture_match): on the real pack, every one of the 9 material keys
-# that has a "_BakedAlbedo" file also has a same-named plain "_albedo"
-# file, and every one of those plain files checked turned out to be a
-# leftover red/green UV-checker debug image, not finished art -- the
-# checker and the bake share the exact same UV silhouette, meaning the
-# checker is a byproduct of that same one-mesh bake, not independent
-# tileable art. So a bakedalbedo sibling isn't just "don't use this file"
-# -- it's a signal that this whole material key's "generic" texture is
-# unreliable too, and nothing for this name should be guessed at all.
-_MESH_SPECIFIC_BAKE_SUFFIXES = frozenset({"bakedalbedo"})
-_COLOR_MAP_SUFFIXES = ("albedo", "basecolor", "diffuse", "color", "colour")
+_COLOR_MAP_SUFFIXES = ("bakedalbedo", "albedo", "basecolor", "diffuse", "color", "colour")
 _NON_COLOR_MAP_SUFFIXES = frozenset(
     {
         "ao",
@@ -85,7 +55,7 @@ _NON_COLOR_MAP_SUFFIXES = frozenset(
         "alpha",
     }
 )
-_ALL_MAP_SUFFIXES = frozenset(_COLOR_MAP_SUFFIXES) | _NON_COLOR_MAP_SUFFIXES | _MESH_SPECIFIC_BAKE_SUFFIXES
+_ALL_MAP_SUFFIXES = frozenset(_COLOR_MAP_SUFFIXES) | _NON_COLOR_MAP_SUFFIXES
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff"})
 
@@ -128,12 +98,6 @@ def find_texture_match(material_name: str, texture_paths: Iterable[Path]) -> Pat
     tokens once a trailing map-type word is stripped off. Among matches,
     the most color-like map type wins; a match that's only available as a
     normal/ao/roughness/etc. map is skipped entirely rather than used.
-
-    A match against a "bakedalbedo" file returns None outright, for the
-    whole name -- not just skipping that one file -- since its presence
-    means any same-key "albedo" sibling is unreliable too (see the
-    _MESH_SPECIFIC_BAKE_SUFFIXES comment); guessing between two untrustworthy
-    files is worse than leaving the material unmatched.
     """
     material_tokens = tuple(tokenize(material_name))
     if not material_tokens:
@@ -144,8 +108,6 @@ def find_texture_match(material_name: str, texture_paths: Iterable[Path]) -> Pat
         tokens, suffix = _classify_suffix(tokenize(path.stem))
         if not _contains_subsequence(tokens, material_tokens):
             continue
-        if suffix in _MESH_SPECIFIC_BAKE_SUFFIXES:
-            return None
         if suffix in _NON_COLOR_MAP_SUFFIXES:
             continue
         priority = _COLOR_MAP_SUFFIXES.index(suffix) if suffix in _COLOR_MAP_SUFFIXES else len(_COLOR_MAP_SUFFIXES)

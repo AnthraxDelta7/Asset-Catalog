@@ -34,35 +34,13 @@ def test_find_texture_match_does_not_confuse_similarly_prefixed_keys() -> None:
     assert texture_matching.find_texture_match("RecessC", candidates) is None
 
 
-def test_find_texture_match_none_when_a_baked_albedo_sibling_exists() -> None:
-    # A "bakedalbedo" file has AO/shadow baked in for one specific mesh's
-    # own UV unwrap. Confirmed on a real pack: a material name like
-    # "TiledPanelsA" is shared by many structurally different meshes (a
-    # wedge, a cuboid, bevelled blocks...) besides the one low-poly
-    # reference mesh the bake was actually made from, so blindly
-    # injecting that bake by name onto a different mesh pastes its baked
-    # shadow/seam lines onto geometry they don't correspond to -- visible
-    # as a seam with no relation to any real edge. Worse, its same-named
-    # "_albedo" sibling isn't a safe fallback either: checked against the
-    # real pack, every "_albedo" file that has a "_BakedAlbedo" sibling
-    # turned out to be a leftover red/green UV-checker debug image
-    # sharing that bake's exact UV silhouette, not independent tileable
-    # art. So a bakedalbedo sibling's mere presence voids the whole
-    # match, not just that one file -- guessing between two untrustworthy
-    # candidates is worse than leaving the material unmatched. A
-    # broken-link *relink* (see find_file_by_basename) doesn't go through
-    # this function and still uses a bakedalbedo file freely, since it
-    # restores the exact file that mesh's own material already named.
+def test_find_texture_match_prefers_baked_albedo_over_plain_albedo() -> None:
     candidates = [
-        Path("PrebakedAlbedo/SciFiTextures_RecessA_BakedAlbedo.png"),
         Path("SciFiTextures_RecessA_albedo.png"),
+        Path("PrebakedAlbedo/SciFiTextures_RecessA_BakedAlbedo.png"),
     ]
-    assert texture_matching.find_texture_match("RecessA", candidates) is None
-
-
-def test_find_texture_match_none_when_only_baked_albedo_available() -> None:
-    candidates = [Path("PrebakedAlbedo/SciFiTextures_RecessA_BakedAlbedo.png")]
-    assert texture_matching.find_texture_match("RecessA", candidates) is None
+    match = texture_matching.find_texture_match("RecessA", candidates)
+    assert match == Path("PrebakedAlbedo/SciFiTextures_RecessA_BakedAlbedo.png")
 
 
 def test_find_texture_match_ignores_normal_and_ao_only_matches() -> None:
