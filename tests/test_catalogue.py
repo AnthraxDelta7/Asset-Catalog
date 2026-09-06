@@ -383,3 +383,44 @@ def test_scan_format_duplicates_zip_extraction_is_idempotent(catalogue: Catalogu
     catalogue.scan_format_duplicates("Pack.zip")
 
     assert marker.exists()
+
+
+def _insert_model_asset(catalogue: Catalogue, pack_id: int, filename: str, thumbnail_status: str) -> int:
+    cursor = catalogue._conn.execute(
+        "INSERT INTO assets (pack_id, relative_path, filename, extension, file_size, "
+        "content_hash, asset_type, thumbnail_status) VALUES (?, ?, ?, '.fbx', 10, ?, 'model', ?)",
+        (pack_id, filename, filename, f"hash-{filename}", thumbnail_status),
+    )
+    catalogue._conn.commit()
+    return cursor.lastrowid
+
+
+def test_next_pending_model_asset_id_finds_another_pending_model(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    preview_id = _insert_model_asset(catalogue, pack_id, "preview.fbx", "done")
+    pending_id = _insert_model_asset(catalogue, pack_id, "pending.fbx", "pending")
+
+    assert catalogue.next_pending_model_asset_id(pack_id, preview_id) == pending_id
+
+
+def test_next_pending_model_asset_id_excludes_the_given_asset_even_if_pending(
+    catalogue_with_asset: tuple[Catalogue, int]
+) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    asset_id = _insert_model_asset(catalogue, pack_id, "only.fbx", "pending")
+
+    assert catalogue.next_pending_model_asset_id(pack_id, asset_id) is None
+
+
+def test_count_pending_model_assets(catalogue_with_asset: tuple[Catalogue, int]) -> None:
+    catalogue, _texture_asset_id = catalogue_with_asset
+    pack_id = catalogue.get_pack_detail("Pack").id
+    _insert_model_asset(catalogue, pack_id, "a.fbx", "pending")
+    _insert_model_asset(catalogue, pack_id, "b.fbx", "pending")
+    _insert_model_asset(catalogue, pack_id, "c.fbx", "done")
+
+    assert catalogue.count_pending_model_assets(pack_id) == 2

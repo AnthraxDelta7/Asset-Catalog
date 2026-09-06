@@ -259,6 +259,34 @@ class Catalogue:
         ).fetchall()
         return [row["name"] for row in rows]
 
+    def next_pending_model_asset_id(self, pack_id: int, exclude_asset_id: int) -> int | None:
+        """Another model asset in this pack still thumbnail_status='pending',
+        not counting exclude_asset_id (the one currently shown as the
+        calibration preview) -- what CalibrationReviewDialog's "Skip and
+        Render Next" button steps to when the current preview isn't a good
+        representative of the pack. None once every model has already been
+        rendered (or attempted), meaning there's nothing left to step to.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM assets WHERE pack_id = ? AND asset_type = 'model' "
+            "AND thumbnail_status = 'pending' AND id != ? AND deleted_at IS NULL "
+            "ORDER BY id LIMIT 1",
+            (pack_id, exclude_asset_id),
+        ).fetchone()
+        return row["id"] if row is not None else None
+
+    def count_pending_model_assets(self, pack_id: int) -> int:
+        """How many model assets in this pack still have thumbnail_status
+        ='pending' -- what CalibrationReviewDialog's "Render Remaining N
+        Model(s)" button's own count reflects, recomputed (not just
+        decremented) after each "Skip and Render Next" so it can't drift.
+        """
+        return self._conn.execute(
+            "SELECT COUNT(*) AS c FROM assets WHERE pack_id = ? AND asset_type = 'model' "
+            "AND thumbnail_status = 'pending' AND deleted_at IS NULL",
+            (pack_id,),
+        ).fetchone()["c"]
+
     def thumbnail_path_for(self, content_hash: str) -> Path | None:
         path = thumbnails.thumbnail_path(self._thumbnail_dir, content_hash)
         return path if path.exists() else None

@@ -2362,9 +2362,22 @@ class CalibrationReviewDialog(QDialog):
         self.corrections_widget = CorrectionsFormWidget(corrections, pack_root)
         layout.addWidget(self.corrections_widget)
 
+        rerender_row = QHBoxLayout()
         self._rerender_button = QPushButton("Re-render Preview")
         self._rerender_button.clicked.connect(self._on_rerender)
-        layout.addWidget(self._rerender_button)
+        rerender_row.addWidget(self._rerender_button)
+
+        # For when the model that happened to get picked as the preview
+        # isn't a good representative of the pack (an outlier shape, a
+        # part with its own texture quirks) -- steps to a different,
+        # still-unrendered model instead of forcing a Cancel-and-restart
+        # to see how the pack looks on a different asset. Uses whatever
+        # corrections are already dialed in so far (self.corrections),
+        # same as Render Remaining does, rather than resetting them.
+        self._skip_and_render_next_button = QPushButton("Skip and Render Next")
+        self._skip_and_render_next_button.clicked.connect(self._on_skip_and_render_next)
+        rerender_row.addWidget(self._skip_and_render_next_button)
+        layout.addLayout(rerender_row)
 
         proceed_row = QHBoxLayout()
         self._render_all_button = QPushButton(f"Render Remaining {models_pending} Model(s)")
@@ -2379,6 +2392,16 @@ class CalibrationReviewDialog(QDialog):
         cancel_button = QPushButton("Cancel Import (Remove This Pack)")
         cancel_button.clicked.connect(self._on_cancel_import)
         layout.addWidget(cancel_button)
+
+        # Initializes the Skip and Render Next button's enabled state (a
+        # pack with only one model total has nothing to step to) -- every
+        # other button's enabled=True default from construction is
+        # already correct, so this doesn't need a full _set_buttons_
+        # enabled(True) call, just the one check that actually depends on
+        # data not yet known when each QPushButton() line above ran.
+        self._skip_and_render_next_button.setEnabled(
+            self._catalogue.next_pending_model_asset_id(pack_id, preview_asset_id) is not None
+        )
 
     def _reload_preview(self) -> None:
         asset = self._catalogue.get_asset(self._preview_asset_id)
@@ -2397,6 +2420,9 @@ class CalibrationReviewDialog(QDialog):
     def _set_buttons_enabled(self, enabled: bool) -> None:
         self._rerender_button.setEnabled(enabled)
         self._render_all_button.setEnabled(enabled)
+        self._skip_and_render_next_button.setEnabled(
+            enabled and self._catalogue.next_pending_model_asset_id(self._pack_id, self._preview_asset_id) is not None
+        )
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
         self._set_buttons_enabled(False)
@@ -2443,6 +2469,43 @@ class CalibrationReviewDialog(QDialog):
                 )
 
         self._run_job(job, "Re-rendering preview...", on_ok)
+
+    def _on_skip_and_render_next(self) -> None:
+        next_asset_id = self._catalogue.next_pending_model_asset_id(self._pack_id, self._preview_asset_id)
+        if next_asset_id is None:
+            QMessageBox.information(self, "Asset Catalogue", "No other unrendered model left in this pack.")
+            self._skip_and_render_next_button.setEnabled(False)
+            return
+
+        # Read on the GUI thread, same as _on_rerender -- corrections_widget
+        # is a Qt widget and job() below runs on a background thread via
+        # _run_job, which must never touch it directly.
+        corrections, error = self.corrections_widget.read()
+        if error:
+            QMessageBox.warning(self, "Asset Catalogue", error)
+            return
+
+        def job(report):
+            # Whatever's already dialed into the corrections form, even if
+            # never actually saved via Re-render Preview -- stepping to a
+            # different asset shouldn't discard in-progress edits, and
+            # this is the same "corrections, then render" pairing Re-
+            # render Preview itself uses, just targeting a new asset id.
+            self._catalogue.set_pack_corrections_bg(self._pack_id, corrections)
+            return self._catalogue.regenerate_model_thumbnail_bg(next_asset_id, on_progress=report)
+
+        def on_ok(stats) -> None:
+            self.corrections = corrections
+            self._preview_asset_id = next_asset_id
+            self._reload_preview()
+            models_pending = self._catalogue.count_pending_model_assets(self._pack_id)
+            self._render_all_button.setText(f"Render Remaining {models_pending} Model(s)")
+            if stats.failed:
+                QMessageBox.warning(
+                    self, "Asset Catalogue", "Render failed for this model -- check the pack's source files."
+                )
+
+        self._run_job(job, "Rendering next model as preview...", on_ok)
 
     def _on_render_all(self) -> None:
         def job(report):
