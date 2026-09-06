@@ -152,3 +152,56 @@ def test_corrections_form_widget_rejects_a_texture_outside_the_pack(qapp, tmp_pa
         mock_warning.assert_called_once()
 
     assert widget.overrides_list.count() == 0
+
+
+def test_format_selection_dialog_glb_precheck_and_others_default_unchecked(qapp) -> None:
+    from asset_catalogue.ui.main_window import FormatSelectionDialog
+
+    dialog = FormatSelectionDialog({".fbx", ".glb", ".obj"})
+
+    assert dialog._checkboxes[".glb"].isChecked() is True
+    assert dialog._checkboxes[".fbx"].isChecked() is False
+    assert dialog._checkboxes[".obj"].isChecked() is False
+
+
+def test_format_selection_dialog_import_all_sets_none_and_accepts(qapp) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    from asset_catalogue.ui.main_window import FormatSelectionDialog
+
+    dialog = FormatSelectionDialog({".fbx", ".glb"})
+    dialog._import_all()
+
+    assert dialog.format_selection is None
+    assert dialog.result() == QDialog.Accepted
+
+
+def test_format_selection_dialog_import_selected_uses_checked_extensions(qapp) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    from asset_catalogue.ui.main_window import FormatSelectionDialog
+
+    dialog = FormatSelectionDialog({".fbx", ".glb"})
+    dialog._checkboxes[".fbx"].setChecked(True)
+    dialog._import_selected()
+
+    assert dialog.format_selection == {".fbx", ".glb"}  # .glb was already pre-checked
+    assert dialog.result() == QDialog.Accepted
+
+
+def test_format_selection_dialog_import_selected_with_nothing_checked_does_not_accept(qapp) -> None:
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from asset_catalogue.ui.main_window import FormatSelectionDialog
+
+    dialog = FormatSelectionDialog({".fbx", ".glb"})
+    dialog._checkboxes[".glb"].setChecked(False)  # undo the pre-check -- nothing selected now
+
+    with patch.object(QMessageBox, "information") as mock_information:
+        dialog._import_selected()
+        mock_information.assert_called_once()
+
+    assert dialog.format_selection is None
+    assert dialog.result() != QDialog.Accepted

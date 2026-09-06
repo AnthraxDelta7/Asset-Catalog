@@ -406,6 +406,49 @@ class Catalogue:
             results.append((project_folder_name, stats))
         return results
 
+    def _resolve_pack_root(self, pack_folder_name: str) -> tuple[Path, str]:
+        """A pack source that turns out to be a .zip sitting directly in
+        staging (rather than an already-extracted folder) is extracted
+        transparently here -- shared by ingest_pack_bg and
+        scan_format_duplicates so a duplicate-format scan sees exactly the
+        same files the real ingest is about to. An earlier version of
+        scan_format_duplicates skipped extraction "just to preview" and
+        returned empty for a zip source instead -- a real bug: the format-
+        choice prompt (Ingest Pack / Batch Ingest) silently never appeared
+        at all for any pack ingested straight from a .zip, only for one
+        already extracted to a folder first.
+
+        Idempotent, so calling this once for the scan and again moments
+        later for the real ingest -- or on a later re-ingest of an
+        already-extracted pack -- never re-extracts: only happens if the
+        destination folder isn't already there. Returns (pack_root,
+        pack_folder_name) since a .zip source's real folder name (the
+        zip's own stem) isn't known until after this resolves it.
+        """
+        pack_root = self._staging_folder / pack_folder_name
+        if pack_root.is_file() and pack_root.suffix.lower() == ".zip":
+            pack_folder_name = pack_root.stem
+            zip_path = pack_root
+            pack_root = self._staging_folder / pack_folder_name
+            if not (pack_root.exists() and any(pack_root.iterdir())):
+                archives.extract_zip(zip_path, pack_root)
+        return pack_root, pack_folder_name
+
+    def scan_format_duplicates(self, pack_folder_name: str) -> set[str]:
+        """Every extension involved in a same-name, multiple-format group
+        somewhere in this staged pack source (Model.fbx next to Model.glb,
+        say) -- empty when there's nothing to choose between, which is the
+        common case, so a caller (the Ingest Pack / Batch Ingest dialogs)
+        can skip prompting entirely. See _resolve_pack_root for how a .zip
+        source is handled.
+        """
+        if self._staging_folder is None:
+            return set()
+        pack_root, _resolved_name = self._resolve_pack_root(pack_folder_name)
+        if not pack_root.is_dir():
+            return set()
+        return ingest.scan_format_duplicates(pack_root)
+
     def ingest_pack_bg(
         self,
         pack_folder_name: str,
@@ -414,26 +457,12 @@ class Catalogue:
         licence: str | None,
         source_url: str | None,
         on_progress: Callable[[str], None] | None = None,
+        format_selection: set[str] | None = None,
     ) -> tuple[ingest.IngestStats, list[str]]:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        pack_root = self._staging_folder / pack_folder_name
-
-        # A folder pick that turns out to be a .zip (e.g. one sitting
-        # directly in staging) is handled transparently rather than failing.
-        if pack_root.is_file() and pack_root.suffix.lower() == ".zip":
-            pack_folder_name = pack_root.stem
-            zip_path = pack_root
-            pack_root = self._staging_folder / pack_folder_name
-            # Re-selecting the same zip after an earlier ingest already
-            # extracted it (e.g. re-running ingest to pick up new files) is
-            # a normal, expected case, not a clobber attempt -- only
-            # extract if the destination isn't already there, and ingest
-            # from whatever's on disk either way (same idempotent-merge
-            # behavior as picking the already-extracted folder directly).
-            if not (pack_root.exists() and any(pack_root.iterdir())):
-                archives.extract_zip(zip_path, pack_root)
-        elif not pack_root.is_dir():
+        pack_root, pack_folder_name = self._resolve_pack_root(pack_folder_name)
+        if not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
 
         conn = db.connect(settings.load().db_path())
@@ -441,7 +470,9 @@ class Catalogue:
             pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
-            stats = ingest.ingest_pack(conn, pack_root, pack_id, on_progress=on_progress)
+            stats = ingest.ingest_pack(
+                conn, pack_root, pack_id, on_progress=on_progress, format_selection=format_selection
+            )
             stats.archived = library_assets.archive_pack(
                 conn, self._staging_folder, self._assets_dir, pack_id, on_progress=on_progress
             )
@@ -454,6 +485,7 @@ class Catalogue:
         self,
         items: list[tuple[str, str, str | None, str | None, str | None]],
         on_progress: Callable[[str], None] | None = None,
+        format_selections: dict[str, set[str]] | None = None,
     ) -> list[tuple[str, ingest.IngestStats, list[str]]]:
         """Ingests multiple packs in one background job -- each pack still
         goes through the exact same ingest_pack_bg used for a single pack
@@ -464,6 +496,13 @@ class Catalogue:
         pack failing partway (e.g. a missing folder) still raises and aborts
         the whole batch -- same all-or-nothing semantics as a single ingest,
         just scoped to the batch rather than silently skipping the rest.
+
+        format_selections, keyed by pack_folder_name, carries a per-pack
+        format_selection (see scan_format_duplicates / ingest_pack_bg) --
+        a separate dict rather than extending the items tuples, since most
+        packs in a batch won't have any duplicates to choose between at
+        all and shouldn't need a placeholder None threaded through for
+        every one of them.
         """
         results = []
         total = len(items)
@@ -472,8 +511,10 @@ class Catalogue:
         ):
             if on_progress:
                 on_progress(f"=== Pack {index}/{total}: {pack_name} ===")
+            format_selection = (format_selections or {}).get(pack_folder_name)
             stats, updated_fields = self.ingest_pack_bg(
-                pack_folder_name, pack_name, creator, licence, source_url, on_progress=on_progress
+                pack_folder_name, pack_name, creator, licence, source_url,
+                on_progress=on_progress, format_selection=format_selection,
             )
             results.append((pack_name, stats, updated_fields))
         return results

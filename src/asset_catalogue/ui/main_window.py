@@ -1194,6 +1194,73 @@ class StagingBrowserDialog(QDialog):
         self.accept()
 
 
+class FormatSelectionDialog(QDialog):
+    """Shown when a pack ships the same model in more than one file format
+    (Model.fbx sitting next to Model.glb) -- see ingest.py's
+    find_format_duplicate_groups. Lets the user choose which format(s) to
+    actually catalogue instead of every duplicate becoming its own,
+    separate asset -- confirmed as a real problem on a real downloaded
+    pack that ships 114 models as both .fbx and .glb, cataloguing all 228
+    with no relationship tracked between the two halves of each pair.
+
+    A format left unchecked is only ever skipped where a same-named file
+    in a checked format also exists -- something genuinely unique to that
+    format (no duplicate at all) is never affected, regardless of which
+    boxes are checked here.
+    """
+
+    def __init__(self, extensions: set[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.format_selection: set[str] | None = None  # None means "import everything"
+        self.setWindowTitle("Choose Formats")
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "This pack includes the same model in more than one file format "
+            f"({', '.join(sorted(extensions))}). Which would you like to import? A "
+            "format left unchecked is only skipped where a duplicate in a checked "
+            "format also exists -- nothing unique to that format is lost."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._checkboxes: dict[str, QCheckBox] = {}
+        for extension in sorted(extensions):
+            checkbox = QCheckBox(extension)
+            # .glb pre-checked when present -- this app's own established
+            # "universal exchange format" preference (see README); every
+            # other format starts unchecked. Import All Formats below is
+            # the explicit, one-click alternative for anyone who wants
+            # everything, so this default doesn't need to hedge toward
+            # "keep everything" to be safe.
+            checkbox.setChecked(extension == ".glb")
+            self._checkboxes[extension] = checkbox
+            layout.addWidget(checkbox)
+
+        button_row = QHBoxLayout()
+        import_all_button = QPushButton("Import All Formats")
+        import_all_button.clicked.connect(self._import_all)
+        import_selected_button = QPushButton("Import Selected")
+        import_selected_button.clicked.connect(self._import_selected)
+        button_row.addWidget(import_all_button)
+        button_row.addWidget(import_selected_button)
+        layout.addLayout(button_row)
+
+    def _import_all(self) -> None:
+        self.format_selection = None
+        self.accept()
+
+    def _import_selected(self) -> None:
+        selected = {extension for extension, checkbox in self._checkboxes.items() if checkbox.isChecked()}
+        if not selected:
+            QMessageBox.information(
+                self, "Asset Catalogue", "Select at least one format, or use Import All Formats."
+            )
+            return
+        self.format_selection = selected
+        self.accept()
+
+
 class IngestDialog(QDialog):
     """One "Browse Folder/Zip..." button opens the custom StagingBrowserDialog
     above, which shows subfolders and .zip files inside the staging folder
@@ -3161,6 +3228,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
+        format_selection: set[str] | None = None
+        duplicate_extensions = self._catalogue.scan_format_duplicates(dialog.pack_folder_name)
+        if duplicate_extensions:
+            format_dialog = FormatSelectionDialog(duplicate_extensions, self)
+            if format_dialog.exec() != QDialog.Accepted:
+                return
+            format_selection = format_dialog.format_selection
+
         job = lambda report: self._catalogue.ingest_pack_bg(
             dialog.pack_folder_name,
             dialog.pack_name,
@@ -3168,6 +3243,7 @@ class MainWindow(QMainWindow):
             dialog.licence,
             dialog.source_url,
             on_progress=report,
+            format_selection=format_selection,
         )
 
         def format_result(result: tuple) -> str:
@@ -3186,6 +3262,11 @@ class MainWindow(QMainWindow):
                     f"\nSkipped {stats.skipped_unrecognized_files} unrecognized "
                     f"file(s) and {stats.skipped_engine_folders} project folder(s) "
                     "-- not a supported asset type"
+                )
+            if stats.skipped_duplicate_formats:
+                message += (
+                    f"\nSkipped {stats.skipped_duplicate_formats} duplicate-format "
+                    "file(s) per your format selection"
                 )
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
@@ -3227,13 +3308,35 @@ class MainWindow(QMainWindow):
             return
 
         items = dialog.items
-        job = lambda report: self._catalogue.ingest_packs_batch_bg(items, on_progress=report)
+        # Same per-pack format check as single-pack ingest, just looped --
+        # only prompts for a pack that actually has same-model-multiple-
+        # formats duplicates (the common case is none), named in the
+        # dialog's own title so it's clear which pack of the batch it's
+        # about. Cancelling any one of these abandons the whole batch,
+        # same all-or-nothing semantics as cancelling BatchIngestDialog
+        # itself -- see its own docstring.
+        format_selections: dict[str, set[str]] = {}
+        for pack_folder_name, pack_name, _creator, _licence, _source_url in items:
+            duplicate_extensions = self._catalogue.scan_format_duplicates(pack_folder_name)
+            if not duplicate_extensions:
+                continue
+            format_dialog = FormatSelectionDialog(duplicate_extensions, self)
+            format_dialog.setWindowTitle(f"Choose Formats -- {pack_name}")
+            if format_dialog.exec() != QDialog.Accepted:
+                return
+            if format_dialog.format_selection is not None:
+                format_selections[pack_folder_name] = format_dialog.format_selection
+
+        job = lambda report: self._catalogue.ingest_packs_batch_bg(
+            items, on_progress=report, format_selections=format_selections
+        )
 
         def format_result(results: list) -> str:
             total_new = sum(stats.new for _, stats, _ in results)
             total_duplicate = sum(stats.duplicate for _, stats, _ in results)
             total_scanned = sum(stats.total for _, stats, _ in results)
             total_archived = sum(stats.archived for _, stats, _ in results)
+            total_skipped_duplicate_formats = sum(stats.skipped_duplicate_formats for _, stats, _ in results)
             total_generated = sum(stats.thumbnails_generated for _, stats, _ in results)
             total_failed = sum(stats.thumbnails_failed for _, stats, _ in results)
             all_broken_texture_filenames = [
@@ -3246,8 +3349,13 @@ class MainWindow(QMainWindow):
                 f"Ingested {len(results)} pack(s): {total_new} new, {total_duplicate} "
                 f"duplicate, {total_scanned} scanned, {total_archived} archived",
                 f"Generated {total_generated} thumbnail(s), {total_failed} failed",
-                "",
             ]
+            if total_skipped_duplicate_formats:
+                lines.append(
+                    f"Skipped {total_skipped_duplicate_formats} duplicate-format "
+                    "file(s) per your format selection"
+                )
+            lines.append("")
             for pack_name, stats, updated_fields in results:
                 line = f"- {pack_name}: {stats.new} new, {stats.duplicate} duplicate"
                 if updated_fields:

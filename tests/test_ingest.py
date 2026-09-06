@@ -155,3 +155,102 @@ def test_ingest_pack_reports_progress(conn: sqlite3.Connection, staging_folder: 
     messages: list[str] = []
     ingest.ingest_pack(conn, pack_root, pack_id, on_progress=messages.append)
     assert any("Hashing a.png" in m for m in messages)
+
+
+def test_find_format_duplicate_groups_only_flags_same_stem_multiple_extensions(tmp_path: Path) -> None:
+    files = [
+        tmp_path / "Model.fbx",
+        tmp_path / "Model.glb",
+        tmp_path / "Standalone.obj",  # no sibling -- not a duplicate
+        tmp_path / "Other.fbx",
+        tmp_path / "sub" / "Model.fbx",  # same stem, different folder -- not the same group
+    ]
+    groups = ingest.find_format_duplicate_groups(files)
+
+    assert set(groups.keys()) == {(tmp_path, "model")}
+    assert groups[(tmp_path, "model")] == {".fbx", ".glb"}
+
+
+def test_find_format_duplicate_groups_case_insensitive_stem(tmp_path: Path) -> None:
+    files = [tmp_path / "Model.fbx", tmp_path / "model.glb"]
+    groups = ingest.find_format_duplicate_groups(files)
+    assert len(groups) == 1
+
+
+def test_duplicate_format_extensions_empty_when_nothing_duplicated(tmp_path: Path) -> None:
+    files = [tmp_path / "a.fbx", tmp_path / "b.glb", tmp_path / "c.png"]
+    assert ingest.duplicate_format_extensions(files) == set()
+
+
+def test_duplicate_format_extensions_union_across_groups(tmp_path: Path) -> None:
+    files = [
+        tmp_path / "ModelA.fbx", tmp_path / "ModelA.glb",
+        tmp_path / "ModelB.obj", tmp_path / "ModelB.gltf",
+    ]
+    assert ingest.duplicate_format_extensions(files) == {".fbx", ".glb", ".obj", ".gltf"}
+
+
+def test_scan_format_duplicates_on_real_pack_folder(staging_folder: Path) -> None:
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "Model.fbx").write_bytes(b"fbx data")
+    (pack_root / "Model.glb").write_bytes(b"glb data")
+    (pack_root / "texture.png").write_bytes(b"tex data")
+
+    assert ingest.scan_format_duplicates(pack_root) == {".fbx", ".glb"}
+
+
+def test_ingest_pack_without_format_selection_keeps_every_format(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "Model.fbx").write_bytes(b"fbx data")
+    (pack_root / "Model.glb").write_bytes(b"glb data")
+
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assert stats.new == 2
+    assert stats.skipped_duplicate_formats == 0
+    filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
+    assert filenames == {"Model.fbx", "Model.glb"}
+
+
+def test_ingest_pack_with_format_selection_keeps_only_selected_format(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "Model.fbx").write_bytes(b"fbx data")
+    (pack_root / "Model.glb").write_bytes(b"glb data")
+
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id, format_selection={".glb"})
+
+    assert stats.new == 1
+    assert stats.skipped_duplicate_formats == 1
+    filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
+    assert filenames == {"Model.glb"}
+
+
+def test_ingest_pack_format_selection_never_affects_a_file_with_no_duplicate(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    """A format_selection is about choosing between duplicates -- a file
+    that's the only copy of its asset must always be kept regardless of
+    its own extension, even if that extension isn't in the selection.
+    """
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "Model.fbx").write_bytes(b"fbx data")
+    (pack_root / "Model.glb").write_bytes(b"glb data")
+    (pack_root / "OnlyAsObj.obj").write_bytes(b"obj data")
+
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id, format_selection={".glb"})
+
+    assert stats.new == 2  # Model.glb + OnlyAsObj.obj
+    assert stats.skipped_duplicate_formats == 1  # just Model.fbx
+    filenames = {row["filename"] for row in conn.execute("SELECT filename FROM assets")}
+    assert filenames == {"Model.glb", "OnlyAsObj.obj"}

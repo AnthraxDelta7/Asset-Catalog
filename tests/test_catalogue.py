@@ -342,3 +342,44 @@ def test_extract_godot_scenes_batch_bg_raises_when_godot_unavailable(
     with patch.object(godot_export, "resolve_godot", return_value=(None, "Godot not found.")):
         with pytest.raises(RuntimeError, match="Godot not found"):
             catalogue.extract_godot_scenes_batch_bg(["AnyPack"])
+
+
+def test_scan_format_duplicates_extracts_a_zip_source_first(catalogue: Catalogue) -> None:
+    """A pack source that's still a bare .zip sitting in staging (not yet
+    extracted to a folder) must be scanned too, not silently treated as
+    having no duplicates -- a real bug this pins down: the format-choice
+    prompt never appeared at all for a zip-sourced pack, only for one
+    already extracted to a folder first, since the scan used to bail out
+    with an empty result the moment pack_root wasn't already a directory.
+    """
+    import zipfile
+
+    zip_path = catalogue.staging_folder() / "Pack.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Model.fbx", b"fbx data")
+        zf.writestr("Model.glb", b"glb data")
+
+    assert catalogue.scan_format_duplicates("Pack.zip") == {".fbx", ".glb"}
+
+
+def test_scan_format_duplicates_zip_extraction_is_idempotent(catalogue: Catalogue) -> None:
+    """Scanning, then ingesting moments later, must not re-extract (and
+    thereby silently wipe out) whatever the scan's own extraction already
+    produced -- same idempotent-merge guarantee ingest_pack_bg's own zip
+    handling already had, now shared via _resolve_pack_root.
+    """
+    import zipfile
+
+    zip_path = catalogue.staging_folder() / "Pack.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Model.fbx", b"fbx data")
+
+    catalogue.scan_format_duplicates("Pack.zip")
+    extracted_dir = catalogue.staging_folder() / "Pack"
+    assert extracted_dir.is_dir()
+    marker = extracted_dir / "extra.txt"
+    marker.write_text("must survive a second resolve call")
+
+    catalogue.scan_format_duplicates("Pack.zip")
+
+    assert marker.exists()

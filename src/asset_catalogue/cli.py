@@ -36,6 +36,16 @@ def _connect() -> sqlite3.Connection:
     return db.connect(s.db_path())
 
 
+def _parse_only_formats(value: str | None) -> set[str] | None:
+    """--only-formats "glb" or "fbx,glb" -> {".glb"} / {".fbx", ".glb"} --
+    tolerant of a leading dot or not, whitespace, and case, since a user
+    typing this by hand is more likely to write "glb" than ".glb".
+    """
+    if not value:
+        return None
+    return {f".{ext.strip().lstrip('.').lower()}" for ext in value.split(",") if ext.strip()}
+
+
 def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
     print(
         f"Ingested '{pack_name}': {stats.new} new, "
@@ -51,6 +61,8 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"  (skipped {stats.skipped_unrecognized_files} unrecognized file(s) "
             f"and {stats.skipped_engine_folders} project folder(s) -- not a supported asset type)"
         )
+    if stats.skipped_duplicate_formats:
+        print(f"  (skipped {stats.skipped_duplicate_formats} duplicate-format file(s) per --only-formats)")
     print(f"  (archived {stats.archived} asset(s) to the library)")
     print(f"  (generated {stats.thumbnails_generated} thumbnail(s), {stats.thumbnails_failed} failed)")
     if stats.blender_unavailable_reason:
@@ -191,7 +203,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     )
     if updated_fields:
         print(f"Updated pack metadata: {', '.join(updated_fields)}")
-    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id, format_selection=_parse_only_formats(args.only_formats))
     stats.archived = library_assets.archive_pack(conn, staging_folder, s.assets_dir(), pack_id)
     _auto_generate_thumbnails(
         conn, stats, staging_folder, s.thumbnail_dir(), s.blender_path, pack_id, args.pack_name
@@ -231,7 +243,7 @@ def cmd_ingest_zip(args: argparse.Namespace) -> None:
     )
     if updated_fields:
         print(f"Updated pack metadata: {', '.join(updated_fields)}")
-    stats = ingest.ingest_pack(conn, pack_root, pack_id)
+    stats = ingest.ingest_pack(conn, pack_root, pack_id, format_selection=_parse_only_formats(args.only_formats))
     stats.archived = library_assets.archive_pack(
         conn, Path(s.staging_folder), s.assets_dir(), pack_id
     )
@@ -1023,6 +1035,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--creator")
     ingest_parser.add_argument("--licence")
     ingest_parser.add_argument("--source-url")
+    ingest_parser.add_argument(
+        "--only-formats",
+        help="Comma-separated extensions (e.g. glb or fbx,glb) -- when the pack ships the same "
+        "model in more than one format, only these are catalogued; a format with no duplicate "
+        "is always kept regardless. Omit to catalogue every format, unchanged from the default.",
+    )
     ingest_parser.set_defaults(func=cmd_ingest)
 
     ingest_zip_parser = subparsers.add_parser(
@@ -1037,6 +1055,10 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_zip_parser.add_argument("--creator")
     ingest_zip_parser.add_argument("--licence")
     ingest_zip_parser.add_argument("--source-url")
+    ingest_zip_parser.add_argument(
+        "--only-formats",
+        help="Comma-separated extensions (e.g. glb or fbx,glb) -- see 'ingest --only-formats'",
+    )
     ingest_zip_parser.set_defaults(func=cmd_ingest_zip)
 
     godot_extract_parser = subparsers.add_parser(

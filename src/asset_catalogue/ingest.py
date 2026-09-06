@@ -91,6 +91,13 @@ class IngestStats:
     nested_zips_extracted: int = 0
     skipped_unrecognized_files: int = 0
     skipped_engine_folders: int = 0
+    # A file that was part of a same-name, multiple-extension group (see
+    # find_format_duplicate_groups) whose extension wasn't in the caller's
+    # format_selection -- e.g. the .fbx half of a Model.fbx/Model.glb pair
+    # when only .glb was selected. Distinct from skipped_unrecognized_files
+    # (an extension this app doesn't handle at all) -- this one's a real,
+    # recognized asset that was deliberately left out by choice.
+    skipped_duplicate_formats: int = 0
     archived: int = 0
     thumbnails_generated: int = 0
     thumbnails_failed: int = 0
@@ -155,24 +162,21 @@ def get_or_create_pack(
     return cursor.lastrowid, []
 
 
-def ingest_pack(
-    conn: sqlite3.Connection,
-    pack_root: Path,
-    pack_id: int,
-    on_progress: ProgressCallback | None = None,
-) -> IngestStats:
-    """Walks pack_root and catalogues every file as an asset.
-
-    A .zip found anywhere in the walk -- not just at pack_root itself -- is
-    extracted in place into a sibling folder named after it (stripping the
-    .zip suffix) rather than being catalogued as an opaque asset, and that
-    folder's contents are walked too, recursively. This can't be a plain
-    rglob(): files created by an extraction mid-walk need to be picked up
-    within the same pass, so this uses an explicit work queue instead.
+def _walk_ingestible_files(
+    pack_root: Path, stats: IngestStats, on_progress: ProgressCallback | None = None
+) -> list[Path]:
+    """Walks pack_root (extracting any nested .zip found along the way, in
+    place, into a sibling folder named after it -- recursively, since files
+    created by an extraction mid-walk need to be picked up within the same
+    pass, which is why this uses an explicit work queue rather than a plain
+    rglob()) and returns every recognized file found, in no particular
+    order. Deliberately doesn't hash or catalogue anything yet -- see
+    ingest_pack and scan_format_duplicates, its two callers, for why that's
+    a separate step.
     """
     report = on_progress or (lambda _text: None)
-    stats = IngestStats()
     work_items: list[tuple[Path, int]] = [(pack_root, 0)]
+    found: list[Path] = []
 
     while work_items:
         current_dir, zip_depth = work_items.pop()
@@ -218,29 +222,113 @@ def ingest_pack(
                 stats.skipped_unrecognized_files += 1
                 continue
 
-            stats.total += 1
-            relative_path = entry.relative_to(pack_root).as_posix()
-            report(f"Hashing {entry.name}...")
-            content_hash = hash_file(entry)
-            extension = entry.suffix.lower()
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO assets "
-                "(pack_id, relative_path, filename, extension, file_size, "
-                " content_hash, asset_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    pack_id,
-                    relative_path,
-                    entry.name,
-                    extension,
-                    entry.stat().st_size,
-                    content_hash,
-                    classify(extension),
-                ),
-            )
-            if cursor.rowcount == 0:
-                stats.duplicate += 1
-            else:
-                stats.new += 1
+            found.append(entry)
+
+    return found
+
+
+def find_format_duplicate_groups(files: list[Path]) -> dict[tuple[Path, str], set[str]]:
+    """Groups files by (parent folder, filename without extension) --
+    same conceptual asset shipped in more than one file format, e.g.
+    Model.fbx sitting next to Model.glb. Case-insensitive on the stem
+    (Windows filesystems are, and a pack mixing "Model.fbx"/"model.glb"
+    should still be recognized as the same asset). Only groups that
+    actually have 2+ distinct extensions are returned -- a lone file
+    isn't a duplicate of anything.
+    """
+    groups: dict[tuple[Path, str], set[str]] = {}
+    for path in files:
+        key = (path.parent, path.stem.lower())
+        groups.setdefault(key, set()).add(path.suffix.lower())
+    return {key: extensions for key, extensions in groups.items() if len(extensions) > 1}
+
+
+def duplicate_format_extensions(files: list[Path]) -> set[str]:
+    """Every distinct extension that appears in at least one format-
+    duplicate group -- what a "which format(s) do you want to keep"
+    prompt should offer as choices. Empty when the pack has no such
+    duplicates at all, the common case, so a caller can skip prompting
+    entirely.
+    """
+    groups = find_format_duplicate_groups(files)
+    return {extension for extensions in groups.values() for extension in extensions}
+
+
+def scan_format_duplicates(pack_root: Path) -> set[str]:
+    """Walks pack_root (extracting nested zips along the way, same as
+    ingest_pack itself -- idempotent, so calling this before ingest_pack
+    doesn't re-extract anything the real ingest walk will also do) purely
+    to answer "does this pack ship the same model in more than one
+    format, and if so which formats": the up-front check a caller (the
+    Ingest Pack / Batch Ingest dialogs, or the CLI) uses to decide
+    whether to prompt for a format_selection at all before calling
+    ingest_pack for real.
+    """
+    stats = IngestStats()
+    files = _walk_ingestible_files(pack_root, stats)
+    return duplicate_format_extensions(files)
+
+
+def ingest_pack(
+    conn: sqlite3.Connection,
+    pack_root: Path,
+    pack_id: int,
+    on_progress: ProgressCallback | None = None,
+    format_selection: set[str] | None = None,
+) -> IngestStats:
+    """Walks pack_root and catalogues every file as an asset.
+
+    format_selection, when given, restricts which format a same-named
+    asset is actually catalogued in when the pack ships more than one
+    (see find_format_duplicate_groups) -- e.g. {".glb"} keeps only the
+    .glb half of every Model.fbx/Model.glb pair found, skipping the rest
+    (counted in stats.skipped_duplicate_formats, not
+    skipped_unrecognized_files -- these are real, recognized files
+    deliberately left out by choice). A file with no same-named sibling
+    in a different format is never affected by this, regardless of its
+    own extension -- there's nothing to choose between. None (the
+    default) catalogues everything, unchanged from this function's
+    original behavior.
+    """
+    report = on_progress or (lambda _text: None)
+    stats = IngestStats()
+    files = _walk_ingestible_files(pack_root, stats, on_progress)
+
+    if format_selection is not None:
+        duplicate_groups = find_format_duplicate_groups(files)
+        kept_files = []
+        for entry in files:
+            key = (entry.parent, entry.stem.lower())
+            if key in duplicate_groups and entry.suffix.lower() not in format_selection:
+                stats.skipped_duplicate_formats += 1
+                continue
+            kept_files.append(entry)
+        files = kept_files
+
+    for entry in files:
+        stats.total += 1
+        relative_path = entry.relative_to(pack_root).as_posix()
+        report(f"Hashing {entry.name}...")
+        content_hash = hash_file(entry)
+        extension = entry.suffix.lower()
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO assets "
+            "(pack_id, relative_path, filename, extension, file_size, "
+            " content_hash, asset_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                pack_id,
+                relative_path,
+                entry.name,
+                extension,
+                entry.stat().st_size,
+                content_hash,
+                classify(extension),
+            ),
+        )
+        if cursor.rowcount == 0:
+            stats.duplicate += 1
+        else:
+            stats.new += 1
 
     conn.commit()
     return stats
