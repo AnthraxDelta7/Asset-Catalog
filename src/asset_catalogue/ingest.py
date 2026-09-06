@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -98,6 +98,7 @@ class IngestStats:
     calibration_preview: bool = False
     models_pending: int = 0
     preview_asset_id: int | None = None
+    broken_texture_filenames: list[str] = field(default_factory=list)
 
 
 def get_or_create_pack(

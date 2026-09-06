@@ -266,9 +266,12 @@ class Model3DPreviewDialog(QDialog):
     """Displays a model asset's already-loaded preview parts (see
     load_preview_parts -- generated from the cached .glb alongside the
     static thumbnail by blender_thumbnail_script.py) in a real orbit/pan/
-    zoom viewer. Left-drag to rotate, right-drag or the wheel to zoom, and
-    shift+left-drag to pan -- all built into pyqtgraph's GLViewWidget, no
-    custom mouse handling needed.
+    zoom viewer. Left-drag to rotate, wheel to zoom, Ctrl+left-drag to pan
+    -- all built into pyqtgraph's GLViewWidget (confirmed by reading its
+    mouseMoveEvent/wheelEvent directly), no custom mouse handling needed.
+    There is no right-drag handling anywhere in the widget, and no Shift-
+    modifier handling either -- an earlier version of this hint claimed
+    both, neither of which the widget has ever actually done.
 
     Takes pre-loaded parts rather than a file path deliberately: building
     the GL widgets themselves is fast, so it's safe to do synchronously
@@ -284,7 +287,14 @@ class Model3DPreviewDialog(QDialog):
         self.resize(820, 560)
 
         layout = QVBoxLayout(self)
-        hint = QLabel("Drag to rotate · wheel or right-drag to zoom · Shift+drag to pan")
+        # Matches pyqtgraph's own GLViewWidget.mouseMoveEvent exactly (read
+        # the source rather than assumed): plain left-drag orbits, wheel
+        # zooms, and pan is Ctrl+left-drag -- there is no right-drag
+        # handling anywhere in the widget, and no Shift-modifier handling
+        # either. A previous version of this hint claimed "right-drag to
+        # zoom" and "Shift+drag to pan", neither of which the underlying
+        # widget has ever actually done.
+        hint = QLabel("Drag to rotate · wheel to zoom · Ctrl+drag to pan")
         layout.addWidget(hint)
 
         body = QHBoxLayout()

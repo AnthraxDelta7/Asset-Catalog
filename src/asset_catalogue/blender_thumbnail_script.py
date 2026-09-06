@@ -125,10 +125,11 @@ def main() -> None:
         importer = IMPORTERS.get(extension)
 
         ok = False
+        has_broken_texture = False
         if importer is not None:
             try:
                 importer(job["source_path"])
-                mesh_objects = apply_corrections(job.get("corrections") or {})
+                mesh_objects, has_broken_texture = apply_corrections(job.get("corrections") or {})
                 ok = frame_and_render(mesh_objects, job["output_path"])
                 preview_output_path = job.get("preview_output_path")
                 if ok and preview_output_path:
@@ -145,7 +146,7 @@ def main() -> None:
                 ok = False
 
         status = "ok" if ok else "fail"
-        print(f"ASSET_CATALOGUE_RESULT|{asset_id}|{status}", flush=True)
+        print(f"ASSET_CATALOGUE_RESULT|{asset_id}|{status}|{1 if has_broken_texture else 0}", flush=True)
 
 
 main()

@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -86,6 +86,15 @@ class ModelThumbnailStats:
     generated: int = 0
     already_done: int = 0
     failed: int = 0
+    # Filenames whose material references an image that failed to load
+    # (Blender's own signal: the loaded image's pixel size is (0, 0)) --
+    # in practice almost always an absolute path baked into the file from
+    # the original author's own machine, meaningless on any other one.
+    # Reported regardless of render success (frame_and_render still
+    # renders *something*, just without the intended texture), so this is
+    # a real, visible heads-up rather than a silent gray/wrong-looking
+    # thumbnail that just looks like this app is broken.
+    broken_texture_filenames: list[str] = field(default_factory=list)
 
 
 def build_job_list(
@@ -214,7 +223,12 @@ def generate_model_thumbnails(
             line = line.strip()
             if not line.startswith("ASSET_CATALOGUE_RESULT|"):
                 continue
-            _, asset_id_str, status = line.split("|")
+            parts = line.split("|")
+            _, asset_id_str, status = parts[:3]
+            # A 4th field (broken-texture flag) is new -- tolerate an older
+            # blender_thumbnail_script.py (or a stray malformed line)
+            # without it rather than crashing the whole batch on IndexError.
+            broken_texture = len(parts) > 3 and parts[3] == "1"
             asset_id = int(asset_id_str)
             seen_ids.add(asset_id)
             new_status = "done" if status == "ok" else "failed"
@@ -229,6 +243,9 @@ def generate_model_thumbnails(
             else:
                 stats.failed += 1
                 report(f"Failed to render thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})")
+            if broken_texture:
+                stats.broken_texture_filenames.append(filename)
+                report(f"  Note: {filename} references a texture that failed to load")
             print(f"  [{len(seen_ids)}/{len(jobs)}] asset {asset_id}: {status}")
 
         process.wait()
@@ -265,6 +282,7 @@ class AutoThumbnailStats:
     calibration_preview: bool = False
     models_pending: int = 0
     preview_asset_id: int | None = None
+    broken_texture_filenames: list[str] = field(default_factory=list)
 
 
 def generate_pack_thumbnails(
@@ -341,6 +359,7 @@ def generate_pack_thumbnails(
         )
         stats.generated += model_stats.generated
         stats.failed += model_stats.failed
+        stats.broken_texture_filenames.extend(model_stats.broken_texture_filenames)
         return stats
 
     preview_stats = generate_model_thumbnails(
@@ -349,6 +368,7 @@ def generate_pack_thumbnails(
     )
     stats.generated += preview_stats.generated
     stats.failed += preview_stats.failed
+    stats.broken_texture_filenames.extend(preview_stats.broken_texture_filenames)
     stats.calibration_preview = True
     stats.models_pending = len(model_ids) - 1
     stats.preview_asset_id = model_ids[0]

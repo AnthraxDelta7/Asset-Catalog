@@ -61,6 +61,18 @@ def _print_ingest_result(pack_name: str, stats: ingest.IngestStats) -> None:
             f"'pack set-corrections' if needed, then run 'thumbnail generate-models "
             f"--pack \"{pack_name}\"' to render the remaining {stats.models_pending} model(s))"
         )
+    if stats.broken_texture_filenames:
+        shown = ", ".join(stats.broken_texture_filenames[:5])
+        remainder = len(stats.broken_texture_filenames) - 5
+        if remainder > 0:
+            shown += f", and {remainder} more"
+        print(
+            f"  WARNING: {len(stats.broken_texture_filenames)} asset(s) reference a texture "
+            f"that failed to load ({shown}) -- the pack may not actually include the "
+            "textures it promises. Worth checking if that's grounds for a refund. "
+            f'  asset-catalogue pack set-corrections "{pack_name}" --broken-texture-fallback '
+            "replaces just those with a flat gray instead of rendering them pink/wrong."
+        )
 
 
 def _auto_generate_thumbnails(
@@ -550,9 +562,14 @@ def cmd_pack_set_corrections(args: argparse.Namespace) -> None:
         corrections["scale"] = args.scale
     if args.material_fallback is not None:
         corrections["material_fallback"] = args.material_fallback
+    if args.broken_texture_fallback is not None:
+        corrections["broken_texture_fallback"] = args.broken_texture_fallback
 
     if not corrections:
-        raise SystemExit("No corrections given. Pass --up-axis, --scale, or --material-fallback.")
+        raise SystemExit(
+            "No corrections given. Pass --up-axis, --scale, --material-fallback, "
+            "or --broken-texture-fallback."
+        )
 
     packs.set_corrections(conn, pack_id, corrections)
     print(f"Corrections for '{args.pack_name}': {corrections}")
@@ -1120,6 +1137,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Replace imported materials with a flat gray fallback",
+    )
+    set_corrections_parser.add_argument(
+        "--broken-texture-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Replace only meshes whose texture failed to load with a flat gray fallback "
+        "(unlike --material-fallback, leaves everything else in the pack untouched)",
     )
     set_corrections_parser.add_argument(
         "--clear", action="store_true", help="Remove all corrections for this pack"

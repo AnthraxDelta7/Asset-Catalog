@@ -119,6 +119,8 @@ Per-pack corrections (`up_axis: "Y_UP"`, `scale`, `material_fallback: true`) are
 
 Every source file path handed to a Blender importer is prefixed with Windows' `\\?\` extended-length marker before use — Python's own file access is long-path-aware and never needed this, but Blender's importers call straight into the OS APIs that cap a path at 260 characters (`MAX_PATH`), which a deeply nested staging path (a long pack/creator folder name plus a multi-level zip extraction) can genuinely exceed. Without it, an asset like that fails to import with a plain "cannot open file" even though the file is completely readable — this bit a real pack during development and is now fixed for every importer (OBJ/FBX/GLTF/GLB/STL/`.blend`), not just the one that happened to trigger it first.
 
+**A broken texture reference is flagged, not silently rendered wrong.** After import, every asset is checked for any material referencing an image that failed to load (Blender's own reliable signal: the loaded image's pixel size is `(0, 0)`) — in practice, almost always an absolute path baked into the file at export time from the original author's own machine (e.g. `L:\UNITY\...`, confirmed against a real downloaded pack), meaningless on any other one, with the real texture often not included in the pack at all. Rather than let that render as Blender's own bright-pink "missing image" placeholder and leave someone thinking *this app* is broken, the ingest/thumbnail-generation completion message calls it out by name: `N asset(s) reference a texture that failed to load (Shotgun.fbx, ...) -- the pack may not actually include the textures it promises. Worth checking if that's grounds for a refund.` This is a genuinely different situation from an asset with no material at all (also common, and not flagged — a `baseColorFactor`-only or default-gray material isn't broken, it's just plain): checked directly by walking each mesh's actual texture nodes, not guessed from the render's appearance. A new `broken_texture_fallback` correction (**Edit Pack Metadata**, or `--broken-texture-fallback` on the CLI, alongside `material_fallback`) replaces just the affected mesh(es) with a flat gray material — surgical, not blanket like `material_fallback`: a pack can easily have some assets with real, working materials right next to others with a dead texture link (confirmed against a real pack: guns with a broken absolute path next to walls with genuine flat colors), so only the actually-broken ones get replaced.
+
 ## Godot scene extraction
 
 Requires Godot 4.0+ — no standard install location the way Blender has, so point at it explicitly rather than relying on auto-detect (which only checks PATH):
@@ -166,7 +168,7 @@ A few other rendering details worth knowing about, all found and fixed by actual
 Corrections are set once per pack and apply to every asset in it, since a pack that's rotated or scaled wrong is wrong the same way throughout (seed doc §7). A brand-new pack with model assets already gets this workflow's first step done automatically at ingest — see "Thumbnails are generated automatically" above:
 
 ```
-asset-catalogue pack set-corrections <pack_name> [--up-axis Y_UP|Z_UP] [--scale 1.0] [--material-fallback | --no-material-fallback]
+asset-catalogue pack set-corrections <pack_name> [--up-axis Y_UP|Z_UP] [--scale 1.0] [--material-fallback | --no-material-fallback] [--broken-texture-fallback | --no-broken-texture-fallback]
 asset-catalogue pack show-corrections <pack_name>
 asset-catalogue pack set-corrections <pack_name> --clear
 ```

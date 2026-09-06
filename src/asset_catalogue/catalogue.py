@@ -494,6 +494,7 @@ class Catalogue:
         stats.calibration_preview = thumb_stats.calibration_preview
         stats.models_pending = thumb_stats.models_pending
         stats.preview_asset_id = thumb_stats.preview_asset_id
+        stats.broken_texture_filenames = thumb_stats.broken_texture_filenames
 
     def remove_assets_bg(
         self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None

@@ -808,6 +808,30 @@ class DetailPanel(QWidget):
             self._on_cleanup_conversion(self._asset_id)
 
 
+def _format_broken_texture_note(filenames: list[str]) -> str:
+    """Appended to an ingest completion message when Blender flagged one or
+    more assets as referencing an image that failed to load -- almost
+    always an absolute path baked in from the original author's own
+    machine at export time, meaningless here, and nothing this app can
+    recover if the actual image was never included in the pack at all
+    (confirmed against several real downloaded packs). Surfaced plainly so
+    a plain-gray or pink-tinted render reads as "this pack may be missing
+    textures it promised" rather than "this app is broken."
+    """
+    if not filenames:
+        return ""
+    shown = filenames[:5]
+    remainder = len(filenames) - len(shown)
+    names = ", ".join(shown) + (f", and {remainder} more" if remainder else "")
+    return (
+        f"\n\nWarning: {len(filenames)} asset(s) reference a texture that failed to load "
+        f"({names}) -- the pack may not actually include the textures it promises. "
+        "Worth checking if that's grounds for a refund. A pack-level 'Replace broken "
+        "textures with a flat gray fallback' correction is available (Edit Pack "
+        "Metadata) if you'd rather not see them rendered pink/wrong."
+    )
+
+
 def _browse_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
     row = QHBoxLayout()
     button = QPushButton("Browse...")
@@ -1614,6 +1638,17 @@ class CorrectionsFormWidget(QWidget):
         self.material_fallback_check.setChecked(bool(initial.get("material_fallback")))
         form.addRow("", self.material_fallback_check)
 
+        self.broken_texture_fallback_check = QCheckBox(
+            "Replace broken-texture materials with a flat gray fallback"
+        )
+        self.broken_texture_fallback_check.setChecked(bool(initial.get("broken_texture_fallback")))
+        self.broken_texture_fallback_check.setToolTip(
+            "Only affects meshes whose texture actually failed to load (e.g. an absolute "
+            "path baked in from the original author's machine) -- unlike the option above, "
+            "this leaves everything else in the pack untouched."
+        )
+        form.addRow("", self.broken_texture_fallback_check)
+
     def read(self) -> tuple[dict | None, str | None]:
         """Returns (corrections, error) -- corrections is None and error is
         a human-readable message if the scale field doesn't parse.
@@ -1633,6 +1668,7 @@ class CorrectionsFormWidget(QWidget):
         if scale_value is not None:
             corrections["scale"] = scale_value
         corrections["material_fallback"] = self.material_fallback_check.isChecked()
+        corrections["broken_texture_fallback"] = self.broken_texture_fallback_check.isChecked()
         return corrections, None
 
 
@@ -3015,6 +3051,7 @@ class MainWindow(QMainWindow):
             )
             if stats.blender_unavailable_reason:
                 message += f"\n3D thumbnails skipped: {stats.blender_unavailable_reason}"
+            message += _format_broken_texture_note(stats.broken_texture_filenames)
             return message
 
         def on_complete(result: tuple) -> None:
@@ -3053,6 +3090,9 @@ class MainWindow(QMainWindow):
             total_archived = sum(stats.archived for _, stats, _ in results)
             total_generated = sum(stats.thumbnails_generated for _, stats, _ in results)
             total_failed = sum(stats.thumbnails_failed for _, stats, _ in results)
+            all_broken_texture_filenames = [
+                filename for _, stats, _ in results for filename in stats.broken_texture_filenames
+            ]
             lines = [
                 f"Ingested {len(results)} pack(s): {total_new} new, {total_duplicate} "
                 f"duplicate, {total_scanned} scanned, {total_archived} archived",
@@ -3066,7 +3106,7 @@ class MainWindow(QMainWindow):
                 if stats.blender_unavailable_reason:
                     line += " -- 3D thumbnails skipped"
                 lines.append(line)
-            return "\n".join(lines)
+            return "\n".join(lines) + _format_broken_texture_note(all_broken_texture_filenames)
 
         def on_complete(results: list) -> None:
             for pack_name, stats, _updated_fields in results:
