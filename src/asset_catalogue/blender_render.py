@@ -156,8 +156,10 @@ def build_job_list(
 
         corrections = json.loads(row["corrections"]) if row["corrections"] else {}
         preview_output_path = None
+        colors_output_path = None
         if preview_dir is not None:
             preview_output_path = str(model_preview.preview_path(preview_dir, row["content_hash"]))
+            colors_output_path = str(model_preview.colors_path(preview_dir, row["content_hash"]))
         jobs.append(
             {
                 "asset_id": row["id"],
@@ -166,6 +168,7 @@ def build_job_list(
                 "pack_root": str(staging_folder / row["pack_folder"]),
                 "output_path": str(dest),
                 "preview_output_path": preview_output_path,
+                "colors_output_path": colors_output_path,
                 "extension": row["extension"],
                 "corrections": corrections,
             }

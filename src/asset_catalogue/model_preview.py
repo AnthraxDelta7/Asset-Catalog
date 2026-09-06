@@ -18,3 +18,16 @@ from pathlib import Path
 
 def preview_path(preview_dir: Path, content_hash: str) -> Path:
     return preview_dir / f"{content_hash}.glb"
+
+
+def colors_path(preview_dir: Path, content_hash: str) -> Path:
+    """Sidecar JSON, same content-hash identity as the .glb it describes:
+    per-material color metadata resolved by Blender's own material graph
+    at export time (see blender_common.py's resolve_material_metadata) --
+    the interactive preview reads this instead of re-deriving a display
+    color from the exported glb's material fields itself, which is what
+    let its own hand-rolled linear/sRGB handling diverge from what
+    Blender actually rendered. Missing for a preview exported before this
+    existed; the preview dialog falls back to its own derivation then.
+    """
+    return preview_dir / f"{content_hash}.colors.json"

@@ -18,7 +18,13 @@ import mathutils
 # plain CPython running a script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from blender_common import IMPORTERS, apply_corrections, clear_imported_objects, get_job_list_path
+from blender_common import (
+    IMPORTERS,
+    apply_corrections,
+    clear_imported_objects,
+    get_job_list_path,
+    resolve_material_metadata,
+)
 
 RESOLUTION = 512
 WORLD_COLOR = (0.05, 0.05, 0.06)  # neutral dark gray/charcoal
@@ -145,6 +151,10 @@ def main() -> None:
                     # secondary nice-to-have.
                     try:
                         export_preview_glb(mesh_objects, preview_output_path)
+                        colors_output_path = job.get("colors_output_path")
+                        if colors_output_path:
+                            with open(colors_output_path, "w", encoding="utf-8") as f:
+                                json.dump(resolve_material_metadata(mesh_objects), f)
                     except Exception as exc:  # noqa: BLE001
                         print(f"ASSET_CATALOGUE_ERROR|{asset_id}|preview export: {exc}", flush=True)
             except Exception as exc:  # noqa: BLE001 - report and continue the batch

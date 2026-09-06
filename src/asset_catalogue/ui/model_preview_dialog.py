@@ -13,6 +13,7 @@ Blender-rendered static thumbnail is still the accurate/final-look render.
 from __future__ import annotations
 
 import io
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,12 +108,47 @@ def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
     0.094 (measured from a real asset's dark PBR material) is a
     perceptually much brighter 0.34 once properly sRGB-encoded -- any
     real glTF/PBR viewer does this conversion, it's not optional.
+
+    Only correct for a *flat* baseColorFactor, though -- see
+    _part_vertex_colors for why a texture-sampled color must never be
+    passed through this without first being decoded back to linear (see
+    _srgb_to_linear).
     """
     c = np.clip(c, 0.0, 1.0)
     return np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
 
 
-def _part_vertex_colors(part: trimesh.Trimesh, is_collider: bool) -> np.ndarray:
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """Inverse of _linear_to_srgb -- decodes a texture-sampled sRGB color
+    (raw PNG pixel bytes, already display-ready on their own) back to
+    linear so it can be correctly multiplied by a linear baseColorFactor
+    (glTF's actual compositing rule) before being re-encoded to sRGB for
+    display. Only needed when material_metadata says a real baseColorFactor
+    accompanies the texture -- see _part_vertex_colors.
+    """
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.04045, c / 12.92, np.power((c + 0.055) / 1.055, 2.4))
+
+
+def _part_texture_image(part: trimesh.Trimesh) -> Image.Image | None:
+    """The actual source texture image behind a part's baked vertex
+    colors, if it has one -- trimesh's two material classes disagree on
+    the attribute name (PBRMaterial.baseColorTexture vs.
+    SimpleMaterial.image), so both are tried. Used for the "Textures"
+    gallery, which shows the real image rather than just the per-vertex
+    colors sampled from it, and by _part_vertex_colors to decide whether
+    this part's colors need the linear->sRGB fix-up at all.
+    """
+    material = getattr(part.visual, "material", None)
+    if material is None:
+        return None
+    image = getattr(material, "baseColorTexture", None) or getattr(material, "image", None)
+    return image if isinstance(image, Image.Image) else None
+
+
+def _part_vertex_colors(
+    part: trimesh.Trimesh, is_collider: bool, material_metadata: dict | None = None
+) -> np.ndarray:
     """Per-vertex RGBA in 0-1 range, baked from whatever material/texture
     the part actually has. TextureVisuals.to_color() returns either a
     single flat RGBA (a part with a plain material color, no image
@@ -120,6 +156,38 @@ def _part_vertex_colors(part: trimesh.Trimesh, is_collider: bool) -> np.ndarray:
     colors sampled at each vertex's UV against an actual texture image;
     both cases are normalized to a full per-vertex array here so the
     caller never needs to care which one it got.
+
+    The linear->sRGB fix-up in _linear_to_srgb only belongs on the flat
+    case. Confirmed directly against a real glb (trimesh's raw 0-255
+    output, no display processing at all): an untextured part's flat
+    color came out as a genuinely-linear PBRMaterial.baseColorFactor
+    (e.g. (2, 8, 41) -- implausibly dark unless it's linear and needs the
+    boost), while a textured part's per-vertex colors were plain sampled
+    PNG pixel bytes (e.g. a caution-stripe texture's (255, 203, 0) --
+    already exactly the display-ready yellow it should be). Applying the
+    same sRGB boost to that second case double-encodes it, washing every
+    textured part out toward white -- confirmed as the actual cause of a
+    real bug report where a textured part rendered near-white in this
+    preview while the same file's Blender-rendered thumbnail showed its
+    real color.
+
+    material_metadata (see model_preview.colors_path / blender_common.py's
+    resolve_material_metadata) is Blender's own authoritative answer to
+    "does this material actually have a texture on Base Color, and what's
+    its baseColorFactor" -- read straight from the same node graph the
+    thumbnail rendered from, instead of re-guessing it from the reloaded
+    glb's material fields the way this function used to (via
+    _part_texture_image). When present for this part's material:
+    - textured: the sampled sRGB pixel is decoded to linear, multiplied by
+      the (linear) baseColorFactor -- glTF's actual compositing rule,
+      which a bare texture sample alone ignores -- then re-encoded to sRGB.
+      Usually a no-op (factor defaults to white) but not always.
+    - flat: same sRGB fix-up as before, just driven by a known fact
+      instead of an inference.
+    When absent entirely (a preview exported before this metadata existed)
+    or this specific material isn't in it, falls back to the old
+    guess-by-_part_texture_image behavior -- old cached previews keep
+    working, just without the factor-compositing correctness.
 
     A collider stand-in mesh is given a fixed diagnostic tint instead --
     see COLLIDER_COLOR -- rather than whatever it would otherwise bake
@@ -129,30 +197,30 @@ def _part_vertex_colors(part: trimesh.Trimesh, is_collider: bool) -> np.ndarray:
     """
     if is_collider:
         return np.tile(COLLIDER_COLOR, (len(part.vertices), 1))
+
+    material_name = getattr(getattr(part.visual, "material", None), "name", None)
+    meta = material_metadata.get(material_name) if material_metadata else None
+
     try:
         colors = np.asarray(part.visual.to_color().vertex_colors, dtype=np.float32) / 255.0
     except Exception:  # noqa: BLE001 - any visual/material quirk falls back to plain grey
         colors = FALLBACK_COLOR
+        meta = None
     if colors.ndim == 1:
         colors = np.tile(colors, (len(part.vertices), 1))
     colors = colors.copy()
-    colors[:, :3] = _linear_to_srgb(colors[:, :3])
+
+    is_textured = meta["has_texture"] if meta is not None else _part_texture_image(part) is not None
+    if is_textured:
+        if meta is not None:
+            factor = np.asarray(meta["base_color_factor"], dtype=np.float32)
+            linear = _srgb_to_linear(colors[:, :3]) * factor
+            colors[:, :3] = _linear_to_srgb(linear)
+        # else: no metadata to composite with -- trust the raw sampled
+        # texture color as-is (already sRGB), same as before this existed.
+    else:
+        colors[:, :3] = _linear_to_srgb(colors[:, :3])
     return colors
-
-
-def _part_texture_image(part: trimesh.Trimesh) -> Image.Image | None:
-    """The actual source texture image behind a part's baked vertex
-    colors, if it has one -- trimesh's two material classes disagree on
-    the attribute name (PBRMaterial.baseColorTexture vs.
-    SimpleMaterial.image), so both are tried. Used for the "Textures"
-    gallery, which shows the real image rather than just the per-vertex
-    colors sampled from it.
-    """
-    material = getattr(part.visual, "material", None)
-    if material is None:
-        return None
-    image = getattr(material, "baseColorTexture", None) or getattr(material, "image", None)
-    return image if isinstance(image, Image.Image) else None
 
 
 def _y_up_to_z_up(vertices: np.ndarray) -> np.ndarray:
@@ -209,12 +277,21 @@ def _looks_like_collider_name(name: str) -> bool:
     return any(token in _COLLIDER_NAME_TOKENS for token in tokens)
 
 
-def load_preview_parts(path: Path) -> list[PreviewPart]:
+def load_preview_parts(path: Path, colors_path: Path | None = None) -> list[PreviewPart]:
     """Returns one PreviewPart per mesh part in the scene, already in
     world space (Scene.dump bakes each part's node transform in) -- unlike
     collapsing everything into one merged mesh, this keeps each part's own
     material/texture distinct, which matters for a multi-material asset (a
     cauldron's body vs. its handle, say).
+
+    colors_path, if given and it exists, is the per-material metadata
+    Blender itself resolved at export time (see model_preview.colors_path
+    / blender_common.py's resolve_material_metadata) -- read once here and
+    handed to _part_vertex_colors for every part, rather than each part
+    re-deriving the same facts by guesswork. Silently ignored if missing
+    (a preview exported before this metadata existed) or unparsable --
+    this is a display nicety, not something worth failing the whole
+    preview load over.
 
     Pure CPU work (trimesh parsing, color baking, the axis fix) -- no Qt
     or OpenGL calls -- so it's safe to run on a background thread. See
@@ -223,6 +300,13 @@ def load_preview_parts(path: Path) -> list[PreviewPart]:
     GUI thread with zero feedback, which is what made the first 3D
     preview in a session look like the app had frozen or crashed.
     """
+    material_metadata: dict | None = None
+    if colors_path is not None and colors_path.exists():
+        try:
+            material_metadata = json.loads(colors_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a corrupt/unreadable cache falls back to guessing
+            material_metadata = None
+
     # A raw .gltf's own image URI is one thing trimesh's default resolver
     # refuses to follow: a shared texture atlas living one level above the
     # model's own folder (a real, common pack layout -- Models/x.gltf
@@ -254,7 +338,7 @@ def load_preview_parts(path: Path) -> list[PreviewPart]:
                 name=name,
                 vertices=vertices,
                 faces=faces,
-                colors=_part_vertex_colors(part, is_collider),
+                colors=_part_vertex_colors(part, is_collider, material_metadata),
                 texture_image=_part_texture_image(part) if not is_collider else None,
                 is_collider=is_collider,
             )

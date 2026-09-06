@@ -295,6 +295,17 @@ class Catalogue:
         path = model_preview.preview_path(self._preview_dir, content_hash)
         return path if path.exists() else None
 
+    def model_preview_colors_path_for(self, content_hash: str) -> Path | None:
+        """The Blender-resolved material-color metadata sidecar for a
+        preview .glb, if one was exported alongside it -- see
+        model_preview.colors_path. None for a preview rendered before this
+        existed; model_preview_dialog.load_preview_parts falls back to its
+        own derivation in that case, so callers can pass None through
+        unconditionally rather than checking first.
+        """
+        path = model_preview.colors_path(self._preview_dir, content_hash)
+        return path if path.exists() else None
+
     def library_asset_path_if_archived(self, pack_name: str, relative_path: str) -> Path | None:
         path = library_assets.asset_library_path(self._assets_dir, pack_name, relative_path)
         return path if path.exists() else None

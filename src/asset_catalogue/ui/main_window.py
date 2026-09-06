@@ -3932,7 +3932,8 @@ class MainWindow(QMainWindow):
             # testing, done invisibly).
             from asset_catalogue.ui.model_preview_dialog import load_preview_parts
 
-            return load_preview_parts(preview_path)
+            colors_path = self._catalogue.model_preview_colors_path_for(content_hash)
+            return load_preview_parts(preview_path, colors_path)
 
         def on_complete(parts) -> None:
             from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog

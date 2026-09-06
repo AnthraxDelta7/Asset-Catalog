@@ -176,6 +176,21 @@ def test_linear_to_srgb_clips_out_of_range_input() -> None:
     np.testing.assert_allclose(result, [0.0, 1.0])
 
 
+def test_srgb_to_linear_matches_known_reference_points() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _srgb_to_linear
+
+    result = _srgb_to_linear(np.array([0.0, 0.735, 1.0], dtype=np.float32))
+    # The inverse of _linear_to_srgb's own reference point.
+    np.testing.assert_allclose(result, [0.0, 0.5, 1.0], atol=0.005)
+
+
+def test_srgb_to_linear_round_trips_with_linear_to_srgb() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _linear_to_srgb, _srgb_to_linear
+
+    original = np.array([0.0, 0.1, 0.3, 0.6, 0.9, 1.0], dtype=np.float32)
+    np.testing.assert_allclose(_srgb_to_linear(_linear_to_srgb(original)), original, atol=1e-4)
+
+
 def test_part_vertex_colors_collider_gets_fixed_diagnostic_tint() -> None:
     import trimesh
 
@@ -230,6 +245,94 @@ def test_part_vertex_colors_falls_back_to_plain_grey_on_any_error() -> None:
     expected = FALLBACK_COLOR.copy()
     expected[:3] = _linear_to_srgb(expected[:3])
     np.testing.assert_allclose(colors, np.tile(expected, (3, 1)))
+
+
+def test_part_vertex_colors_composites_baked_factor_via_metadata() -> None:
+    """Blender's own resolved metadata (see blender_common.py's
+    resolve_material_metadata) can say a textured material also carries a
+    real, non-white baseColorFactor -- glTF's actual compositing rule is
+    factor(linear) * decode_srgb(texture), which a bare texture sample
+    alone ignores. With metadata present, this must do that composite
+    instead of just trusting the raw sample.
+    """
+    import trimesh
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import _linear_to_srgb, _part_vertex_colors, _srgb_to_linear
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    image = Image.new("RGB", (4, 4), (200, 200, 200))
+    uv = np.zeros((len(box.vertices), 2))
+    material = trimesh.visual.material.PBRMaterial(name="Dimmed", baseColorTexture=image)
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=image, material=material)
+
+    factor = [0.5, 0.5, 0.5]
+    metadata = {"Dimmed": {"has_texture": True, "base_color_factor": factor}}
+    colors = _part_vertex_colors(box, is_collider=False, material_metadata=metadata)
+
+    expected = _linear_to_srgb(_srgb_to_linear(np.array([200, 200, 200]) / 255.0) * np.array(factor))
+    np.testing.assert_allclose(colors[0, :3], expected, atol=0.01)
+
+
+def test_part_vertex_colors_flat_material_uses_metadata_factor_directly() -> None:
+    """The flat (untextured) case with metadata present: same sRGB fix-up
+    as always, just driven by Blender's own known-correct has_texture
+    flag instead of guessing it from the reloaded glb's material fields.
+    A duck-typed fake stands in for the part here (rather than trimesh's
+    own ColorVisuals, which has no to_color() method at all in this
+    trimesh version -- see the real materials used in the textured tests
+    above for why those go through TextureVisuals instead).
+    """
+    import numpy as np
+
+    from asset_catalogue.ui.model_preview_dialog import _linear_to_srgb, _part_vertex_colors
+
+    class _Material:
+        name = "Accent"
+
+    class _Visual:
+        material = _Material()
+
+        def to_color(self):
+            class _Colors:
+                vertex_colors = np.array([2, 8, 41, 255])
+
+            return _Colors()
+
+    class _Part:
+        visual = _Visual()
+        vertices = np.zeros((3, 3))
+
+    metadata = {"Accent": {"has_texture": False, "base_color_factor": [2 / 255, 8 / 255, 41 / 255]}}
+    colors = _part_vertex_colors(_Part(), is_collider=False, material_metadata=metadata)
+
+    expected = _linear_to_srgb(np.array([2, 8, 41]) / 255.0)
+    np.testing.assert_allclose(colors[0, :3], expected, atol=0.01)
+
+
+def test_part_vertex_colors_falls_back_to_guessing_when_material_not_in_metadata() -> None:
+    """metadata present for the file overall, but this specific part's
+    material name isn't in it (a legacy sidecar from before a material was
+    added, or a name mismatch) -- must fall back to the old guess-by-
+    _part_texture_image behavior rather than crashing or silently
+    mis-coloring the part.
+    """
+    import trimesh
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import _part_vertex_colors
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    image = Image.new("RGB", (4, 4), (24, 50, 111))
+    uv = np.zeros((len(box.vertices), 2))
+    material = trimesh.visual.material.PBRMaterial(name="Unlisted", baseColorTexture=image)
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=image, material=material)
+
+    metadata = {"SomeOtherMaterial": {"has_texture": False, "base_color_factor": [1.0, 1.0, 1.0]}}
+    colors = _part_vertex_colors(box, is_collider=False, material_metadata=metadata)
+
+    # Same result as the no-metadata-at-all case: raw sample trusted as-is.
+    np.testing.assert_allclose(colors[0, :3], np.array([24, 50, 111]) / 255.0, atol=0.01)
 
 
 def test_part_texture_image_none_when_no_material() -> None:
@@ -308,6 +411,59 @@ def test_pil_image_to_qpixmap_round_trips_dimensions(qapp) -> None:
     assert pixmap.isNull() is False
     assert pixmap.width() == 16
     assert pixmap.height() == 24
+
+
+def test_load_preview_parts_uses_colors_json_sidecar_when_present(tmp_path: Path) -> None:
+    """End-to-end: a real glb plus its Blender-exported colors.json sidecar
+    (see model_preview.colors_path / blender_common.py's
+    resolve_material_metadata) -- the resulting part's color should be the
+    metadata-driven composite, not whatever the old guess-by-
+    _part_texture_image path would have produced.
+    """
+    import trimesh
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    image = Image.new("RGB", (4, 4), (200, 200, 200))
+    uv = np.zeros((len(box.vertices), 2))
+    material = trimesh.visual.material.PBRMaterial(name="Dimmed", baseColorTexture=image)
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=image, material=material)
+
+    scene = trimesh.Scene()
+    scene.add_geometry(box, node_name="Dimmed", geom_name="mesh_body")
+    glb_path = tmp_path / "dimmed.glb"
+    scene.export(glb_path)
+
+    colors_path = tmp_path / "dimmed.colors.json"
+    colors_path.write_text(json.dumps({"Dimmed": {"has_texture": True, "base_color_factor": [0.5, 0.5, 0.5]}}))
+
+    with_metadata = load_preview_parts(glb_path, colors_path)
+    without_metadata = load_preview_parts(glb_path, None)
+
+    # The composited (dimmed) result must actually differ from the raw
+    # sample trusted as-is -- otherwise this test would pass even if the
+    # sidecar were silently ignored.
+    assert not np.allclose(with_metadata[0].colors[0, :3], without_metadata[0].colors[0, :3])
+    np.testing.assert_allclose(without_metadata[0].colors[0, :3], np.array([200, 200, 200]) / 255.0, atol=0.01)
+
+
+def test_load_preview_parts_ignores_a_missing_colors_sidecar(tmp_path: Path) -> None:
+    """colors_path pointing at a file that doesn't exist (the common case
+    -- a preview exported before this metadata existed) must fall back to
+    the old guess-based behavior rather than erroring.
+    """
+    import trimesh
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    box_path = tmp_path / "plain.glb"
+    box.export(box_path)
+
+    parts = load_preview_parts(box_path, tmp_path / "does_not_exist.colors.json")
+    assert len(parts) == 1
 
 
 def test_load_preview_parts_flags_collider_and_skips_empty_parts(tmp_path: Path) -> None:

@@ -45,6 +45,26 @@ def test_missing_preview_filter_skips_cached_assets(
     assert missing == [rows["b.obj"]]
 
 
+def test_model_preview_colors_path_for_none_until_the_sidecar_exists(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    from asset_catalogue.catalogue import Catalogue
+
+    pack_id = make_pack(conn, staging_folder, "Pack")
+    _write_dummy_model(staging_folder, "Pack", "a.obj")
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    content_hash = conn.execute("SELECT content_hash FROM assets").fetchone()["content_hash"]
+
+    catalogue = Catalogue(conn, staging_folder, staging_folder / "thumbs", staging_folder / "assets")
+    assert catalogue.model_preview_colors_path_for(content_hash) is None
+
+    colors_path = model_preview.colors_path(catalogue._preview_dir, content_hash)
+    colors_path.parent.mkdir(parents=True, exist_ok=True)
+    colors_path.write_text('{"Body": {"has_texture": false, "base_color_factor": [0.5, 0.5, 0.5]}}')
+
+    assert catalogue.model_preview_colors_path_for(content_hash) == colors_path
+
+
 def test_render_model_previews_bg_skips_when_all_cached(
     conn: sqlite3.Connection, staging_folder: Path, monkeypatch, tmp_path: Path
 ) -> None:

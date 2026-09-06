@@ -124,6 +124,50 @@ def _material_has_any_image_texture(material) -> bool:
     return any(node.type == "TEX_IMAGE" for node in material.node_tree.nodes)
 
 
+def resolve_material_metadata(mesh_objects) -> dict:
+    """material_name -> {"has_texture": bool, "base_color_factor": [r, g, b]}
+    for every material actually used across mesh_objects, read straight off
+    each material's own Principled BSDF -- the exact same node graph the
+    static thumbnail renders from, corrections (relink/injection/overrides)
+    already applied by the time this runs.
+
+    Exists so the interactive 3D preview (model_preview_dialog.py, which has
+    no bpy access and instead re-parses the exported .glb through trimesh)
+    doesn't have to *guess* at the same two facts a second time. It used to:
+    whether a part's to_color() output needs a linear->sRGB fix-up (only
+    correct for a flat baseColorFactor, not a texture-sampled color -- see
+    that module's docstring) was inferred from whether the reloaded glb's
+    material happened to carry a baseColorTexture, which is right for the
+    common case but silently drops a real, non-white baseColorFactor
+    layered on top of a texture (glTF composites factor * texture; trimesh's
+    to_color() alone doesn't). Cached alongside the preview .glb (see
+    model_preview.colors_path) instead of recomputed by guesswork.
+
+    base_color_factor is Blender's own default_value for the Base Color
+    input regardless of whether something is linked to it -- when nothing
+    is linked, this *is* the material's flat color (needs the sRGB fix-up
+    at display time); when a texture is linked, it's still the correct
+    factor to multiply that texture's sampled color by (usually white,
+    i.e. leaves the texture unchanged, but not always).
+    """
+    metadata: dict = {}
+    for name, material in _mesh_materials(mesh_objects).items():
+        if not material.use_nodes:
+            metadata[name] = {"has_texture": False, "base_color_factor": [0.8, 0.8, 0.8]}
+            continue
+        bsdf = material.node_tree.nodes.get("Principled BSDF")
+        if bsdf is None:
+            metadata[name] = {"has_texture": False, "base_color_factor": [0.8, 0.8, 0.8]}
+            continue
+        base_color_input = bsdf.inputs["Base Color"]
+        metadata[name] = {
+            "has_texture": base_color_input.is_linked
+            and base_color_input.links[0].from_node.type == "TEX_IMAGE",
+            "base_color_factor": list(base_color_input.default_value[:3]),
+        }
+    return metadata
+
+
 def _assign_base_color_texture(material, texture_path: Path) -> bool:
     if not material.use_nodes:
         material.use_nodes = True
