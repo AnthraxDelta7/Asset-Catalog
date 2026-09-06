@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from asset_catalogue import (
     blender_render,
+    crash_log,
     godot_export,
     library_health,
     library_stats,
@@ -2113,6 +2114,11 @@ class _BackgroundWorker(QThread):
         try:
             result = self._fn(self.progress.emit)
         except Exception as exc:  # noqa: BLE001 -- reported to the UI, not swallowed
+            # The QMessageBox this feeds only ever shows str(exc) -- often
+            # far less informative than the real traceback, which is why
+            # this is logged in full even though the failure itself is
+            # already being handled gracefully, not just re-raised.
+            crash_log.log_exception("Background job failed", exc)
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result)
@@ -4328,6 +4334,11 @@ def _prewarm_opengl(window: "MainWindow") -> None:
 
 
 def main() -> None:
+    # First, before anything else has a chance to go wrong -- see
+    # crash_log.py. sys.excepthook is a process-wide global, so this only
+    # needs to happen once, right at the top.
+    crash_log.setup_logging()
+
     # Both must happen before QApplication is constructed to take effect.
     #
     # AA_ShareOpenGLContexts: each new pyqtgraph GLViewWidget (the 3D
@@ -4350,6 +4361,7 @@ def main() -> None:
     QSurfaceFormat.setDefaultFormat(surface_format)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(paths.package_dir() / "app_icon.png")))
+    crash_log.install_qt_message_handler()
 
     splash = _StartupSplash()
     splash.show()

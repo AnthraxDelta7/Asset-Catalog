@@ -10,3 +10,4 @@ dist/
 settings.json
 *.db
 /thumbnails/
+/logs/
