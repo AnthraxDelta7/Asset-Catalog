@@ -223,7 +223,19 @@ def load_preview_parts(path: Path) -> list[PreviewPart]:
     GUI thread with zero feedback, which is what made the first 3D
     preview in a session look like the app had frozen or crashed.
     """
-    loaded = trimesh.load(str(path))
+    # A raw .gltf's own image URI is one thing trimesh's default resolver
+    # refuses to follow: a shared texture atlas living one level above the
+    # model's own folder (a real, common pack layout -- Models/x.gltf
+    # referencing ../Textures/atlas.png -- confirmed against a real Synty
+    # POLYGON pack) is blocked as "escapes resolver root" unless told
+    # otherwise. Silent failure, not an exception: the material loads fine
+    # with baseColorTexture simply absent, so this would otherwise look
+    # like the asset just has no texture at all rather than a resolver
+    # being overly cautious about a path that's completely legitimate for
+    # a local file already sitting on disk (there's no untrusted-input
+    # concern here the way there would be for a downloaded/remote asset).
+    resolver = trimesh.resolvers.FilePathResolver(str(path), allow_anywhere=True)
+    loaded = trimesh.load(str(path), resolver=resolver)
     parts = loaded.dump(concatenate=False) if isinstance(loaded, trimesh.Scene) else [loaded]
     result = []
     for part in parts:

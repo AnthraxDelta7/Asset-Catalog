@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -102,3 +105,45 @@ def test_single_part_asset_still_shows_the_parts_panel(qapp) -> None:
     assert dialog.parts_panel.isHidden() is False
     assert dialog.parts_list.count() == 1
     assert dialog.parts_list.item(0).text() == "MainMesh"
+
+
+def test_load_preview_parts_resolves_a_texture_one_folder_above_the_model(tmp_path: Path) -> None:
+    """A raw multi-file .gltf referencing a shared texture atlas one folder
+    above its own (Models/x.gltf -> ../Textures/atlas.png) is a real,
+    common pack layout -- confirmed against an actual Synty POLYGON asset
+    pack. trimesh's default resolver refuses to follow a path that escapes
+    the model's own directory (a reasonable default for untrusted/remote
+    content, but wrong here: this is a local file already on disk with
+    nothing to sandbox against) and fails *silently* -- the material loads
+    fine with baseColorTexture simply absent, so an asset like this looked
+    completely untextured despite having a perfectly real, present texture.
+    """
+    import trimesh
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    model_dir = tmp_path / "Models"
+    model_dir.mkdir()
+    texture_dir = tmp_path / "Textures"
+    texture_dir.mkdir()
+
+    from PIL import Image
+
+    Image.new("RGB", (4, 4), (200, 50, 200)).save(texture_dir / "atlas.png")
+
+    gltf_path = model_dir / "box.gltf"
+    trimesh.creation.box(extents=(1, 1, 1)).export(gltf_path)
+
+    with open(gltf_path) as f:
+        doc = json.load(f)
+    doc["images"] = [{"uri": "../Textures/atlas.png"}]
+    doc["textures"] = [{"source": 0}]
+    doc["materials"] = [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]
+    doc["meshes"][0]["primitives"][0]["material"] = 0
+    with open(gltf_path, "w") as f:
+        json.dump(doc, f)
+
+    parts = load_preview_parts(gltf_path)
+    assert len(parts) == 1
+    assert parts[0].texture_image is not None
+    assert parts[0].texture_image.size == (4, 4)
