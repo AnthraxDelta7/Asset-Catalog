@@ -147,3 +147,200 @@ def test_load_preview_parts_resolves_a_texture_one_folder_above_the_model(tmp_pa
     assert len(parts) == 1
     assert parts[0].texture_image is not None
     assert parts[0].texture_image.size == (4, 4)
+
+
+def test_y_up_to_z_up_rotates_plus_90_about_x() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _y_up_to_z_up
+
+    vertices = np.array([[1.0, 2.0, 3.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    rotated = _y_up_to_z_up(vertices)
+
+    # Documented mapping: (x, y, z) -> (x, -z, y).
+    np.testing.assert_allclose(rotated, [[1.0, -3.0, 2.0], [0.0, -1.0, 0.0]])
+
+
+def test_linear_to_srgb_matches_known_reference_points() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _linear_to_srgb
+
+    result = _linear_to_srgb(np.array([0.0, 0.5, 1.0], dtype=np.float32))
+    # 0.5 linear -> ~0.735 sRGB is a standard, widely-cited reference value
+    # for this exact conversion -- not just re-deriving the function's own
+    # formula as the test.
+    np.testing.assert_allclose(result, [0.0, 0.735, 1.0], atol=0.005)
+
+
+def test_linear_to_srgb_clips_out_of_range_input() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _linear_to_srgb
+
+    result = _linear_to_srgb(np.array([-0.5, 1.5], dtype=np.float32))
+    np.testing.assert_allclose(result, [0.0, 1.0])
+
+
+def test_part_vertex_colors_collider_gets_fixed_diagnostic_tint() -> None:
+    import trimesh
+
+    from asset_catalogue.ui.model_preview_dialog import COLLIDER_COLOR, _part_vertex_colors
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    colors = _part_vertex_colors(box, is_collider=True)
+
+    assert colors.shape == (len(box.vertices), 4)
+    np.testing.assert_allclose(colors, np.tile(COLLIDER_COLOR, (len(box.vertices), 1)))
+
+
+def test_part_vertex_colors_flat_material_broadcasts_and_srgb_encodes() -> None:
+    import trimesh
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    box.visual = trimesh.visual.ColorVisuals(box, face_colors=[200, 50, 50, 255])
+
+    from asset_catalogue.ui.model_preview_dialog import _part_vertex_colors
+
+    colors = _part_vertex_colors(box, is_collider=False)
+    assert colors.shape == (len(box.vertices), 4)
+    # Every vertex should end up identically colored (a single flat
+    # material, no per-vertex variation), and RGB channels sRGB-encoded --
+    # brighter than the raw 200/255 input, alpha left alone at 1.0.
+    assert np.allclose(colors[:, 3], 1.0)
+    assert np.all(colors[0] == colors[-1])
+    assert colors[0, 0] > 200 / 255
+
+
+def test_part_vertex_colors_falls_back_to_plain_grey_on_any_error() -> None:
+    from asset_catalogue.ui.model_preview_dialog import (
+        FALLBACK_COLOR,
+        _linear_to_srgb,
+        _part_vertex_colors,
+    )
+
+    class _BrokenVisual:
+        def to_color(self):
+            raise RuntimeError("simulated visual/material quirk")
+
+    class _BrokenPart:
+        visual = _BrokenVisual()
+        vertices = np.zeros((3, 3))
+
+    colors = _part_vertex_colors(_BrokenPart(), is_collider=False)
+    assert colors.shape == (3, 4)
+    # The fallback color still goes through the same sRGB encode as any
+    # other color (applied unconditionally after the try/except, not
+    # skipped for the fallback case) -- expected value is FALLBACK_COLOR
+    # post-encode, not the raw constant itself.
+    expected = FALLBACK_COLOR.copy()
+    expected[:3] = _linear_to_srgb(expected[:3])
+    np.testing.assert_allclose(colors, np.tile(expected, (3, 1)))
+
+
+def test_part_texture_image_none_when_no_material() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _part_texture_image
+
+    class _NoMaterialVisual:
+        material = None
+
+    class _Part:
+        visual = _NoMaterialVisual()
+
+    assert _part_texture_image(_Part()) is None
+
+
+def test_part_texture_image_reads_pbr_material_base_color_texture() -> None:
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import _part_texture_image
+
+    image = Image.new("RGB", (2, 2), (10, 20, 30))
+
+    class _Material:
+        baseColorTexture = image
+
+    class _Visual:
+        material = _Material()
+
+    class _Part:
+        visual = _Visual()
+
+    assert _part_texture_image(_Part()) is image
+
+
+def test_part_texture_image_reads_simple_material_image() -> None:
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import _part_texture_image
+
+    texture_image = Image.new("RGB", (2, 2), (10, 20, 30))
+
+    class _Material:
+        image = texture_image
+
+    class _Visual:
+        material = _Material()
+
+    class _Part:
+        visual = _Visual()
+
+    assert _part_texture_image(_Part()) is texture_image
+
+
+def test_part_texture_image_none_when_neither_attribute_is_a_real_image() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _part_texture_image
+
+    class _Material:
+        pass
+
+    class _Visual:
+        material = _Material()
+
+    class _Part:
+        visual = _Visual()
+
+    assert _part_texture_image(_Part()) is None
+
+
+def test_pil_image_to_qpixmap_round_trips_dimensions(qapp) -> None:
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import _pil_image_to_qpixmap
+
+    image = Image.new("RGBA", (16, 24), (255, 0, 0, 255))
+    pixmap = _pil_image_to_qpixmap(image)
+
+    assert pixmap.isNull() is False
+    assert pixmap.width() == 16
+    assert pixmap.height() == 24
+
+
+def test_load_preview_parts_flags_collider_and_skips_empty_parts(tmp_path: Path) -> None:
+    """An integration-level check spanning the whole function, distinct
+    from the single-part resolver-focused test above: a real multi-node
+    scene with a plain mesh, a collider-named mesh, and an all-zero-vertex
+    mesh (the shape a real Godot export of a mesh-less scene produces --
+    see godot_export.py's _has_real_geometry) mixed together.
+    """
+    import trimesh
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    visual_box = trimesh.creation.box(extents=(1, 1, 1))
+    collider_box = trimesh.creation.box(extents=(2, 2, 2))
+    empty_mesh = trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3), dtype=int))
+
+    scene = trimesh.Scene()
+    scene.add_geometry(visual_box, node_name="Visual", geom_name="mesh_visual")
+    scene.add_geometry(collider_box, node_name="CollisionShape3D_collider", geom_name="mesh_collider")
+    scene.add_geometry(empty_mesh, node_name="EmptyMarker", geom_name="mesh_empty")
+
+    glb_path = tmp_path / "multi_part.glb"
+    scene.export(glb_path)
+
+    parts = load_preview_parts(glb_path)
+
+    # The zero-vertex part never made it into the exported glb at all (see
+    # test_has_real_geometry_false_for_an_empty_scene's own note on this),
+    # so only the two real parts should come back.
+    assert len(parts) == 2
+    by_collider = {part.is_collider: part for part in parts}
+    assert set(by_collider) == {True, False}
+    assert "collider" in by_collider[True].name.lower()
+    assert by_collider[True].texture_image is None
+    assert len(by_collider[False].vertices) == len(visual_box.vertices)

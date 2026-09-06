@@ -287,13 +287,7 @@ class Model3DPreviewDialog(QDialog):
         self.resize(820, 560)
 
         layout = QVBoxLayout(self)
-        # Matches pyqtgraph's own GLViewWidget.mouseMoveEvent exactly (read
-        # the source rather than assumed): plain left-drag orbits, wheel
-        # zooms, and pan is Ctrl+left-drag -- there is no right-drag
-        # handling anywhere in the widget, and no Shift-modifier handling
-        # either. A previous version of this hint claimed "right-drag to
-        # zoom" and "Shift+drag to pan", neither of which the underlying
-        # widget has ever actually done.
+        # See the class docstring above for why these specific controls.
         hint = QLabel("Drag to rotate · wheel to zoom · Ctrl+drag to pan")
         layout.addWidget(hint)
 

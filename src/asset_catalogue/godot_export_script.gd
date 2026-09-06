@@ -69,7 +69,7 @@ func _initialize() -> void:
 		quit(1)
 		return
 
-	var include_colliders: bool = payload.get("include_colliders", false)
+	var include_colliders: bool = payload.get("include_colliders", true)
 	for job in payload["jobs"]:
 		_export_one(job["scene_path"], job["output_path"], include_colliders)
 
@@ -91,11 +91,20 @@ func _export_one(scene_path: String, output_path: String, include_colliders: boo
 	var err := gltf_document.append_from_scene(scene_root, gltf_state)
 	if err != OK:
 		print("GODOT_EXPORT_RESULT|%s|error|append_from_scene failed (%s)" % [scene_path, err])
-		scene_root.queue_free()
+		scene_root.free()
 		return
 
 	err = gltf_document.write_to_filesystem(gltf_state, output_path)
-	scene_root.queue_free()
+	# .free() (immediate), not .queue_free() (deferred to the next idle
+	# frame) -- _initialize() runs the whole job list in one synchronous
+	# loop with no frame yields in between, so queue_free() would never
+	# actually get processed until the process exits regardless of how
+	# many scenes ran before it. For a real pack-sized batch (100+ scenes)
+	# that meant every scene tree stayed alive in memory for the entire
+	# run instead of being freed as each job finished. scene_root was
+	# never added to the live SceneTree, so an immediate .free() is safe
+	# here (no signals or physics callbacks pending on it).
+	scene_root.free()
 	if err != OK:
 		print("GODOT_EXPORT_RESULT|%s|error|write_to_filesystem failed (%s)" % [scene_path, err])
 		return

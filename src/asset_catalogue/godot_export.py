@@ -176,6 +176,40 @@ def _has_real_geometry(glb_path: Path) -> bool:
     return any(len(getattr(mesh, "vertices", [])) > 0 for mesh in geometries)
 
 
+def _build_export_jobs(
+    project_root: Path, scene_paths: list[Path]
+) -> tuple[list[dict], dict[str, Path]]:
+    """Turns absolute scene paths into the res://-relative job list the
+    export script expects, plus a res:// -> output-path lookup for
+    matching each GODOT_EXPORT_RESULT line back to a real filesystem path.
+    Pulled out of export_scenes_to_glb as pure, no-subprocess logic so it
+    can be tested directly rather than only indirectly through a real
+    Godot run.
+    """
+    jobs = []
+    output_by_scene: dict[str, Path] = {}
+    for scene_path in scene_paths:
+        relative = scene_path.relative_to(project_root).as_posix()
+        output_path = scene_path.with_suffix(".glb")
+        res_path = f"res://{relative}"
+        jobs.append({"scene_path": res_path, "output_path": str(output_path)})
+        output_by_scene[res_path] = output_path
+    return jobs, output_by_scene
+
+
+def _parse_export_result_line(line: str) -> tuple[str, str, str] | None:
+    """Parses one GODOT_EXPORT_RESULT|<scene_path>|<status>|<detail> line
+    from the export script's stdout into (scene_path, status, detail).
+    Returns None for any other line -- Godot's own startup/shutdown
+    logging shares the same stdout stream and is expected, harmless noise
+    to skip past, not something to raise on encountering.
+    """
+    if not line.startswith("GODOT_EXPORT_RESULT|"):
+        return None
+    _, scene_res_path, status, detail = line.split("|", 3)
+    return scene_res_path, status, detail
+
+
 def export_scenes_to_glb(
     godot_exe: Path,
     project_root: Path,
@@ -202,13 +236,7 @@ def export_scenes_to_glb(
     if not scene_paths:
         return stats
 
-    jobs = []
-    output_by_scene: dict[str, Path] = {}
-    for scene_path in scene_paths:
-        relative = scene_path.relative_to(project_root).as_posix()
-        output_path = scene_path.with_suffix(".glb")
-        jobs.append({"scene_path": f"res://{relative}", "output_path": str(output_path)})
-        output_by_scene[f"res://{relative}"] = output_path
+    jobs, output_by_scene = _build_export_jobs(project_root, scene_paths)
 
     report(
         f"Starting Godot to export {len(jobs)} scene{'s' if len(jobs) != 1 else ''} "
@@ -241,11 +269,11 @@ def export_scenes_to_glb(
 
         seen: set[str] = set()
         assert process.stdout is not None
-        for line in process.stdout:
-            line = line.strip()
-            if not line.startswith("GODOT_EXPORT_RESULT|"):
+        for raw_line in process.stdout:
+            parsed = _parse_export_result_line(raw_line.strip())
+            if parsed is None:
                 continue
-            _, scene_res_path, status, detail = line.split("|", 3)
+            scene_res_path, status, detail = parsed
             seen.add(scene_res_path)
             display_name = Path(scene_res_path).name
             if status != "ok":

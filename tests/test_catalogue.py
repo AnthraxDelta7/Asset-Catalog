@@ -238,3 +238,91 @@ def test_model_preview_path_for(catalogue_with_asset: tuple[Catalogue, int]) -> 
     preview_path.parent.mkdir(parents=True, exist_ok=True)
     preview_path.write_bytes(b"glTF")
     assert catalogue.model_preview_path_for(asset.content_hash) == preview_path
+
+
+def test_find_godot_projects_returns_paths_relative_to_staging(catalogue: Catalogue) -> None:
+    staging = catalogue.staging_folder()
+    (staging / "MyPack").mkdir()
+    (staging / "MyPack" / "project.godot").write_text("")
+    (staging / "NotAGodotPack").mkdir()
+
+    assert catalogue.find_godot_projects("MyPack") == ["MyPack"]
+
+
+def test_find_godot_projects_empty_when_none_found(catalogue: Catalogue) -> None:
+    staging = catalogue.staging_folder()
+    (staging / "PlainPack").mkdir()
+
+    assert catalogue.find_godot_projects("PlainPack") == []
+
+
+def test_extract_godot_scenes_batch_bg_runs_one_export_per_project(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    """Doesn't touch a real Godot install -- resolve_godot and
+    export_scenes_to_glb are exactly the two calls that do (subprocess
+    work covered by real, non-mocked verification elsewhere, per this
+    project's convention for external-tool-invoking code); what's worth
+    locking down here with a test is the orchestration around them: one
+    export call per requested project, in order, with results paired back
+    up with the right project name.
+    """
+    from unittest.mock import patch
+
+    from asset_catalogue import godot_export
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(Path(catalogue._thumbnail_dir).parent),
+            godot_path="C:/fake/godot.exe",
+        )
+    )
+
+    staging = catalogue.staging_folder()
+    for name in ("PackA", "PackB"):
+        (staging / name).mkdir()
+        (staging / name / "project.godot").write_text("")
+
+    fake_godot_exe = Path("C:/fake/godot.exe")
+    export_calls = []
+
+    def fake_export_scenes_to_glb(godot_exe, project_root, scenes, include_colliders, on_progress=None):
+        export_calls.append((godot_exe, project_root.name, include_colliders))
+        return godot_export.GodotExportStats(exported=1)
+
+    with (
+        patch.object(godot_export, "resolve_godot", return_value=(fake_godot_exe, None)),
+        patch.object(godot_export, "export_scenes_to_glb", side_effect=fake_export_scenes_to_glb),
+    ):
+        results = catalogue.extract_godot_scenes_batch_bg(["PackA", "PackB"], include_colliders=False)
+
+    assert [name for name, _stats in results] == ["PackA", "PackB"]
+    assert all(stats.exported == 1 for _name, stats in results)
+    assert export_calls == [
+        (fake_godot_exe, "PackA", False),
+        (fake_godot_exe, "PackB", False),
+    ]
+
+
+def test_extract_godot_scenes_batch_bg_raises_when_godot_unavailable(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    from unittest.mock import patch
+
+    from asset_catalogue import godot_export
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(Path(catalogue._thumbnail_dir).parent),
+        )
+    )
+
+    with patch.object(godot_export, "resolve_godot", return_value=(None, "Godot not found.")):
+        with pytest.raises(RuntimeError, match="Godot not found"):
+            catalogue.extract_godot_scenes_batch_bg(["AnyPack"])
