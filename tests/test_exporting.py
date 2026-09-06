@@ -21,6 +21,46 @@ def test_select_assets_filters_by_asset_ids(conn: sqlite3.Connection, staging_fo
     assert one[0]["id"] == all_ids[0]
 
 
+def test_select_assets_filters_by_pack_asset_type_and_singular_asset_id(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    write_texture(staging_folder, "PackA", "a.png", color=(1, 2, 3))
+    write_texture(staging_folder, "PackB", "b.png", color=(4, 5, 6))
+    pack_a_id, _ = ingest.get_or_create_pack(conn, "PackA", "PackA", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackA", pack_a_id)
+    pack_b_id, _ = ingest.get_or_create_pack(conn, "PackB", "PackB", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackB", pack_b_id)
+    a_id = conn.execute("SELECT id FROM assets WHERE filename = 'a.png'").fetchone()["id"]
+
+    by_pack = exporting.select_assets(conn, pack="PackA")
+    assert {row["id"] for row in by_pack} == {a_id}
+
+    by_type = exporting.select_assets(conn, asset_type="texture")
+    assert len(by_type) == 2
+
+    by_type_none = exporting.select_assets(conn, asset_type="model")
+    assert by_type_none == []
+
+    by_single_id = exporting.select_assets(conn, asset_id=a_id)
+    assert {row["id"] for row in by_single_id} == {a_id}
+
+
+def test_select_assets_filters_by_tag(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    from asset_catalogue import tagging
+
+    write_texture(staging_folder, "Pack", "a.png", color=(1, 2, 3))
+    write_texture(staging_folder, "Pack", "b.png", color=(4, 5, 6))
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    a_id = conn.execute("SELECT id FROM assets WHERE filename = 'a.png'").fetchone()["id"]
+    tag_id = tagging.get_or_create_tag(conn, "weapons", None)
+    tagging.tag_asset(conn, a_id, tag_id)
+
+    tagged = exporting.select_assets(conn, tag="weapons")
+
+    assert {row["id"] for row in tagged} == {a_id}
+
+
 def test_export_assets_copies_files_preserving_pack_subfolder(
     conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
 ) -> None:

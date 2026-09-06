@@ -38,6 +38,26 @@ def test_check_integrity_flags_missing_library_copy(
     assert library_health.MISSING_LIBRARY_COPY in types
 
 
+def test_check_integrity_with_no_staging_folder_skips_the_staging_check(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    """staging_folder=None is a documented, real case (no staging folder
+    currently configured, or one not needed for this check) -- the
+    staging-source check must be skipped cleanly, not raise trying to
+    join None with a relative path, and must not report a false
+    MISSING_STAGING_SOURCE for an asset whose staging copy is actually
+    still there (unreachable) or has already been legitimately cleaned
+    up (the documented common case this check treats as informational).
+    """
+    _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+
+    report = library_health.check_integrity(conn, None, assets_dir, thumbnail_dir)
+
+    assert report.checked_count == 1
+    types = [i.issue_type for i in report.issues]
+    assert library_health.MISSING_STAGING_SOURCE not in types
+
+
 def test_check_integrity_flags_missing_thumbnail_file_when_status_says_done(
     conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
 ) -> None:

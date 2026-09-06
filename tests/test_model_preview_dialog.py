@@ -204,12 +204,30 @@ def test_part_vertex_colors_collider_gets_fixed_diagnostic_tint() -> None:
 
 
 def test_part_vertex_colors_flat_material_broadcasts_and_srgb_encodes() -> None:
+    """Regression note: this used to build the flat material via
+    trimesh.visual.ColorVisuals(face_colors=...), which has no to_color()
+    method at all in this trimesh version -- confirmed directly
+    (hasattr(..., 'to_color') is False). The test still passed, but only
+    because that AttributeError was being swallowed by
+    _part_vertex_colors' own broad except-Exception fallback, so this was
+    actually exercising the FALLBACK_COLOR path (the next test down),
+    not the flat-material path its name and assertions claim. A material
+    with a real PBRMaterial.baseColorFactor and no texture is what
+    trimesh's TextureVisuals actually produces for a flat-colored asset,
+    and its to_color() does return the flat RGBA this test needs.
+    """
     import trimesh
 
     box = trimesh.creation.box(extents=(1, 1, 1))
-    box.visual = trimesh.visual.ColorVisuals(box, face_colors=[200, 50, 50, 255])
+    material = trimesh.visual.material.PBRMaterial(baseColorFactor=[200, 50, 50, 255])
+    box.visual = trimesh.visual.TextureVisuals(material=material)
 
-    from asset_catalogue.ui.model_preview_dialog import _part_vertex_colors
+    from asset_catalogue.ui.model_preview_dialog import _part_texture_image, _part_vertex_colors
+
+    # Confirms this construction actually exercises the flat-material
+    # branch (no texture) rather than accidentally being textured -- the
+    # whole point of rebuilding this test.
+    assert _part_texture_image(box) is None
 
     colors = _part_vertex_colors(box, is_collider=False)
     assert colors.shape == (len(box.vertices), 4)
@@ -245,6 +263,40 @@ def test_part_vertex_colors_falls_back_to_plain_grey_on_any_error() -> None:
     expected = FALLBACK_COLOR.copy()
     expected[:3] = _linear_to_srgb(expected[:3])
     np.testing.assert_allclose(colors, np.tile(expected, (3, 1)))
+
+
+def test_part_vertex_colors_skips_srgb_for_a_real_texture() -> None:
+    """The real bug this guards against: trimesh's to_color() returns
+    genuinely different things depending on whether a part has an actual
+    baseColorTexture image (already sRGB-encoded PNG pixel bytes, no
+    further processing needed) or only a flat baseColorFactor (linear,
+    needs the boost -- see test_part_vertex_colors_flat_material_...
+    above) -- confirmed directly against a real glb: an untextured part's
+    baseColorFactor came out implausibly dark unless treated as linear,
+    while a textured part's sampled pixels (e.g. a caution-stripe
+    texture's (255, 203, 0)) were already exactly the display-ready
+    color they should be. Applying _linear_to_srgb to the textured case
+    double-encodes it, washing the color out toward white -- this is
+    exactly what made a real textured part render near-white in this
+    preview while the same file's Blender-rendered thumbnail showed its
+    actual (much darker, olive) color.
+    """
+    import trimesh
+    from PIL import Image
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    # A deliberately dark texture -- if this got double-encoded it would
+    # come out visibly brighter than the raw pixel value.
+    image = Image.new("RGB", (4, 4), (24, 50, 111))
+    uv = np.zeros((len(box.vertices), 2))
+    material = trimesh.visual.material.PBRMaterial(baseColorTexture=image)
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=image, material=material)
+
+    from asset_catalogue.ui.model_preview_dialog import _part_vertex_colors
+
+    colors = _part_vertex_colors(box, is_collider=False)
+    np.testing.assert_allclose(colors[0, :3], np.array([24, 50, 111]) / 255.0, atol=0.01)
+    assert np.allclose(colors[:, 3], 1.0)
 
 
 def test_part_vertex_colors_composites_baked_factor_via_metadata() -> None:

@@ -212,3 +212,96 @@ def test_resolve_godot_succeeds_for_a_supported_version(tmp_path: Path) -> None:
         godot_exe, error = godot_export.resolve_godot(None)
     assert godot_exe == fake_exe
     assert error is None
+
+
+def test_find_godot_falls_back_to_windows_search_dirs(tmp_path: Path) -> None:
+    """The PATH lookup (shutil.which) is only ever tested implicitly by
+    it failing (no godot on the test machine's PATH) -- this actually
+    exercises the glob-and-sort-by-version fallback finding something,
+    not just that branch being effectively disabled.
+    """
+    search_dir = tmp_path / "Godot"
+    versioned = search_dir / "4.2"
+    versioned.mkdir(parents=True)
+    older = versioned / "Godot_v4.2-stable_win64.exe"
+    older.write_bytes(b"")
+    newer_dir = search_dir / "4.4"
+    newer_dir.mkdir()
+    newer = newer_dir / "Godot_v4.4-stable_win64.exe"
+    newer.write_bytes(b"")
+
+    with (
+        patch.object(godot_export.shutil, "which", return_value=None),
+        patch.object(godot_export, "_WINDOWS_SEARCH_DIRS", (search_dir,)),
+    ):
+        found = godot_export.find_godot(None)
+
+    # sorted(..., reverse=True) on the glob results -- "Godot_v4.4..."
+    # sorts after "Godot_v4.2..." lexicographically, so the newer one
+    # wins when both exist.
+    assert found == newer
+
+
+def test_find_godot_returns_none_when_search_dir_does_not_exist(tmp_path: Path) -> None:
+    with (
+        patch.object(godot_export.shutil, "which", return_value=None),
+        patch.object(godot_export, "_WINDOWS_SEARCH_DIRS", (tmp_path / "DoesNotExist",)),
+    ):
+        assert godot_export.find_godot(None) is None
+
+
+def _fake_export_popen(lines: list[str]):
+    process = MagicMock()
+    process.stdout = iter(line + "\n" for line in lines)
+    process.wait.return_value = None
+    process.returncode = 0
+    return process
+
+
+def test_export_scenes_to_glb_orchestrates_exported_failed_and_missing(tmp_path: Path) -> None:
+    """The pure helpers (_build_export_jobs, _parse_export_result_line,
+    _has_real_geometry) are all well-tested in isolation, but nothing
+    exercised the function that actually wires them together: streaming
+    Popen's stdout, matching lines back to jobs, and counting exported/
+    skipped_empty/failed -- including a scene Godot never reports on at
+    all, the "exited before finishing" case. _has_real_geometry is
+    patched here since its own real-vs-empty-glb logic already has
+    dedicated tests elsewhere in this file; this test is about the
+    orchestration around it, not re-proving that logic.
+    """
+    project_root = tmp_path / "Project"
+    project_root.mkdir()
+    scene_paths = [
+        project_root / "real.tscn",
+        project_root / "empty.tscn",
+        project_root / "broken.tscn",
+        project_root / "unreported.tscn",
+    ]
+    for scene_path in scene_paths:
+        scene_path.write_text("")
+        scene_path.with_suffix(".glb").write_bytes(b"fake glb bytes")
+
+    lines = [
+        "GODOT_EXPORT_RESULT|res://real.tscn|ok|",
+        "GODOT_EXPORT_RESULT|res://empty.tscn|ok|",
+        "GODOT_EXPORT_RESULT|res://broken.tscn|error|scene failed to load",
+        # res://unreported.tscn is deliberately never reported at all.
+    ]
+
+    def fake_has_real_geometry(glb_path: Path) -> bool:
+        return glb_path.name == "real.glb"
+
+    with (
+        patch.object(godot_export.subprocess, "Popen", return_value=_fake_export_popen(lines)),
+        patch.object(godot_export, "_has_real_geometry", side_effect=fake_has_real_geometry),
+    ):
+        stats = godot_export.export_scenes_to_glb(Path("godot.exe"), project_root, scene_paths)
+
+    assert stats.exported == 1
+    assert stats.skipped_empty == 1
+    assert stats.failed == 2  # one explicit error + one never reported
+    assert any("scene failed to load" in f for f in stats.failures)
+    assert any("exited before finishing" in f for f in stats.failures)
+    # The empty scene's output must be cleaned up, not left behind.
+    assert not (project_root / "empty.glb").exists()
+    assert (project_root / "real.glb").exists()

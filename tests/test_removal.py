@@ -54,6 +54,47 @@ def test_remove_assets_clears_tags_and_exports(conn: sqlite3.Connection, staging
     assert conn.execute("SELECT 1 FROM exports WHERE asset_id = ?", (asset_id,)).fetchone() is None
 
 
+def test_remove_assets_with_a_pending_conversion_does_not_raise_integrity_error(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    """Regression test for the FK-delete-order fix noted inline in
+    _remove_one_asset: pending_conversions.asset_id REFERENCES assets(id)
+    with foreign_keys=ON, so deleting the assets row before the
+    pending_conversions row referencing it raises IntegrityError. That
+    comment describes a real, already-fixed bug that had no test pinning
+    it down until now -- this asserts removal actually succeeds (not
+    just that it doesn't raise) and cleans up the pending_conversions row
+    too, not just leaving it orphaned.
+    """
+    pack_id, asset_id = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+    content_hash = conn.execute(
+        "SELECT content_hash FROM assets WHERE id = ?", (asset_id,)
+    ).fetchone()["content_hash"]
+    conn.execute(
+        "INSERT INTO pending_conversions (asset_id, original_relative_path, original_filename, "
+        "original_extension, original_content_hash, original_file_size, converted_at) "
+        "VALUES (?, 'a.png', 'a.png', '.png', ?, 10, '2020-01-01T00:00:00')",
+        (asset_id, content_hash),
+    )
+    conn.commit()
+
+    stats = removal.remove_assets(conn, thumbnail_dir, assets_dir, [asset_id])
+
+    assert stats.removed == 1
+    assert conn.execute("SELECT 1 FROM assets WHERE id = ?", (asset_id,)).fetchone() is None
+    assert conn.execute(
+        "SELECT 1 FROM pending_conversions WHERE asset_id = ?", (asset_id,)
+    ).fetchone() is None
+
+
+def test_remove_pack_with_nonexistent_pack_id_returns_empty_stats(
+    conn: sqlite3.Connection, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    stats = removal.remove_pack(conn, thumbnail_dir, assets_dir, 999)
+    assert stats.removed_assets == 0
+    assert stats.pack_removed is False
+
+
 def test_remove_pack_deletes_pack_row_and_whole_library_folder(
     conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
 ) -> None:

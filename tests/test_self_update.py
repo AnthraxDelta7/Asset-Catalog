@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -77,3 +78,58 @@ def test_download_update_cleans_up_partial_file_on_failure() -> None:
     with patch("urllib.request.urlopen", side_effect=OSError("connection reset")):
         with pytest.raises(self_update.SelfUpdateError, match="download"):
             self_update.download_update("https://example.com/update.zip")
+
+
+def test_download_update_reports_zero_total_when_no_content_length() -> None:
+    """Documented behavior: total_bytes is 0 if the server doesn't report
+    Content-Length, and callers are told to treat that as "show bytes
+    downloaded, not a percentage" -- untested until now, only the with-
+    Content-Length case had coverage.
+    """
+    body = [b"a" * 100]
+    progress_calls = []
+
+    with patch("urllib.request.urlopen", return_value=_fake_download_response(body, content_length=None)):
+        path = self_update.download_update(
+            "https://example.com/update.zip",
+            on_progress=lambda done, tot: progress_calls.append((done, tot)),
+        )
+
+    try:
+        assert progress_calls == [(100, 0)]
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_apply_update_and_exit_launches_powershell_with_correct_args_then_exits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The "point of no return" -- a wiring bug here (wrong install_dir,
+    wrong extract_root) would only surface at runtime on a real machine,
+    since nothing about a wrong argument raises an error on its own.
+    subprocess.Popen is mocked (never actually launches PowerShell); the
+    real sys.exit(0) is left in place and caught via pytest.raises, since
+    "never returns" is exactly the behavior worth pinning down, not
+    something to mock away.
+    """
+    extracted_app_dir = tmp_path / "extracted" / "AssetCatalogue"
+    extracted_app_dir.mkdir(parents=True)
+    fake_install_dir = tmp_path / "install"
+    monkeypatch.setattr(self_update, "install_dir", lambda: fake_install_dir)
+
+    with patch("asset_catalogue.self_update.subprocess.Popen") as mock_popen:
+        with pytest.raises(SystemExit) as exc_info:
+            self_update.apply_update_and_exit(extracted_app_dir, "AssetCatalogue.exe")
+
+    assert exc_info.value.code == 0
+    mock_popen.assert_called_once()
+    args = mock_popen.call_args.args[0]
+    assert args[0] == "powershell.exe"
+    # Named PowerShell params are passed as adjacent (flag, value) pairs --
+    # zip the arg list with itself offset by one to read them back as a dict.
+    named_args = dict(zip(args, args[1:]))
+    assert named_args["-InstallDir"] == str(fake_install_dir)
+    assert named_args["-NewVersionDir"] == str(extracted_app_dir)
+    assert named_args["-ExeName"] == "AssetCatalogue.exe"
+    assert named_args["-ExtractRoot"] == str(extracted_app_dir.parent)
+    assert named_args["-ProcessId"] == str(os.getpid())

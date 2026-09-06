@@ -154,3 +154,47 @@ def test_generate_audio_thumbnails_asset_ids_targets_the_given_set(
     stats2 = audio_thumbnails.generate_audio_thumbnails(conn, staging_folder, thumbnail_dir, asset_ids=[])
     assert stats2.generated == 0
     assert stats2.already_done == 0
+
+
+def test_generate_audio_thumbnails_marks_malformed_wav_failed(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    """Mirrors thumbnails.py's own corrupt-file regression test
+    (test_generate_texture_thumbnails_marks_corrupt_file_failed) -- this
+    module has the equivalent try/except (wave.Error, OSError, ValueError,
+    EOFError) around render_waveform_thumbnail, but nothing exercised a
+    file that's genuinely a .wav by extension (so it goes through
+    _parse_wav, not the undecodable-format placeholder path) yet fails
+    to parse as one.
+    """
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "corrupt.wav").write_bytes(b"not actually a wav file at all")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    stats = audio_thumbnails.generate_audio_thumbnails(conn, staging_folder, thumbnail_dir)
+
+    assert stats.failed == 1
+    assert conn.execute("SELECT thumbnail_status FROM assets").fetchone()["thumbnail_status"] == "failed"
+
+
+def test_generate_audio_thumbnails_pack_name_filters_to_that_pack(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    write_wav(staging_folder, "PackA", "a.wav", tone=b"\x00\x01")
+    write_wav(staging_folder, "PackB", "b.wav", tone=b"\x02\x03")
+    pack_a_id, _ = ingest.get_or_create_pack(conn, "PackA", "PackA", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackA", pack_a_id)
+    pack_b_id, _ = ingest.get_or_create_pack(conn, "PackB", "PackB", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackB", pack_b_id)
+
+    stats = audio_thumbnails.generate_audio_thumbnails(conn, staging_folder, thumbnail_dir, pack_name="PackA")
+
+    assert stats.generated == 1
+    statuses = {
+        row["filename"]: row["thumbnail_status"]
+        for row in conn.execute("SELECT filename, thumbnail_status FROM assets")
+    }
+    assert statuses["a.wav"] == "done"
+    assert statuses["b.wav"] == "pending"

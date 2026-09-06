@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from asset_catalogue import db, ingest
+from asset_catalogue import db, ingest, settings
 
 
 @pytest.fixture
@@ -30,6 +30,28 @@ def thumbnail_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def assets_dir(tmp_path: Path) -> Path:
     return tmp_path / "assets"
+
+
+@pytest.fixture
+def cli_env(tmp_path: Path, monkeypatch) -> tuple[sqlite3.Connection, Path]:
+    """cli.py's commands never take a connection/staging folder as a
+    parameter -- they all call _connect(), which reads settings.load()
+    itself, unlike every lower-level module's functions (which take conn
+    explicitly and are already exercised via the plain `conn`/
+    `staging_folder` fixtures above). Points real settings at a real,
+    on-disk tmp library/staging pair so cli.py's own _connect() and a
+    test's setup code operate on the exact same database, then returns
+    (conn, staging_folder) for the test to seed data with directly.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    library = tmp_path / "library"
+    library.mkdir()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    connection = db.connect(library / "catalogue.db")
+    yield connection, staging
+    connection.close()
 
 
 def make_pack(conn: sqlite3.Connection, staging_folder: Path, name: str = "Pack") -> int:

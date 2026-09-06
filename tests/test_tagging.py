@@ -70,6 +70,54 @@ def test_rename_tag_rejects_name_collision(conn: sqlite3.Connection) -> None:
         tagging.rename_tag(conn, other_id, "weapons", None)
 
 
+def test_rename_tag_renames_and_recategorizes(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    pack_id = make_pack(conn, staging_folder)
+    a1 = _add_asset(conn, pack_id, "a.png", "h1")
+    tag_id = tagging.get_or_create_tag(conn, "weapons", "theme")
+    tagging.tag_asset(conn, a1, tag_id)
+
+    tagging.rename_tag(conn, tag_id, "guns", "category")
+
+    row = conn.execute("SELECT name, category FROM tags WHERE id = ?", (tag_id,)).fetchone()
+    assert row["name"] == "guns"
+    assert row["category"] == "category"
+    # Every asset carrying it (by id, not name) is unaffected other than
+    # seeing the new name.
+    assert conn.execute(
+        "SELECT 1 FROM asset_tags WHERE asset_id = ? AND tag_id = ?", (a1, tag_id)
+    ).fetchone() is not None
+
+
+def test_tag_asset_upgrades_an_inherited_row_to_explicit(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    """tag_asset's docstring specifically promises "upgrading any
+    inherited row to explicit" -- the existing regression test
+    (test_untag_asset_survives_a_later_pack_cascade) only exercises
+    tag_asset as a fresh insert (the asset had been untagged first), never
+    as an actual upgrade of a still-inherited row's source column.
+    """
+    pack_id = make_pack(conn, staging_folder)
+    a1 = _add_asset(conn, pack_id, "a.png", "h1")
+    tag_id = tagging.get_or_create_tag(conn, "weapons", None)
+    tagging.tag_pack(conn, pack_id, tag_id)
+    assert conn.execute(
+        "SELECT source FROM asset_tags WHERE asset_id = ? AND tag_id = ?", (a1, tag_id)
+    ).fetchone()["source"] == "inherited"
+
+    tagging.tag_asset(conn, a1, tag_id)
+
+    assert conn.execute(
+        "SELECT source FROM asset_tags WHERE asset_id = ? AND tag_id = ?", (a1, tag_id)
+    ).fetchone()["source"] == "explicit"
+
+
+def test_untag_asset_returns_false_when_nothing_to_remove(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    pack_id = make_pack(conn, staging_folder)
+    a1 = _add_asset(conn, pack_id, "a.png", "h1")
+    tag_id = tagging.get_or_create_tag(conn, "weapons", None)
+
+    assert tagging.untag_asset(conn, a1, tag_id) is False
+
+
 def test_delete_tag_removes_usages_and_exclusions(conn: sqlite3.Connection, staging_folder: Path) -> None:
     pack_id = make_pack(conn, staging_folder)
     a1 = _add_asset(conn, pack_id, "a.png", "h1")

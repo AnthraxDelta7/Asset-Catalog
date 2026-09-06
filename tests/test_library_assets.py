@@ -25,6 +25,25 @@ def test_archive_asset_copies_file_once(conn: sqlite3.Connection, staging_folder
     assert dest2 == dest
 
 
+def test_archive_asset_none_for_nonexistent_asset_id(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    assert library_assets.archive_asset(conn, staging_folder, assets_dir, 999) is None
+
+
+def test_archive_asset_none_when_staging_source_is_missing(
+    conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path
+) -> None:
+    write_texture(staging_folder, "Pack", "a.png")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "Pack", pack_id)
+    asset_id = conn.execute("SELECT id FROM assets").fetchone()["id"]
+
+    (staging_folder / "Pack" / "a.png").unlink()
+
+    assert library_assets.archive_asset(conn, staging_folder, assets_dir, asset_id) is None
+
+
 def test_archive_asset_returns_none_if_source_missing(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path) -> None:
     pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
     conn.execute(

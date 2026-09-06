@@ -148,3 +148,46 @@ def test_generate_texture_thumbnails_asset_ids_targets_the_given_set(
     assert stats3.generated == 0
     assert stats3.already_done == 0
     assert stats3.failed == 0
+
+
+def test_generate_texture_thumbnails_pack_name_filters_to_that_pack(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path
+) -> None:
+    write_texture(staging_folder, "PackA", "a.png", color=(1, 2, 3))
+    write_texture(staging_folder, "PackB", "b.png", color=(4, 5, 6))
+    pack_a_id, _ = ingest.get_or_create_pack(conn, "PackA", "PackA", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackA", pack_a_id)
+    pack_b_id, _ = ingest.get_or_create_pack(conn, "PackB", "PackB", None, None, None)
+    ingest.ingest_pack(conn, staging_folder / "PackB", pack_b_id)
+
+    stats = thumbnails.generate_texture_thumbnails(conn, staging_folder, thumbnail_dir, pack_name="PackA")
+
+    assert stats.generated == 1
+    statuses = {
+        row["filename"]: row["thumbnail_status"]
+        for row in conn.execute("SELECT filename, thumbnail_status FROM assets")
+    }
+    assert statuses["a.png"] == "done"
+    assert statuses["b.png"] == "pending"
+
+
+def test_render_2d_thumbnail_converts_a_palette_image(tmp_path: Path) -> None:
+    """render_2d_thumbnail's mode-conversion branch only triggers for a
+    source image that isn't already RGB/RGBA -- every fixture elsewhere
+    in this file uses Image.new("RGB", ...), so this branch had no
+    coverage of its own. A palette ("P" mode) PNG is a common real-world
+    case (many simple/indexed-color textures are saved this way).
+    """
+    from PIL import Image
+
+    from asset_catalogue import thumbnails as thumbnails_module
+
+    source = tmp_path / "palette.png"
+    Image.new("P", (32, 32)).save(source)
+    dest = tmp_path / "out.png"
+
+    thumbnails_module.render_2d_thumbnail(source, dest)
+
+    assert dest.is_file()
+    with Image.open(dest) as result:
+        assert result.mode in ("RGB", "RGBA")
