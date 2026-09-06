@@ -8,6 +8,36 @@ from asset_catalogue import conversion, ingest, library_assets
 from conftest import write_texture
 
 
+def test_build_conversion_job_includes_pack_root(conn: sqlite3.Connection, staging_folder: Path) -> None:
+    """pack_root needs to reach blender_common.apply_corrections for smart
+    texture matching (relinking a broken texture, or matching a bare
+    material name to a texture file elsewhere in the pack) to have
+    anything to search -- without it in the job dict, conversion silently
+    got none of the same texture recovery thumbnail generation already
+    gets, a real gap this pins down.
+    """
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    original = pack_root / "model.fbx"
+    original.write_bytes(b"original fbx bytes")
+    original_hash = ingest.hash_file(original)
+    cursor = conn.execute(
+        "INSERT INTO assets (pack_id, relative_path, filename, extension, file_size, "
+        "content_hash, asset_type) VALUES (?, 'model.fbx', 'model.fbx', '.fbx', ?, ?, 'model')",
+        (pack_id, original.stat().st_size, original_hash),
+    )
+    asset_id = cursor.lastrowid
+    conn.commit()
+
+    row = conversion._resolve_conversion_row(conn, asset_id)
+    job, new_relative_path, output_path = conversion._build_conversion_job(staging_folder, asset_id, row)
+
+    assert job["pack_root"] == str(pack_root)
+    assert new_relative_path == "model.glb"
+    assert output_path == pack_root / "model.glb"
+
+
 def _make_asset_with_pending_conversion(conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path) -> int:
     """Seeds an asset that looks like it's mid-conversion: its DB row
     already points at the (fake) converted .glb, and a pending_conversions

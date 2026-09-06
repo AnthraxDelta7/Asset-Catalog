@@ -32,7 +32,13 @@ def main() -> None:
         if importer is not None:
             try:
                 importer(job["source_path"])
-                apply_corrections(job.get("corrections") or {})
+                pack_root = job.get("pack_root")
+                _mesh_objects, _has_broken_texture, smart_texture_notes = apply_corrections(
+                    job.get("corrections") or {},
+                    Path(pack_root) if pack_root else None,
+                )
+                for note in smart_texture_notes:
+                    print(f"ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|{asset_id}|{note}", flush=True)
                 bpy.ops.export_scene.gltf(filepath=job["output_path"], export_format="GLB")
                 ok = True
             except Exception as exc:  # noqa: BLE001 - report and continue the batch

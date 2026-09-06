@@ -21,6 +21,7 @@ CONVERT_TIMEOUT_SECONDS = 300
 class ConversionResult:
     ok: bool
     error: str | None = None
+    smart_texture_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -32,6 +33,7 @@ class ConversionBatchResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    smart_texture_notes: list[str] = field(default_factory=list)
 
 
 def _resolve_conversion_row(conn: sqlite3.Connection, asset_id: int) -> sqlite3.Row | None:
@@ -57,6 +59,7 @@ def _build_conversion_job(
     job = {
         "asset_id": asset_id,
         "source_path": str(pack_root / row["relative_path"]),
+        "pack_root": str(pack_root),
         "output_path": str(output_path),
         "extension": row["extension"],
         "corrections": corrections,
@@ -177,10 +180,16 @@ def convert_asset_to_gltf(
             output_path.unlink()
         return ConversionResult(False, error_message)
 
+    smart_texture_notes = [
+        line.split("|", 2)[-1]
+        for line in output.splitlines()
+        if line.startswith(f"ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|{asset_id}|")
+    ]
+
     _apply_successful_conversion(
         conn, staging_folder, assets_dir, asset_id, row, new_relative_path, output_path
     )
-    return ConversionResult(True)
+    return ConversionResult(True, smart_texture_notes=smart_texture_notes)
 
 
 def convert_assets_to_gltf(
@@ -262,6 +271,12 @@ def convert_assets_to_gltf(
             if line.startswith("ASSET_CATALOGUE_CONVERT_ERROR|"):
                 _, asset_id_str, message = line.split("|", 2)
                 result.errors.append(f"asset {asset_id_str}: {message}")
+                continue
+            if line.startswith("ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|"):
+                _, smart_asset_id_str, note = line.split("|", 2)
+                filename = job_context.get(int(smart_asset_id_str), (None,))[0]
+                display_name = filename["filename"] if filename is not None else f"asset {smart_asset_id_str}"
+                result.smart_texture_notes.append(f"{display_name}: {note}")
                 continue
             if not line.startswith("ASSET_CATALOGUE_CONVERT_RESULT|"):
                 continue

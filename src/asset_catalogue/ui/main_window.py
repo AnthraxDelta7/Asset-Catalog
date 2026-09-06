@@ -3515,10 +3515,11 @@ class MainWindow(QMainWindow):
         def format_result(result) -> str:
             if not result.ok:
                 return f"Conversion failed: {result.error}"
-            return (
+            message = (
                 "Converted to .glb and regenerated its thumbnail. The pre-conversion "
                 "original is kept until you Revert or Delete it in the detail panel."
             )
+            return message + _format_smart_texture_note(result.smart_texture_notes)
 
         self._run_background_job(
             lambda report: self._catalogue.convert_asset_to_gltf_bg(asset_id, on_progress=report),
@@ -3536,7 +3537,7 @@ class MainWindow(QMainWindow):
                 message += f"\nFailed {result.failed}:"
                 for error_message in result.errors:
                     message += f"\n  {error_message}"
-            return message
+            return message + _format_smart_texture_note(result.smart_texture_notes)
 
         self._run_background_job(
             lambda report: self._catalogue.convert_assets_to_gltf_bg(asset_ids, on_progress=report),
