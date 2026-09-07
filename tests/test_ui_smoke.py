@@ -205,3 +205,18 @@ def test_format_selection_dialog_import_selected_with_nothing_checked_does_not_a
 
     assert dialog.format_selection is None
     assert dialog.result() != QDialog.Accepted
+
+
+def test_self_update_is_disabled_pending_code_signing() -> None:
+    """One-click download-and-install is deliberately switched off (see
+    SELF_UPDATE_ENABLED's own comment in main_window.py) -- unsigned
+    automatic file replacement kept getting transiently locked by
+    Windows Defender in a way that was expensive to diagnose and looked
+    like a crash/hang, and every real bug found in the actual download/
+    apply flow itself was already fixed before that. This just pins the
+    switch itself so re-enabling it is a deliberate, visible one-line
+    change, not something that silently regresses.
+    """
+    from asset_catalogue.ui.main_window import SELF_UPDATE_ENABLED
+
+    assert SELF_UPDATE_ENABLED is False

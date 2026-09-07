@@ -2241,6 +2241,24 @@ class ProgressLogDialog(QDialog):
         scrollbar.setValue(scrollbar.maximum())
 
 
+# One-click download-and-install is switched off here until real code
+# signing is in place -- _show_update_available below never offers the
+# button while this is False, regardless of is_frozen()/download_url,
+# so this is the one place to flip it back on later. Not a removal: every
+# real bug already found in the actual download/extract/relaunch flow
+# (sys.exit() aborting from a Qt slot, CREATE_NO_WINDOW|DETACHED_PROCESS
+# silently breaking PowerShell's console host) is still fixed in
+# self_update.py and this dialog below, both left completely intact.
+# What kept failing after both of those were fixed was Windows Defender
+# (or similar) transiently locking the install folder right as the old
+# unsigned exe exits -- expensive to fully diagnose or work around
+# remotely, and exactly the kind of friction a signed build doesn't have.
+# Until then, the update check still runs and still tells the user a
+# newer version exists; it just always points them at the release page
+# for a manual download instead of attempting the swap itself.
+SELF_UPDATE_ENABLED = False
+
+
 class UpdateDownloadDialog(QDialog):
     """Downloads the new release, extracts it, then hands off to
     self_update's detached relauncher and exits -- this project's builds
@@ -3919,9 +3937,11 @@ class MainWindow(QMainWindow):
         # One-click download-and-install only makes sense for a packaged
         # .exe (there's no single "install folder" to replace in a dev
         # checkout) and only when the release actually has a zip asset
-        # attached -- otherwise, same as before: point at the page.
+        # attached -- otherwise, same as before: point at the page. Also
+        # gated on SELF_UPDATE_ENABLED (see its own comment above) -- off
+        # until real code signing is in place.
         download_button = None
-        if info.download_url is not None and self_update.is_frozen():
+        if SELF_UPDATE_ENABLED and info.download_url is not None and self_update.is_frozen():
             download_button = box.addButton("Download && Install Update", QMessageBox.AcceptRole)
         open_button = box.addButton("Open Release Page", QMessageBox.ActionRole)
         skip_button = box.addButton("Skip This Version", QMessageBox.DestructiveRole)
