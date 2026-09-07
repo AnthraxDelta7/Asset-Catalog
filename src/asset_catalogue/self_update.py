@@ -133,31 +133,62 @@ param(
     [string]$ExtractRoot
 )
 
+# Same logs\ folder crash_log.py already writes to (this process inherits
+# APPDATA from the Python process that launched it) -- a real update
+# attempt on a real machine hit a swap failure that turned out to need
+# real diagnosis (a transient antivirus-scan-style lock on the just-
+# terminated exe's own files, taking longer than this script used to
+# retry for at all), and the old generic "may have still been in use"
+# message gave no way to tell that from any other failure. Every attempt
+# is logged here now, success or failure, so a future failure is
+# diagnosable from this file alone.
+$logPath = Join-Path $env:APPDATA "AssetCatalogue\logs\update-relaunch.log"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath) | Out-Null
+function Log($msg) { "$(Get-Date -Format o)  $msg" | Out-File -FilePath $logPath -Append -Encoding utf8 }
+
+Log "=== update relaunch started -- InstallDir=$InstallDir NewVersionDir=$NewVersionDir ==="
+
 try { Wait-Process -Id $ProcessId -Timeout 30 -ErrorAction SilentlyContinue } catch {}
-Start-Sleep -Seconds 1
+# A few seconds' grace before the first attempt, not just after -- real-
+# time antivirus commonly scans an executable right as it's released by
+# the process that was running it, and that scan is what was actually
+# causing every attempt in the old, much shorter retry window to fail.
+Start-Sleep -Seconds 3
 
 $backupDir = "$InstallDir.old"
 $succeeded = $false
-for ($attempt = 1; $attempt -le 5; $attempt++) {
+# Up to ~90s of real retrying (30 attempts, 3s apart) -- generous on
+# purpose: a large freshly-downloaded build being scanned is a real,
+# variable-duration condition to wait out, not a bug to fail fast on.
+for ($attempt = 1; $attempt -le 30; $attempt++) {
     try {
         if (Test-Path $backupDir) { Remove-Item -Recurse -Force $backupDir -ErrorAction Stop }
         Rename-Item -Path $InstallDir -NewName (Split-Path -Leaf $backupDir) -ErrorAction Stop
         Move-Item -Path $NewVersionDir -Destination $InstallDir -ErrorAction Stop
         $succeeded = $true
+        Log "attempt ${attempt}: succeeded"
         break
     } catch {
-        Start-Sleep -Seconds 2
+        Log "attempt ${attempt} failed: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+        Start-Sleep -Seconds 3
     }
 }
 
 if ($succeeded) {
-    Start-Process -FilePath (Join-Path $InstallDir $ExeName)
+    try {
+        Start-Process -FilePath (Join-Path $InstallDir $ExeName)
+        Log "relaunched new exe OK"
+    } catch {
+        Log "Start-Process of the new exe failed: $($_.Exception.Message)"
+    }
     Start-Sleep -Seconds 2
     Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
 } else {
+    Log "giving up after 30 attempts"
     Add-Type -AssemblyName System.Windows.Forms
     $failureMessage = "Asset Catalogue couldn't finish installing the update (the old version's files " +
         "may still have been in use). Your existing install was left in place at:`n$InstallDir`n`n" +
+        "Details were logged to:`n$logPath`n`n" +
         "You can install the update manually from the same release page."
     [System.Windows.Forms.MessageBox]::Show($failureMessage, "Asset Catalogue Update Failed") | Out-Null
     if (Test-Path $backupDir) {
@@ -168,6 +199,7 @@ if ($succeeded) {
     }
 }
 
+Log "=== update relaunch finished ==="
 Remove-Item -Recurse -Force $ExtractRoot -ErrorAction SilentlyContinue
 """
 
