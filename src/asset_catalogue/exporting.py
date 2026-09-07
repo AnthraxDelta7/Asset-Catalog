@@ -14,6 +14,30 @@ def _sanitize_folder_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_")
 
 
+def _unique_destination(pack_dir: Path, filename: str, taken: set[Path]) -> Path:
+    """One flat folder per pack (see _copy_assets) means two assets that
+    happen to share a filename in different subfolders of the source pack
+    -- a texture reused under both Models/ and Props/, say -- would
+    otherwise silently collide and overwrite each other. taken tracks
+    every destination already claimed *in this export batch* (an already-
+    existing file from a previous, separate export is deliberately not
+    checked here -- shutil.copy2 overwriting a stale previous export of
+    the same asset is the expected, idempotent re-export behavior, not a
+    collision); a real collision gets " (2)", " (3)", etc. appended before
+    the extension, the same convention Windows Explorer itself uses.
+    """
+    candidate = pack_dir / filename
+    if candidate not in taken:
+        return candidate
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    n = 2
+    while True:
+        candidate = pack_dir / f"{stem} ({n}){suffix}"
+        if candidate not in taken:
+            return candidate
+        n += 1
+
+
 @dataclass
 class ExportStats:
     copied: int = 0
@@ -105,15 +129,21 @@ def _copy_assets(
     report = on_progress or (lambda _text: None)
     stats = ExportStats()
     destinations: list[Path] = []
+    taken: set[Path] = set()
     for asset in assets:
         report(f"Exporting {asset['relative_path']}...")
         source = staging_folder / asset["pack_folder"] / asset["relative_path"]
-        destination = (
-            project_root
-            / dest_subfolder
-            / _sanitize_folder_name(asset["pack_name"])
-            / asset["relative_path"]
-        )
+        # One flat folder per pack -- not the pack's own internal
+        # subfolder structure (Models/, Textures/, a creator's own nested
+        # layout, ...) reproduced underneath it. A real downloaded pack's
+        # own organization is rarely something worth preserving once
+        # you've already deliberately picked out the handful of assets
+        # you're exporting; see _unique_destination for how a same-name
+        # collision this can now cause gets resolved instead of silently
+        # overwriting.
+        pack_dir = project_root / dest_subfolder / _sanitize_folder_name(asset["pack_name"])
+        destination = _unique_destination(pack_dir, Path(asset["relative_path"]).name, taken)
+        taken.add(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         destinations.append(destination)

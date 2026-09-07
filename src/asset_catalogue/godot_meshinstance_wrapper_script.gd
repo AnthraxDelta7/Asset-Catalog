@@ -22,8 +22,12 @@ extends SceneTree
 # scene, finds every MeshInstance3D in it, and builds a fresh, minimal
 # scene from just those: a single MeshInstance3D at the root if there's
 # exactly one, or a Node3D root with one MeshInstance3D child per mesh
-# (each at its correct relative position) for anything with more than
-# one.
+# for anything with more than one. Either way, every mesh keeps its own
+# rotation/scale/position exactly as it was in the source (see
+# _relative_transform) -- confirmed directly against a real Godot 4.4
+# install with a genuine scene-graph-level transform (not one baked into
+# the mesh's own vertex data, which some export tools do instead and
+# needs no help from this at all).
 #
 # Confirmed directly against a real Godot 4.4 install that
 # ResourceSaver.save() on the result fully embeds the mesh geometry and
@@ -120,6 +124,7 @@ func _generate_one(glb_path: String, output_path: String) -> void:
 		var source: MeshInstance3D = mesh_instances[0]
 		new_root = MeshInstance3D.new()
 		new_root.mesh = source.mesh
+		new_root.transform = _relative_transform(source, scene_root)
 		_copy_surface_overrides(source, new_root)
 	else:
 		new_root = Node3D.new()

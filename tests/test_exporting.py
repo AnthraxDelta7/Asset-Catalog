@@ -105,6 +105,65 @@ def test_export_assets_sanitizes_pack_name_with_slashes(
     assert (project_root / "exported_assets" / "Weird_Pack" / "a.png").is_file()
 
 
+def test_export_assets_flattens_the_packs_own_subfolder_structure(
+    conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
+) -> None:
+    """A real pack's own internal layout (Models/, Textures/, a creator's
+    own nested folders) isn't something worth reproducing underneath the
+    export -- one flat folder per pack, the file directly inside it, not
+    buried under whatever subfolders it happened to live in the source
+    pack.
+    """
+    pack_root = staging_folder / "Pack"
+    (pack_root / "Models" / "Nested").mkdir(parents=True)
+    (pack_root / "Models" / "Nested" / "hero.glb").write_bytes(b"fake")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack_root, pack_id)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    assets = exporting.select_assets(conn)
+    assert assets[0]["relative_path"] == "Models/Nested/hero.glb"  # confirms the source really is nested
+
+    exporting.export_assets(conn, staging_folder, project_root, str(project_root), "exported_assets", assets)
+
+    assert (project_root / "exported_assets" / "Pack" / "hero.glb").is_file()
+    assert not (project_root / "exported_assets" / "Pack" / "Models").exists()
+
+
+def test_export_assets_disambiguates_a_same_filename_collision(
+    conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
+) -> None:
+    """Flattening (see the test above) can turn two assets that never
+    collided in the source pack -- same filename, different subfolders --
+    into a real collision at the destination. Must not silently overwrite
+    one with the other.
+    """
+    pack_root = staging_folder / "Pack"
+    (pack_root / "Props").mkdir(parents=True)
+    (pack_root / "Weapons").mkdir(parents=True)
+    (pack_root / "Props" / "diffuse.png").write_bytes(b"props version")
+    (pack_root / "Weapons" / "diffuse.png").write_bytes(b"weapons version")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack_root, pack_id)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    assets = exporting.select_assets(conn)
+    assert len(assets) == 2
+
+    stats = exporting.export_assets(
+        conn, staging_folder, project_root, str(project_root), "exported_assets", assets
+    )
+
+    assert stats.copied == 2
+    pack_dir = project_root / "exported_assets" / "Pack"
+    assert (pack_dir / "diffuse.png").is_file()
+    assert (pack_dir / "diffuse (2).png").is_file()
+    # Both files genuinely survived with their own real content -- neither
+    # one silently overwritten by the other.
+    contents = {(pack_dir / "diffuse.png").read_bytes(), (pack_dir / "diffuse (2).png").read_bytes()}
+    assert contents == {b"props version", b"weapons version"}
+
+
 def test_is_godot_export_eligible_true_for_all_godot_importable_models(
     conn: sqlite3.Connection, staging_folder: Path
 ) -> None:
