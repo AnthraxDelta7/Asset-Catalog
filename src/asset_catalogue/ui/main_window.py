@@ -2249,7 +2249,10 @@ class UpdateDownloadDialog(QDialog):
     in this app, which is indeterminate on purpose since those jobs don't
     have a meaningful "percent done"). The download itself runs on a
     background thread; applying the update is deliberately the very last
-    thing that happens, since it calls sys.exit() -- there is no "after"
+    thing that happens, since it terminates this process outright (see
+    self_update.apply_update_and_exit's docstring for why os._exit(), not
+    sys.exit() -- calling sys.exit() from this slot is what caused a real
+    update attempt to abort instead of relaunching) -- there is no "after"
     once that runs.
     """
 

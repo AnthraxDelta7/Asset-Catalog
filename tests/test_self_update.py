@@ -107,10 +107,15 @@ def test_apply_update_and_exit_launches_powershell_with_correct_args_then_exits(
     """The "point of no return" -- a wiring bug here (wrong install_dir,
     wrong extract_root) would only surface at runtime on a real machine,
     since nothing about a wrong argument raises an error on its own.
-    subprocess.Popen is mocked (never actually launches PowerShell); the
-    real sys.exit(0) is left in place and caught via pytest.raises, since
-    "never returns" is exactly the behavior worth pinning down, not
-    something to mock away.
+    subprocess.Popen is mocked (never actually launches PowerShell).
+
+    os._exit(0), not sys.exit(0), is what actually terminates the process
+    here -- a real update attempt confirmed sys.exit() raised from inside
+    the Qt slot that calls this doesn't cleanly exit at all, it aborts the
+    whole app (PySide6 treats an exception escaping a slot as fatal), which
+    is exactly the crash-instead-of-relaunch bug this pins down. os._exit()
+    is mocked rather than actually invoked -- calling the real one would
+    kill this test process outright, not just this function.
     """
     extracted_app_dir = tmp_path / "extracted" / "AssetCatalogue"
     extracted_app_dir.mkdir(parents=True)
@@ -118,10 +123,10 @@ def test_apply_update_and_exit_launches_powershell_with_correct_args_then_exits(
     monkeypatch.setattr(self_update, "install_dir", lambda: fake_install_dir)
 
     with patch("asset_catalogue.self_update.subprocess.Popen") as mock_popen:
-        with pytest.raises(SystemExit) as exc_info:
+        with patch("asset_catalogue.self_update.os._exit") as mock_exit:
             self_update.apply_update_and_exit(extracted_app_dir, "AssetCatalogue.exe")
 
-    assert exc_info.value.code == 0
+    mock_exit.assert_called_once_with(0)
     mock_popen.assert_called_once()
     args = mock_popen.call_args.args[0]
     assert args[0] == "powershell.exe"

@@ -175,10 +175,24 @@ Remove-Item -Recurse -Force $ExtractRoot -ErrorAction SilentlyContinue
 def apply_update_and_exit(extracted_app_dir: Path, exe_name: str) -> None:
     """The point of no return: launches a detached PowerShell script that
     waits for THIS process to exit, then swaps install_dir()'s contents
-    for extracted_app_dir's and relaunches. Never returns -- calls
-    sys.exit() itself once the helper is launched, since there's nothing
-    left for this process to safely do (its own files are about to be
-    replaced out from under it).
+    for extracted_app_dir's and relaunches. Never returns -- terminates the
+    process itself once the helper is launched, since there's nothing left
+    for it to safely do (its own files are about to be replaced out from
+    under it).
+
+    Uses os._exit(), not sys.exit(): the caller (UpdateDownloadDialog's
+    on_ok) runs as a Qt slot invoked from the running event loop, and a
+    real update attempt confirmed this the hard way -- an exception raised
+    from inside a slot (SystemExit is one) has to cross back out through
+    PySide6's C++ call boundary, which does not treat that as a clean
+    shutdown; it aborts the whole process, which looked to the user like a
+    crash rather than the intended relaunch. os._exit() is a direct OS-
+    level termination that never raises a Python exception at all, so
+    there's nothing for that boundary to mishandle. No cleanup is lost by
+    skipping it here -- the worker thread that got us here has already
+    finished, and the detached relauncher's own lifetime is already
+    independent of this process (DETACHED_PROCESS), not tied to a graceful
+    Python-level shutdown.
     """
     script_fd = tempfile.NamedTemporaryFile(
         mode="w", suffix=".ps1", prefix="AssetCatalogue-relaunch-", delete=False, encoding="utf-8"
@@ -203,4 +217,4 @@ def apply_update_and_exit(extracted_app_dir: Path, exe_name: str) -> None:
         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
         close_fds=True,
     )
-    sys.exit(0)
+    os._exit(0)
