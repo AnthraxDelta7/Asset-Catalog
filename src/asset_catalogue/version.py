@@ -6,4 +6,4 @@ display (About) and for the update checker to compare against GitHub's
 latest release tag. Bump this, and only this, to cut a new release.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
