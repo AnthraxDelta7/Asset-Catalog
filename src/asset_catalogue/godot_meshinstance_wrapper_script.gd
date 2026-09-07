@@ -45,7 +45,16 @@ extends SceneTree
 # expected file is missing.
 
 func _find_mesh_instances(node: Node, out: Array) -> void:
-	if node is MeshInstance3D:
+	# node.mesh != null excludes a MeshInstance3D with no actual mesh
+	# resource assigned -- a purely organizational/placeholder node some
+	# tools leave behind, never something a real "layer" the user cares
+	# about. Without this, one of those inflates the count past 1 and the
+	# single visible mesh ends up wrapped in an unnecessary Node3D instead
+	# of being the scene's own root. Never excludes a MeshInstance3D that
+	# genuinely has geometry, no matter how it's named -- a real second
+	# part (a collision proxy, a separate LOD, anything) is exactly the
+	# kind of layer this is supposed to preserve, not silently drop.
+	if node is MeshInstance3D and node.mesh != null:
 		out.append(node)
 	for child in node.get_children():
 		_find_mesh_instances(child, out)
