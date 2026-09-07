@@ -47,6 +47,7 @@ def _make_part(name: str, is_collider: bool):
         faces=np.array([[0, 1, 2]], dtype=np.int32),
         colors=np.tile(np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32), (3, 1)),
         texture_image=None,
+        uv=None,
         is_collider=is_collider,
     )
 
@@ -105,6 +106,192 @@ def test_single_part_asset_still_shows_the_parts_panel(qapp) -> None:
     assert dialog.parts_panel.isHidden() is False
     assert dialog.parts_list.count() == 1
     assert dialog.parts_list.item(0).text() == "MainMesh"
+
+
+def test_textured_part_gets_a_textured_mesh_item_untextured_gets_plain(qapp) -> None:
+    """The dispatch in Model3DPreviewDialog._build: a part with both a
+    texture and a matching uv set is drawn with real UV-mapped texture
+    sampling (TexturedGLMeshItem); anything else -- no texture, or a
+    texture but no usable uv -- falls back to plain GLMeshItem's own
+    per-vertex color rendering, same as before TexturedGLMeshItem existed.
+    """
+    import pyqtgraph.opengl as gl
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog, PreviewPart, TexturedGLMeshItem
+
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+    colors = np.tile(np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32), (3, 1))
+
+    textured = PreviewPart(
+        name="Textured",
+        vertices=vertices,
+        faces=faces,
+        colors=colors,
+        texture_image=Image.new("RGB", (2, 2), (10, 20, 30)),
+        uv=np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]], dtype=np.float32),
+        is_collider=False,
+    )
+    plain = PreviewPart(
+        name="Plain", vertices=vertices, faces=faces, colors=colors,
+        texture_image=None, uv=None, is_collider=False,
+    )
+
+    dialog = Model3DPreviewDialog("mixed.glb", [textured, plain])
+
+    mesh_items = {name: item for name, item, _is_collider in
+                  ((row[0].text(), row[1], row[2]) for row in dialog._part_rows)}
+    assert isinstance(mesh_items["Textured"], TexturedGLMeshItem)
+    assert type(mesh_items["Plain"]) is gl.GLMeshItem
+
+
+def _make_textured_part(name: str, image) -> "PreviewPart":
+    from asset_catalogue.ui.model_preview_dialog import PreviewPart
+
+    return PreviewPart(
+        name=name,
+        vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+        faces=np.array([[0, 1, 2]], dtype=np.int32),
+        colors=np.tile(np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32), (3, 1)),
+        texture_image=image,
+        uv=np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]], dtype=np.float32),
+        is_collider=False,
+    )
+
+
+def test_textures_appear_in_the_shared_list_after_a_separator(qapp) -> None:
+    from PIL import Image
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part = _make_textured_part("Body", Image.new("RGB", (2, 2), (10, 20, 30)))
+    dialog = Model3DPreviewDialog("textured.glb", [part])
+
+    assert dialog.parts_list.count() == 3  # part row, separator, texture row
+    assert dialog.parts_list.item(0).text() == "Body"
+    assert dialog.parts_list.item(1).text() == "Textures:"
+    assert dialog.parts_list.item(1).flags() == Qt.NoItemFlags
+    assert "Body" in dialog.parts_list.item(2).text()
+    assert len(dialog._texture_rows) == 1
+
+
+def test_checking_a_texture_shows_it_inline_and_switches_the_view_stack(qapp) -> None:
+    from PIL import Image
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part = _make_textured_part("Body", Image.new("RGB", (2, 2), (10, 20, 30)))
+    dialog = Model3DPreviewDialog("textured.glb", [part])
+
+    assert dialog._view_stack.currentWidget() is dialog.view
+
+    list_item, _name, _image = dialog._texture_rows[0]
+    list_item.setCheckState(Qt.Checked)
+
+    assert dialog._view_stack.currentWidget() is dialog._texture_preview_label
+    assert dialog._current_texture is not None
+    assert not dialog._texture_preview_label.pixmap().isNull()
+
+
+def test_checking_a_texture_unchecks_any_other_checked_texture(qapp) -> None:
+    from PIL import Image
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part_a = _make_textured_part("A", Image.new("RGB", (2, 2), (10, 20, 30)))
+    part_b = _make_textured_part("B", Image.new("RGB", (2, 2), (40, 50, 60)))
+    dialog = Model3DPreviewDialog("textured.glb", [part_a, part_b])
+
+    item_a, _name_a, _image_a = dialog._texture_rows[0]
+    item_b, name_b, _image_b = dialog._texture_rows[1]
+    item_a.setCheckState(Qt.Checked)
+    item_b.setCheckState(Qt.Checked)
+
+    assert item_a.checkState() == Qt.Unchecked
+    assert item_b.checkState() == Qt.Checked
+    assert dialog._current_texture[0] == name_b
+
+
+def test_unchecking_the_shown_texture_returns_to_the_3d_view(qapp) -> None:
+    from PIL import Image
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part = _make_textured_part("Body", Image.new("RGB", (2, 2), (10, 20, 30)))
+    dialog = Model3DPreviewDialog("textured.glb", [part])
+
+    list_item, _name, _image = dialog._texture_rows[0]
+    list_item.setCheckState(Qt.Checked)
+    list_item.setCheckState(Qt.Unchecked)
+
+    assert dialog._view_stack.currentWidget() is dialog.view
+    assert dialog._current_texture is None
+
+
+def test_copy_current_texture_copies_to_clipboard(qapp) -> None:
+    """Exercises _copy_current_texture directly rather than through
+    _show_texture_context_menu's QMenu.exec() -- that's a Qt/C++-bound
+    method mock.patch can't reliably intercept from a test (it silently
+    falls through to a real, blocking popup instead of the patched
+    replacement), so the action logic and the menu-building/exec() call
+    are kept as two separate methods specifically so tests can call the
+    former without touching the latter at all.
+    """
+    from PIL import Image
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part = _make_textured_part("Body", Image.new("RGB", (3, 3), (200, 50, 50)))
+    dialog = Model3DPreviewDialog("textured.glb", [part])
+    dialog._texture_rows[0][0].setCheckState(Qt.Checked)
+
+    dialog._copy_current_texture()
+
+    clipboard_pixmap = QApplication.clipboard().pixmap()
+    assert not clipboard_pixmap.isNull()
+    assert clipboard_pixmap.size().width() == 3
+
+
+def test_save_current_texture_writes_the_image_file(qapp, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from PIL import Image
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QFileDialog
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    part = _make_textured_part("Body", Image.new("RGB", (3, 3), (200, 50, 50)))
+    dialog = Model3DPreviewDialog("textured.glb", [part])
+    dialog._texture_rows[0][0].setCheckState(Qt.Checked)
+
+    out_path = tmp_path / "saved.png"
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(out_path), "PNG Image (*.png)")):
+        dialog._save_current_texture()
+
+    assert out_path.is_file()
+    with Image.open(out_path) as saved:
+        assert saved.size == (3, 3)
+
+
+def test_copy_current_texture_does_nothing_when_no_texture_is_selected(qapp) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
+
+    dialog = Model3DPreviewDialog("plain.glb", [_make_part("MainMesh", is_collider=False)])
+    QApplication.clipboard().clear()
+
+    dialog._copy_current_texture()  # no _current_texture -- must not raise
+
+    assert QApplication.clipboard().pixmap().isNull()
 
 
 def test_load_preview_parts_resolves_a_texture_one_folder_above_the_model(tmp_path: Path) -> None:
@@ -452,6 +639,50 @@ def test_part_texture_image_none_when_neither_attribute_is_a_real_image() -> Non
     assert _part_texture_image(_Part()) is None
 
 
+def test_part_uv_none_when_visual_has_no_uv_attribute() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _part_uv
+
+    class _Visual:
+        pass
+
+    class _Part:
+        visual = _Visual()
+        vertices = np.zeros((3, 3))
+
+    assert _part_uv(_Part()) is None
+
+
+def test_part_uv_none_when_uv_length_does_not_match_vertices() -> None:
+    """A mismatched uv array (stale/malformed data) must fall back to None
+    rather than TexturedGLMeshItem later indexing it with a faces array
+    sized for the wrong vertex count.
+    """
+    from asset_catalogue.ui.model_preview_dialog import _part_uv
+
+    class _Visual:
+        uv = np.zeros((2, 2))
+
+    class _Part:
+        visual = _Visual()
+        vertices = np.zeros((3, 3))
+
+    assert _part_uv(_Part()) is None
+
+
+def test_part_uv_returns_the_array_when_it_matches_vertex_count() -> None:
+    from asset_catalogue.ui.model_preview_dialog import _part_uv
+
+    class _Visual:
+        uv = [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]
+
+    class _Part:
+        visual = _Visual()
+        vertices = np.zeros((3, 3))
+
+    result = _part_uv(_Part())
+    np.testing.assert_allclose(result, [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]])
+
+
 def test_pil_image_to_qpixmap_round_trips_dimensions(qapp) -> None:
     from PIL import Image
 
@@ -516,6 +747,47 @@ def test_load_preview_parts_ignores_a_missing_colors_sidecar(tmp_path: Path) -> 
 
     parts = load_preview_parts(box_path, tmp_path / "does_not_exist.colors.json")
     assert len(parts) == 1
+
+
+def test_load_preview_parts_carries_uv_through_a_real_export_reload_round_trip(tmp_path: Path) -> None:
+    """TexturedGLMeshItem needs part.uv aligned with part.vertices (not
+    just present) to correctly index texcoords by part.faces later -- this
+    confirms that survives an actual glb export/reload, not just an
+    in-memory trimesh object.
+    """
+    import trimesh
+    from PIL import Image
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    image = Image.new("RGB", (4, 4), (24, 50, 111))
+    uv = np.random.default_rng(0).random((len(box.vertices), 2))
+    material = trimesh.visual.material.PBRMaterial(baseColorTexture=image)
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=image, material=material)
+    box_path = tmp_path / "textured.glb"
+    box.export(box_path)
+
+    parts = load_preview_parts(box_path)
+
+    assert len(parts) == 1
+    assert parts[0].uv is not None
+    assert parts[0].uv.shape == (len(parts[0].vertices), 2)
+
+
+def test_load_preview_parts_uv_is_none_for_an_untextured_part(tmp_path: Path) -> None:
+    import trimesh
+
+    from asset_catalogue.ui.model_preview_dialog import load_preview_parts
+
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    box_path = tmp_path / "plain.glb"
+    box.export(box_path)
+
+    parts = load_preview_parts(box_path)
+
+    assert len(parts) == 1
+    assert parts[0].uv is None
 
 
 def test_load_preview_parts_flags_collider_and_skips_empty_parts(tmp_path: Path) -> None:

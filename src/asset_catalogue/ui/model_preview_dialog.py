@@ -1,13 +1,16 @@
 """The interactive orbit/zoom 3D preview -- separate module from
 main_window.py so its heavier imports (pyqtgraph, PyOpenGL, trimesh) are
 only ever paid for when a user actually opens a 3D preview, not on every
-app launch. Not a full PBR/texture-mapped renderer -- pyqtgraph's GLMeshItem
-has no UV-mapped texture support, so each part's material/texture is baked
-down to per-vertex colors instead (trimesh's Visuals.to_color()), which
-gets a real asset's actual look across without needing a custom OpenGL
-texture-mapping shader. Good enough for checking topology, proportions,
-color, and orientation by spinning the model around -- the existing
-Blender-rendered static thumbnail is still the accurate/final-look render.
+app launch. A textured part is rendered with real per-pixel UV-mapped
+texture sampling (see TexturedGLMeshItem) rather than pyqtgraph's own
+GLMeshItem, which has no texture support at all (confirmed by reading its
+paint() -- it only ever binds position/normal/vertex-color attributes) --
+without that, a fine repeating pattern (a caution-stripe texture, say)
+collapsing onto a low-poly mesh's handful of vertices per face smeared
+into a flat blob with no relation to the real, crisp texture. A part with
+no texture (or one this couldn't extract a valid UV set for -- see
+_part_uv) still falls back to the older per-vertex color baking (trimesh's
+Visuals.to_color()), same as before this existed.
 """
 
 from __future__ import annotations
@@ -21,19 +24,23 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph.opengl as gl
 import trimesh
+from OpenGL import GL
 from PIL import Image
 from pyqtgraph.opengl.shaders import FragmentShader, ShaderProgram, VertexShader
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QOpenGLContext, QPixmap
+from PySide6.QtOpenGL import QOpenGLBuffer
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
-    QGridLayout,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
-    QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -98,6 +105,48 @@ ShaderProgram(
     ],
 )
 
+# Same lighting model as catalogue_preview above, just sampling an actual
+# bound texture per-pixel (u_texture, at v_texcoord) instead of an
+# interpolated vertex color -- see TexturedGLMeshItem, which is the only
+# thing that ever uses this (it uploads a_texcoord itself; plain
+# GLMeshItem has no texcoord attribute to feed it). The sampled color is
+# already sRGB-encoded (raw PNG bytes), same reasoning as the vertex-
+# color path's "textured -> no _linear_to_srgb" branch, so it's used
+# as-is rather than gamma-corrected a second time.
+ShaderProgram(
+    "catalogue_preview_textured",
+    [
+        VertexShader("""
+            uniform mat4 u_mvp;
+            uniform mat3 u_normal;
+            attribute vec4 a_position;
+            attribute vec3 a_normal;
+            attribute vec2 a_texcoord;
+            varying vec2 v_texcoord;
+            varying vec3 v_normal;
+            void main() {
+                v_normal = normalize(u_normal * a_normal);
+                v_texcoord = a_texcoord;
+                gl_Position = u_mvp * a_position;
+            }
+        """),
+        FragmentShader("""
+            #ifdef GL_ES
+            precision mediump float;
+            #endif
+            uniform sampler2D u_texture;
+            varying vec2 v_texcoord;
+            varying vec3 v_normal;
+            void main() {
+                float p = dot(v_normal, normalize(vec3(1.0, -1.0, 1.0)));
+                p = p < 0. ? 0. : p * 0.45;
+                vec4 texel = texture2D(u_texture, v_texcoord);
+                gl_FragColor = vec4(texel.rgb * (0.55 + p), texel.a);
+            }
+        """),
+    ],
+)
+
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
     """glTF's baseColorFactor is defined in linear color space (per spec),
@@ -144,6 +193,20 @@ def _part_texture_image(part: trimesh.Trimesh) -> Image.Image | None:
         return None
     image = getattr(material, "baseColorTexture", None) or getattr(material, "image", None)
     return image if isinstance(image, Image.Image) else None
+
+
+def _part_uv(part: trimesh.Trimesh) -> np.ndarray | None:
+    """Per-vertex UV coordinates aligned with part.vertices (one (u, v)
+    pair per vertex, same indexing trimesh itself uses -- not yet
+    expanded per-face), if this part's visual carries any. None for a
+    part with no texture at all, or the rare TextureVisuals with a
+    material but no uv array (glTF technically allows a textured
+    material with no UV set, though nothing sane actually ships that).
+    """
+    uv = getattr(part.visual, "uv", None)
+    if uv is None or len(uv) != len(part.vertices):
+        return None
+    return np.asarray(uv, dtype=np.float32)
 
 
 def _part_vertex_colors(
@@ -247,6 +310,7 @@ class PreviewPart:
     faces: np.ndarray
     colors: np.ndarray
     texture_image: Image.Image | None
+    uv: np.ndarray | None
     is_collider: bool
 
 
@@ -333,17 +397,161 @@ def load_preview_parts(path: Path, colors_path: Path | None = None) -> list[Prev
         is_collider = _looks_like_collider_name(name)
         vertices = _y_up_to_z_up(np.asarray(part.vertices, dtype=np.float32))
         faces = np.asarray(part.faces, dtype=np.int32)
+        texture_image = _part_texture_image(part) if not is_collider else None
         result.append(
             PreviewPart(
                 name=name,
                 vertices=vertices,
                 faces=faces,
                 colors=_part_vertex_colors(part, is_collider, material_metadata),
-                texture_image=_part_texture_image(part) if not is_collider else None,
+                texture_image=texture_image,
+                uv=_part_uv(part) if texture_image is not None else None,
                 is_collider=is_collider,
             )
         )
     return result
+
+
+class TexturedGLMeshItem(gl.GLMeshItem):
+    """A GLMeshItem that samples a real, bound texture per-pixel via UV
+    coordinates instead of only ever interpolating the few colors baked at
+    each vertex -- see the module docstring for why plain GLMeshItem can't
+    do this on its own. Everything about vertex/normal/face handling is
+    inherited unchanged from GLMeshItem; this only adds a parallel texcoord
+    vertex buffer and a bound GL texture, and always draws with the
+    "catalogue_preview_textured" shader regardless of what's passed in.
+
+    texcoords must already be face-indexed (shape (num_faces, 3, 2)) in the
+    same order GLMeshItem itself expands vertex positions into when built
+    with smooth=False -- i.e. texcoords = part.uv[part.faces], mirroring
+    MeshData's own internal `self._vertexes[self.faces()]`. Computed by the
+    caller (not here) since GLMeshItem's own indexed-vs-not expansion logic
+    is internal to MeshData/parseMeshData and awkward to hook into cleanly
+    from a subclass; precomputing it up front, the same way vertex colors
+    already are, is simpler than reimplementing that logic.
+
+    The GL texture itself is uploaded lazily on first paint (create() needs
+    an active GL context, which doesn't exist yet at __init__ time) and
+    cached from then on -- one upload per dialog, not per frame. If that
+    upload ever fails (an unexpected image mode, a GL error), this falls
+    back permanently to GLMeshItem's own vertex-color rendering for the
+    rest of this item's life rather than drawing nothing.
+    """
+
+    def __init__(self, texcoords: np.ndarray, texture_image: Image.Image, **kwds) -> None:
+        self._texcoords = np.ascontiguousarray(texcoords, dtype=np.float32)
+        self._texture_image = texture_image
+        self._gl_texture_id: int | None = None
+        self._texture_upload_failed = False
+        self.m_vbo_texcoord = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        kwds["shader"] = "catalogue_preview_textured"
+        super().__init__(**kwds)
+
+    def _ensure_texture_uploaded(self) -> None:
+        if self._gl_texture_id is not None or self._texture_upload_failed:
+            return
+        try:
+            # glTexImage2D's row 0 is the texture's *bottom* row (v=0), but
+            # PIL/glTF both put row 0 at the top (v=0) -- flipping here once,
+            # at upload time, keeps v_texcoord matching glTF's own UV
+            # convention untouched rather than flipping it per-vertex.
+            image = self._texture_image.convert("RGBA").transpose(Image.FLIP_TOP_BOTTOM)
+            width, height = image.size
+            data = image.tobytes()
+
+            texture_id = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, texture_id)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_REPEAT)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_REPEAT)
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, width, height, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, data
+            )
+            GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
+            if not self.m_vbo_texcoord.isCreated():
+                self.m_vbo_texcoord.create()
+            self.m_vbo_texcoord.bind()
+            self.m_vbo_texcoord.allocate(self._texcoords, self._texcoords.nbytes)
+            self.m_vbo_texcoord.release()
+
+            self._gl_texture_id = texture_id
+        except Exception:  # noqa: BLE001 -- fall back to vertex colors, never a blank/crashed preview
+            self._texture_upload_failed = True
+            self.setShader("catalogue_preview")
+
+    def paint(self) -> None:
+        self._ensure_texture_uploaded()
+        if self._texture_upload_failed:
+            super().paint()
+            return
+
+        self.setupGLState()
+        if (dirty_bits := self.parseMeshData()):
+            self.upload_vertex_buffers(dirty_bits)
+
+        if not (self.opts["drawFaces"] and self.vertexes is not None):
+            return
+
+        mat_mvp = np.array(self.mvpMatrix().data(), dtype=np.float32)
+        mat_normal = np.array(self.modelViewMatrix().normalMatrix().data(), dtype=np.float32)
+
+        # Same ES2-compat detection GLMeshItem.paint() itself does -- the
+        # shader source is written to the ES2/GLSL-1.20-compatible common
+        # subset already, so this only matters for whichever GLSL version
+        # string the compiled program gets tagged with.
+        es2_compat = QOpenGLContext.currentContext().hasExtension(b"GL_ARB_ES2_compatibility")
+        shader = self.shader()
+        program = shader.program(es2_compat=es2_compat)
+        enabled_locs = []
+
+        if (loc := GL.glGetAttribLocation(program, "a_position")) != -1:
+            self.m_vbo_position.bind()
+            GL.glVertexAttribPointer(loc, 3, GL.GL_FLOAT, False, 0, None)
+            self.m_vbo_position.release()
+            enabled_locs.append(loc)
+
+        if (loc := GL.glGetAttribLocation(program, "a_normal")) != -1:
+            if self.normals is None:
+                GL.glVertexAttrib3f(loc, 0, 0, 1)
+            else:
+                self.m_vbo_normal.bind()
+                GL.glVertexAttribPointer(loc, 3, GL.GL_FLOAT, False, 0, None)
+                self.m_vbo_normal.release()
+                enabled_locs.append(loc)
+
+        if (loc := GL.glGetAttribLocation(program, "a_texcoord")) != -1:
+            self.m_vbo_texcoord.bind()
+            GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, None)
+            self.m_vbo_texcoord.release()
+            enabled_locs.append(loc)
+
+        for loc in enabled_locs:
+            GL.glEnableVertexAttribArray(loc)
+
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._gl_texture_id)
+
+        with shader:
+            loc = GL.glGetUniformLocation(program, "u_mvp")
+            GL.glUniformMatrix4fv(loc, 1, False, mat_mvp)
+            if (uloc_normal := GL.glGetUniformLocation(program, "u_normal")) != -1:
+                GL.glUniformMatrix3fv(uloc_normal, 1, False, mat_normal)
+            if (uloc_texture := GL.glGetUniformLocation(program, "u_texture")) != -1:
+                GL.glUniform1i(uloc_texture, 0)
+
+            if (faces := self.faces) is None:
+                GL.glDrawArrays(GL.GL_TRIANGLES, 0, int(np.prod(self.vertexes.shape[:-1])))
+            else:
+                self.m_ibo_faces.bind()
+                GL.glDrawElements(GL.GL_TRIANGLES, faces.size, GL.GL_UNSIGNED_INT, None)
+                self.m_ibo_faces.release()
+
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        for loc in enabled_locs:
+            GL.glDisableVertexAttribArray(loc)
 
 
 class Model3DPreviewDialog(QDialog):
@@ -363,6 +571,13 @@ class Model3DPreviewDialog(QDialog):
     off it), while the genuinely slow work (parsing the file, baking
     colors) happens beforehand on a background thread. See
     MainWindow._open_model_preview.
+
+    The "Layers:" list combines two different kinds of row: a mesh part's
+    checkbox shows/hides it in the 3D view (independent of every other
+    part), while a texture's checkbox instead selects it for inline
+    preview -- checking one texture unchecks any other (there's only one
+    preview area to show it in), swapping that area to the real image in
+    place of the 3D view. Right-click the preview to copy or save it.
     """
 
     def __init__(self, filename: str, parts: list[PreviewPart], parent: QWidget | None = None) -> None:
@@ -378,7 +593,21 @@ class Model3DPreviewDialog(QDialog):
         body = QHBoxLayout()
         self.view = gl.GLViewWidget()
         self.view.setBackgroundColor(BACKGROUND_COLOR)
-        body.addWidget(self.view, stretch=1)
+
+        # Checking a texture row below swaps this stack to show that
+        # texture's real image in place of the 3D view, instead of the
+        # separate "Textures..." popup dialog this used to open -- one
+        # inline preview area, same size as the viewport, rather than a
+        # second window to manage.
+        self._texture_preview_label = QLabel()
+        self._texture_preview_label.setAlignment(Qt.AlignCenter)
+        self._texture_preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._texture_preview_label.customContextMenuRequested.connect(self._show_texture_context_menu)
+        self._current_texture: tuple[str, Image.Image] | None = None
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self.view)
+        self._view_stack.addWidget(self._texture_preview_label)
+        body.addWidget(self._view_stack, stretch=1)
 
         # Populated by _build. Every part in the file gets its own row here
         # regardless of name -- a naming convention (Godot's own
@@ -389,15 +618,21 @@ class Model3DPreviewDialog(QDialog):
         # downloaded pack -- still gets a checkbox, not silently no way to
         # isolate it.
         self._part_rows: list[tuple[QListWidgetItem, gl.GLMeshItem, bool]] = []
-        self._textures: list[tuple[str, Image.Image]] = []
+        # Textures share the same list widget as parts (see _build) so both
+        # sets of "layers" are toggled from one place -- a texture's toggle
+        # means something different (select for inline preview, mutually
+        # exclusive with every other texture) than a part's (show/hide in
+        # the 3D view, independent of every other part), so they're tracked
+        # in a separate list rather than reusing _part_rows' shape.
+        self._texture_rows: list[tuple[QListWidgetItem, str, Image.Image]] = []
 
         self.parts_panel = QWidget()
         self.parts_panel.setFixedWidth(220)
         parts_layout = QVBoxLayout(self.parts_panel)
         parts_layout.setContentsMargins(0, 0, 0, 0)
-        parts_layout.addWidget(QLabel("Parts:"))
+        parts_layout.addWidget(QLabel("Layers:"))
         self.parts_list = QListWidget()
-        self.parts_list.itemChanged.connect(self._on_part_item_changed)
+        self.parts_list.itemChanged.connect(self._on_list_item_changed)
         parts_layout.addWidget(self.parts_list, stretch=1)
 
         bulk_row = QHBoxLayout()
@@ -408,10 +643,6 @@ class Model3DPreviewDialog(QDialog):
         bulk_row.addWidget(show_all_button)
         parts_layout.addLayout(bulk_row)
         parts_layout.addWidget(hide_colliders_button)
-
-        self.textures_button = QPushButton("Textures...")
-        self.textures_button.clicked.connect(self._open_texture_gallery)
-        parts_layout.addWidget(self.textures_button)
 
         body.addWidget(self.parts_panel)
         layout.addLayout(body, stretch=1)
@@ -430,17 +661,29 @@ class Model3DPreviewDialog(QDialog):
         all_mins = []
         all_maxs = []
         seen_texture_ids: set[int] = set()
+        textures: list[tuple[str, Image.Image]] = []
         for index, part in enumerate(parts):
             mesh_data = gl.MeshData(vertexes=part.vertices, faces=part.faces, vertexColors=part.colors)
-            mesh_item = gl.GLMeshItem(
+            mesh_kwargs = dict(
                 meshdata=mesh_data,
                 smooth=False,
                 drawFaces=True,
                 drawEdges=part.is_collider,
                 edgeColor=(1.0, 1.0, 1.0, 0.6),
-                shader="catalogue_preview",
                 glOptions="translucent" if part.is_collider else "opaque",
             )
+            if part.texture_image is not None and part.uv is not None:
+                # Face-indexed to match how GLMeshItem itself expands vertex
+                # positions with smooth=False (MeshData.vertexes(indexed=
+                # 'faces') internally does self._vertexes[self.faces()]) --
+                # see TexturedGLMeshItem's docstring for why this is
+                # precomputed here rather than inside that class.
+                texcoords = part.uv[part.faces]
+                mesh_item = TexturedGLMeshItem(
+                    texcoords=texcoords, texture_image=part.texture_image, **mesh_kwargs
+                )
+            else:
+                mesh_item = gl.GLMeshItem(shader="catalogue_preview", **mesh_kwargs)
             self.view.addItem(mesh_item)
 
             label = part.name or f"part {index + 1}"
@@ -454,7 +697,7 @@ class Model3DPreviewDialog(QDialog):
 
             if part.texture_image is not None and id(part.texture_image) not in seen_texture_ids:
                 seen_texture_ids.add(id(part.texture_image))
-                self._textures.append((part.name or "texture", part.texture_image))
+                textures.append((part.name or "texture", part.texture_image))
             all_mins.append(part.vertices.min(axis=0))
             all_maxs.append(part.vertices.max(axis=0))
 
@@ -470,18 +713,109 @@ class Model3DPreviewDialog(QDialog):
         self.view.opts["center"] = _to_vector3d(center)
         self.view.setCameraPosition(distance=radius * 3.0)
 
-        # Always shown, even for a single-part asset -- seeing "this file
-        # contains exactly one part, named X" is itself useful confirmation
-        # (that nothing else -- no separate collider, no hidden extra
-        # geometry -- is bundled in), not just something to isolate among
-        # several.
-        self.textures_button.setVisible(bool(self._textures))
+        # Textures share the parts_list widget (see class docstring) rather
+        # than the separate "Textures..." popup this used to open --
+        # checking one shows it inline in place of the 3D view (see
+        # _on_texture_toggled), a plain non-checkable row separates them
+        # visually from the part rows above.
+        if textures:
+            separator = QListWidgetItem("Textures:")
+            separator.setFlags(Qt.NoItemFlags)
+            self.parts_list.addItem(separator)
+            for name, image in textures:
+                list_item = QListWidgetItem(f"  {name}")
+                list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable)
+                list_item.setCheckState(Qt.Unchecked)
+                self.parts_list.addItem(list_item)
+                self._texture_rows.append((list_item, name, image))
 
-    def _on_part_item_changed(self, changed_item: QListWidgetItem) -> None:
+    def _on_list_item_changed(self, changed_item: QListWidgetItem) -> None:
         for list_item, mesh_item, _is_collider in self._part_rows:
             if list_item is changed_item:
                 mesh_item.setVisible(changed_item.checkState() == Qt.Checked)
                 return
+        for list_item, _name, _image in self._texture_rows:
+            if list_item is changed_item:
+                self._on_texture_toggled(changed_item)
+                return
+
+    def _on_texture_toggled(self, changed_item: QListWidgetItem) -> None:
+        if changed_item.checkState() != Qt.Checked:
+            self._current_texture = None
+            self._view_stack.setCurrentWidget(self.view)
+            return
+
+        # Selecting one texture for inline preview -- mutually exclusive
+        # with every other texture row, unlike parts (which can all be
+        # shown/hidden independently). Signals blocked while un-checking
+        # the rest so that doesn't itself recurse back into this method.
+        self.parts_list.blockSignals(True)
+        try:
+            for list_item, _name, _image in self._texture_rows:
+                if list_item is not changed_item:
+                    list_item.setCheckState(Qt.Unchecked)
+        finally:
+            self.parts_list.blockSignals(False)
+
+        name, image = next((n, img) for li, n, img in self._texture_rows if li is changed_item)
+        self._current_texture = (name, image)
+        self._update_texture_preview_pixmap()
+        self._view_stack.setCurrentWidget(self._texture_preview_label)
+
+    def _update_texture_preview_pixmap(self) -> None:
+        if self._current_texture is None:
+            return
+        _name, image = self._current_texture
+        pixmap = _pil_image_to_qpixmap(image)
+        self._texture_preview_label.setPixmap(
+            pixmap.scaled(self._texture_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # QLabel doesn't auto-rescale a pixmap set via setPixmap() on its
+        # own resize (setScaledContents(True) would, but stretches without
+        # preserving aspect ratio) -- re-derive it from the original PIL
+        # image at the new size instead of scaling the already-scaled
+        # QPixmap repeatedly, which would compound quality loss.
+        self._update_texture_preview_pixmap()
+
+    def _show_texture_context_menu(self, pos) -> None:
+        # The actual copy/save logic lives in _copy_current_texture /
+        # _save_current_texture, not here -- QMenu.exec() is a Qt/C++-bound
+        # method that mock.patch can't reliably intercept from a test (it
+        # silently falls through to a real, blocking popup instead), so
+        # keeping this method to just "show the menu, dispatch by action"
+        # lets a test call those two directly instead of fighting exec().
+        if self._current_texture is None:
+            return
+
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy Image")
+        save_action = menu.addAction("Save Image As...")
+        chosen = menu.exec(self._texture_preview_label.mapToGlobal(pos))
+
+        if chosen is copy_action:
+            self._copy_current_texture()
+        elif chosen is save_action:
+            self._save_current_texture()
+
+    def _copy_current_texture(self) -> None:
+        if self._current_texture is None:
+            return
+        _name, image = self._current_texture
+        QApplication.clipboard().setPixmap(_pil_image_to_qpixmap(image))
+
+    def _save_current_texture(self) -> None:
+        if self._current_texture is None:
+            return
+        name, image = self._current_texture
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", name) or "texture"
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Texture", f"{safe_name}.png", "PNG Image (*.png)"
+        )
+        if path:
+            image.save(path)
 
     def _set_all_parts_checked(self, checked: bool) -> None:
         state = Qt.Checked if checked else Qt.Unchecked
@@ -493,12 +827,8 @@ class Model3DPreviewDialog(QDialog):
             if is_collider:
                 list_item.setCheckState(Qt.Unchecked)
 
-    def _open_texture_gallery(self) -> None:
-        dialog = TextureGalleryDialog(self._textures, self)
-        dialog.exec()
-
     def _show_error(self, message: str) -> None:
-        self.view.setVisible(False)
+        self._view_stack.setVisible(False)
         self.parts_panel.setVisible(False)
         error_label = QLabel(message)
         error_label.setWordWrap(True)
@@ -524,65 +854,3 @@ def _pil_image_to_qpixmap(image: Image.Image) -> QPixmap:
     return pixmap
 
 
-_GALLERY_THUMBNAIL_SIZE = 96
-_LARGE_TEXTURE_SIZE = 512
-
-
-class TextureGalleryDialog(QDialog):
-    """Every distinct source texture actually used by the previewed
-    model's parts, as real images -- not the per-vertex colors sampled
-    from them, which is all the 3D view itself ever shows. Click a
-    thumbnail for a bigger view (up to 512px), the same up-close-look
-    pattern as double-clicking a grid thumbnail elsewhere in this app.
-    """
-
-    def __init__(self, textures: list[tuple[str, Image.Image]], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Textures")
-        self.resize(420, 420)
-
-        layout = QVBoxLayout(self)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        layout.addWidget(scroll, stretch=1)
-
-        grid_widget = QWidget()
-        grid = QGridLayout(grid_widget)
-        columns = 3
-        for index, (name, image) in enumerate(textures):
-            cell = QVBoxLayout()
-            thumb_button = QPushButton()
-            pixmap = _pil_image_to_qpixmap(image).scaled(
-                _GALLERY_THUMBNAIL_SIZE,
-                _GALLERY_THUMBNAIL_SIZE,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            )
-            thumb_button.setIcon(QIcon(pixmap))
-            thumb_button.setIconSize(pixmap.size())
-            thumb_button.setFixedSize(_GALLERY_THUMBNAIL_SIZE + 16, _GALLERY_THUMBNAIL_SIZE + 16)
-            thumb_button.clicked.connect(lambda _checked=False, img=image, n=name: self._open_large(n, img))
-            cell.addWidget(thumb_button)
-            name_label = QLabel(name)
-            name_label.setAlignment(Qt.AlignCenter)
-            name_label.setWordWrap(True)
-            cell.addWidget(name_label)
-            grid.addLayout(cell, index // columns, index % columns)
-        scroll.setWidget(grid_widget)
-
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(self.accept)
-        layout.addWidget(close_button)
-
-    def _open_large(self, name: str, image: Image.Image) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle(name)
-        layout = QVBoxLayout(dialog)
-        image_label = QLabel()
-        image_label.setAlignment(Qt.AlignCenter)
-        pixmap = _pil_image_to_qpixmap(image).scaled(
-            _LARGE_TEXTURE_SIZE, _LARGE_TEXTURE_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        image_label.setPixmap(pixmap)
-        layout.addWidget(image_label)
-        dialog.exec()
