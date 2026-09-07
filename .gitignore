@@ -11,3 +11,4 @@ settings.json
 *.db
 /thumbnails/
 /logs/
+/release_out/
