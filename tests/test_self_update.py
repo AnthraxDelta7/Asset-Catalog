@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -116,6 +117,15 @@ def test_apply_update_and_exit_launches_powershell_with_correct_args_then_exits(
     is exactly the crash-instead-of-relaunch bug this pins down. os._exit()
     is mocked rather than actually invoked -- calling the real one would
     kill this test process outright, not just this function.
+
+    Also pins the exact creationflags: CREATE_NO_WINDOW alone, never
+    combined with DETACHED_PROCESS -- confirmed via a real dry run that the
+    combination silently breaks classic Windows PowerShell's console host
+    (it can't initialize with no console at all), so the relaunch script
+    never runs at all even though Popen still returns a real PID and
+    nothing raises. A second, independent real-machine-only bug the mock
+    alone can't catch, but the exact flags value can at least be pinned
+    down here so a future edit doesn't quietly reintroduce it.
     """
     extracted_app_dir = tmp_path / "extracted" / "AssetCatalogue"
     extracted_app_dir.mkdir(parents=True)
@@ -128,6 +138,7 @@ def test_apply_update_and_exit_launches_powershell_with_correct_args_then_exits(
 
     mock_exit.assert_called_once_with(0)
     mock_popen.assert_called_once()
+    assert mock_popen.call_args.kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
     args = mock_popen.call_args.args[0]
     assert args[0] == "powershell.exe"
     # Named PowerShell params are passed as adjacent (flag, value) pairs --

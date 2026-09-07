@@ -190,9 +190,9 @@ def apply_update_and_exit(extracted_app_dir: Path, exe_name: str) -> None:
     level termination that never raises a Python exception at all, so
     there's nothing for that boundary to mishandle. No cleanup is lost by
     skipping it here -- the worker thread that got us here has already
-    finished, and the detached relauncher's own lifetime is already
-    independent of this process (DETACHED_PROCESS), not tied to a graceful
-    Python-level shutdown.
+    finished, and a plain child process's lifetime is already independent
+    of its parent's on Windows (no job object ties them together), not
+    tied to a graceful Python-level shutdown.
     """
     script_fd = tempfile.NamedTemporaryFile(
         mode="w", suffix=".ps1", prefix="AssetCatalogue-relaunch-", delete=False, encoding="utf-8"
@@ -214,7 +214,18 @@ def apply_update_and_exit(extracted_app_dir: Path, exe_name: str) -> None:
             "-ExeName", exe_name,
             "-ExtractRoot", str(extracted_app_dir.parent),
         ],
-        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+        # CREATE_NO_WINDOW alone: gives the child its own invisible console
+        # (on top of -WindowStyle Hidden) without being tied to this
+        # process's own console. Also tried CREATE_NO_WINDOW |
+        # DETACHED_PROCESS -- confirmed via a real update attempt (and a
+        # real dry run afterward) that DETACHED_PROCESS breaks this
+        # silently: classic Windows PowerShell's console host can't
+        # initialize with no console at all, so the relaunch script never
+        # even starts running -- Popen still returns a real, valid PID
+        # (nothing fails loudly), it just never does anything, leaving the
+        # old install in place and the downloaded update's extracted temp
+        # folder never cleaned up.
+        creationflags=subprocess.CREATE_NO_WINDOW,
         close_fds=True,
     )
     os._exit(0)
