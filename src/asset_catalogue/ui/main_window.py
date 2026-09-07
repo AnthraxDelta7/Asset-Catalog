@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 from asset_catalogue import (
     blender_render,
     crash_log,
+    exporting,
     godot_export,
     library_health,
     library_stats,
@@ -70,6 +71,46 @@ GRID_CELL_SIZE = QSize(THUMBNAIL_ICON_SIZE.width() + 32, THUMBNAIL_ICON_SIZE.hei
 # doesn't, so the detail panel's "Generate Thumbnail" button never offers
 # to do something that would just silently do nothing.
 THUMBNAIL_CAPABLE_TYPES = {"texture", "audio", "model"}
+
+
+def _is_godot_export_eligible(assets: list[AssetSummary]) -> bool:
+    """Whether every one of assets is something Catalogue.
+    export_assets_to_godot_bg can actually generate a MeshInstance3D
+    wrapper scene for -- mirrors exporting.is_godot_export_eligible, just
+    against AssetSummary's attribute access instead of a sqlite3.Row's
+    dict-key access (this runs against whatever's currently selected in
+    the grid, which the UI only ever has as AssetSummary objects; the
+    Row-based one is what the actual _bg export call re-checks against
+    once it has real rows). A mixed or empty selection is never eligible
+    -- see exporting.is_godot_export_eligible's own docstring for why a
+    mixed selection isn't partially handled either.
+    """
+    if not assets:
+        return False
+    return all(
+        Path(asset.relative_path).suffix.lower() in exporting.GODOT_IMPORTABLE_EXTENSIONS
+        for asset in assets
+    )
+
+
+def _remember_last_export_mode(mode: str) -> None:
+    """Persists mode ("standard" or "godot") as the preferred default for
+    next time -- called only from an explicit choice (a specific menu
+    entry clicked, or an ExportDialog accepted with/without its Godot
+    checkbox), never from the export button body's own automatic
+    fallback: clicking a plain "Export to X" entry while the stored
+    preference is "godot" is still a deliberate choice to use standard
+    export *this time*, exactly like clicking "Export to Godot: X" would
+    be for the reverse, so both go through here; only a silent,
+    selection-forced fallback skips it (see DetailPanel.
+    _on_export_button_clicked). Module-level rather than a method on
+    DetailPanel since MainWindow's own ExportDialog path needs it too,
+    and neither one should reach into the other's internals for it.
+    """
+    s = settings.load()
+    if s.last_export_mode != mode:
+        s.last_export_mode = mode
+        settings.save(s)
 
 
 class FilterPanel(QWidget):
@@ -497,6 +538,11 @@ class DetailPanel(QWidget):
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
+        # Whether the export button's Godot-export entries/effective mode
+        # apply to the *current* selection -- recomputed on every
+        # show_asset/show_multi_selection/clear_selection, see
+        # _is_godot_export_eligible.
+        self._godot_eligible = False
 
         layout = QVBoxLayout(self)
         self.title_label = QLabel("No asset selected")
@@ -643,28 +689,53 @@ class DetailPanel(QWidget):
     def _update_export_button(self, enabled: bool) -> None:
         self.export_button.setEnabled(enabled)
         recent_projects = settings.load().recent_export_projects
+        preferred_mode = settings.load().last_export_mode
+        effective_mode = "godot" if (self._godot_eligible and preferred_mode == "godot") else "standard"
+
         self.export_menu.clear()
         if recent_projects:
             for path in recent_projects:
                 label = Path(path).name or path
                 action = self.export_menu.addAction(f"Export to {label}")
                 action.setToolTip(path)
-                action.triggered.connect(lambda checked=False, p=path: self._on_quick_export(p))
+                action.triggered.connect(lambda checked=False, p=path: self._on_deliberate_export(p, "standard"))
+            if self._godot_eligible:
+                self.export_menu.addSeparator()
+                for path in recent_projects:
+                    label = Path(path).name or path
+                    action = self.export_menu.addAction(f"Export to Godot: {label}")
+                    action.setToolTip(f"{path}\n(generates a MeshInstance3D scene per asset)")
+                    action.triggered.connect(
+                        lambda checked=False, p=path: self._on_deliberate_export(p, "godot")
+                    )
             self.export_menu.addSeparator()
         browse_action = self.export_menu.addAction("Browse for Project...")
         browse_action.triggered.connect(lambda checked=False: self._on_export_browse())
 
         if recent_projects:
-            self.export_button.setText(f"Export to {Path(recent_projects[0]).name}")
+            mode_suffix = " (Godot)" if effective_mode == "godot" else ""
+            self.export_button.setText(f"Export to {Path(recent_projects[0]).name}{mode_suffix}")
         else:
             self.export_button.setText("Export to Project...")
 
+    def _on_deliberate_export(self, project_root: str, mode: str) -> None:
+        _remember_last_export_mode(mode)
+        self._on_quick_export(project_root, mode)
+
     def _on_export_button_clicked(self) -> None:
         recent_projects = settings.load().recent_export_projects
-        if recent_projects:
-            self._on_quick_export(recent_projects[0])
-        else:
+        if not recent_projects:
             self._on_export_browse()
+            return
+        preferred_mode = settings.load().last_export_mode
+        effective_mode = "godot" if (self._godot_eligible and preferred_mode == "godot") else "standard"
+        # Only a genuine choice (effective matches the stored preference)
+        # gets remembered again here -- a forced fallback to "standard"
+        # for an ineligible selection must never overwrite a "godot"
+        # preference just because that's what actually ran this once.
+        if effective_mode == preferred_mode:
+            _remember_last_export_mode(effective_mode)
+        self._on_quick_export(recent_projects[0], effective_mode)
 
     def _set_idle_state(self) -> None:
         self.tag_list.setEnabled(False)
@@ -731,6 +802,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self.fix_texture_button.setVisible(False)
+        self._godot_eligible = _is_godot_export_eligible(assets)
         self._update_export_button(True)
         self._stop_playback_and_hide()
 
@@ -762,6 +834,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
         self.fix_texture_button.setVisible(bool(self._catalogue.list_broken_texture_materials_for_asset(asset.id)))
+        self._godot_eligible = _is_godot_export_eligible([asset])
         self._update_export_button(True)
 
         self._media_player.stop()
@@ -2031,14 +2104,25 @@ class ExportDialog(QDialog):
     (see below) is the fast path for one-click re-use of a recent project
     without opening this dialog at all; this dialog is for picking a
     different one, or setting a non-default destination subfolder.
+
+    The Godot checkbox only exists at all when godot_eligible (every
+    selected asset a model Godot can import on its own -- see
+    exporting.is_godot_export_eligible) -- there's no sense offering it
+    for a texture or a .stl, which can never produce a MeshInstance3D
+    wrapper scene. Pre-checked when Settings.last_export_mode is already
+    "godot", matching the DetailPanel button's own effective-mode default.
     """
 
-    def __init__(self, asset_count: int, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, asset_count: int, godot_eligible: bool = False, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export to Project")
-        self.resize(460, 180)
+        self.resize(460, 210 if godot_eligible else 180)
         self.project_root: Path | None = None
         self.dest_subfolder: str = "exported_assets"
+        self.mode: str = "standard"
+        self._godot_eligible = godot_eligible
 
         recent_projects = settings.load().recent_export_projects
 
@@ -2057,6 +2141,17 @@ class ExportDialog(QDialog):
         self.dest_subfolder_edit = QLineEdit("exported_assets")
         form.addRow("Destination subfolder:", self.dest_subfolder_edit)
         layout.addLayout(form)
+
+        self.godot_check: QCheckBox | None = None
+        if godot_eligible:
+            self.godot_check = QCheckBox("Generate Godot MeshInstance3D scenes (requires Godot)")
+            self.godot_check.setChecked(settings.load().last_export_mode == "godot")
+            self.godot_check.setToolTip(
+                "Imports each asset in a headless Godot pass and generates a clean, "
+                "self-contained MeshInstance3D scene for it -- the actual exported "
+                "Godot asset, not the raw model file, which is removed afterward."
+            )
+            layout.addWidget(self.godot_check)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Export")
@@ -2083,6 +2178,7 @@ class ExportDialog(QDialog):
 
         self.project_root = project_root
         self.dest_subfolder = self.dest_subfolder_edit.text().strip() or "exported_assets"
+        self.mode = "godot" if (self.godot_check is not None and self.godot_check.isChecked()) else "standard"
         self.accept()
 
 
@@ -4586,18 +4682,24 @@ class MainWindow(QMainWindow):
             )
             return
 
-        dialog = ExportDialog(len(selected_ids), self)
+        selected_assets = [asset for asset in self._current_assets if asset.id in selected_ids]
+        godot_eligible = _is_godot_export_eligible(selected_assets)
+        dialog = ExportDialog(len(selected_ids), godot_eligible, self)
         if dialog.exec() != QDialog.Accepted:
             return
 
-        self._run_export_job(selected_ids, str(dialog.project_root), dialog.dest_subfolder)
+        _remember_last_export_mode(dialog.mode)
+        self._run_export_job(selected_ids, str(dialog.project_root), dialog.dest_subfolder, dialog.mode)
 
-    def _quick_export(self, project_root: str) -> None:
+    def _quick_export(self, project_root: str, mode: str = "standard") -> None:
         """One-click export of the current selection to a specific,
         already-known project folder (a recent project picked from the
         DetailPanel's Export button, or the button itself when it already
         has a last-used project) -- skips ExportDialog entirely, always
-        using the default destination subfolder.
+        using the default destination subfolder. mode ("standard" or
+        "godot") is decided by the caller -- DetailPanel already knows
+        whether the current selection is Godot-eligible and what the
+        effective mode is, so this doesn't re-derive it.
         """
         selected_ids = [item.data(Qt.UserRole) for item in self.grid.selectedItems()]
         if not selected_ids:
@@ -4608,9 +4710,24 @@ class MainWindow(QMainWindow):
                 self, "Asset Catalogue", "Configure a staging folder in Settings first."
             )
             return
-        self._run_export_job(selected_ids, project_root, "exported_assets")
+        self._run_export_job(selected_ids, project_root, "exported_assets", mode)
 
-    def _run_export_job(self, selected_ids: list[int], project_root: str, dest_subfolder: str) -> None:
+    def _run_export_job(
+        self, selected_ids: list[int], project_root: str, dest_subfolder: str, mode: str = "standard"
+    ) -> None:
+        if mode == "godot":
+            self._run_background_job(
+                lambda report: self._catalogue.export_assets_to_godot_bg(
+                    selected_ids, project_root, dest_subfolder, on_progress=report
+                ),
+                f"Exporting {len(selected_ids)} asset(s) to Godot...",
+                lambda stats: (
+                    f"Generated {stats.generated} Godot MeshInstance3D scene(s) in {project_root}"
+                    + (f" ({stats.failed} failed)" if stats.failed else "")
+                ),
+                lambda: self._remember_export_project(project_root),
+            )
+            return
         self._run_background_job(
             lambda report: self._catalogue.export_assets_bg(
                 selected_ids, project_root, dest_subfolder, on_progress=report

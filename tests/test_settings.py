@@ -12,6 +12,9 @@ def test_load_returns_defaults_when_no_file(tmp_path: Path, monkeypatch) -> None
     loaded = settings.load()
     assert loaded.staging_folder is None
     assert loaded.recent_export_projects == []
+    # "standard" -- never defaults to "godot" for someone who's never
+    # touched export mode at all.
+    assert loaded.last_export_mode == "standard"
 
 
 def test_save_load_round_trip(tmp_path: Path, monkeypatch) -> None:

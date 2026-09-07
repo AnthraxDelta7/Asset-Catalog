@@ -43,6 +43,15 @@ class Settings:
     # -- without needing a separate opt-in toggle the way the retired
     # Godot-specific remembering used to.
     recent_export_projects: list[str] = field(default_factory=list)
+    # The last export mode the user *deliberately* chose ("standard" or
+    # "godot" -- see main_window.py's _effective_export_mode), remembered
+    # as the DetailPanel export button's preferred default so repeat
+    # exports don't need re-picking it every time. Never overwritten by an
+    # automatic fallback: selecting a non-model asset temporarily forces
+    # "standard" for that one export (Godot's MeshInstance3D wrapper makes
+    # no sense for it), but the next model-asset export goes right back to
+    # whatever was last chosen on purpose, not the fallback.
+    last_export_mode: str = "standard"
     # A release version the user explicitly dismissed via "Skip This
     # Version" in the update-available notice -- the automatic background
     # check won't nag about that exact version again, but a manual "Check

@@ -240,6 +240,98 @@ def test_export_assets_bg_end_to_end(catalogue_with_asset: tuple[Catalogue, int]
     assert (project_root / "exported_assets" / "Pack" / "a.png").is_file()
 
 
+def test_export_assets_to_godot_bg_generates_wrapper_and_removes_source(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    """godot_export.generate_meshinstance_wrappers is mocked -- its own
+    real behavior (including the actual pack/save round trip verified
+    against a real Godot install) is covered directly in
+    test_godot_export.py. This is about the orchestration around it: the
+    file actually gets copied in first, and a source .glb whose wrapper
+    generation the mock reports as successful gets deleted afterward --
+    the wrapper scene is the real deliverable, not a source file sitting
+    next to it (see export_assets_to_godot_bg's own docstring).
+    """
+    from unittest.mock import patch
+
+    from asset_catalogue import godot_export
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    s = settings.Settings(
+        staging_folder=str(catalogue.staging_folder()),
+        library_folder=str(catalogue._thumbnail_dir.parent),
+    )
+    settings.save(s)
+
+    pack_root = catalogue.staging_folder() / "Pack"
+    pack_root.mkdir()
+    (pack_root / "model.glb").write_bytes(b"fake glb bytes")
+    pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
+    asset_id = catalogue._conn.execute("SELECT id FROM assets").fetchone()["id"]
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+        assert len(glb_paths) == 1
+        wrapper_path = glb_paths[0].with_name("model_meshinstance.tscn")
+        wrapper_path.write_text("[gd_scene]")
+        return godot_export.GodotWrapperStats(generated=1, succeeded_sources=[glb_paths[0]])
+
+    with (
+        patch.object(catalogue, "resolve_godot", return_value=Path("godot.exe")),
+        patch.object(godot_export, "generate_meshinstance_wrappers", side_effect=fake_generate),
+    ):
+        stats = catalogue.export_assets_to_godot_bg([asset_id], project_root)
+
+    assert stats.generated == 1
+    dest_dir = project_root / "exported_assets" / "Pack"
+    assert not (dest_dir / "model.glb").exists()  # source removed after a successful wrapper
+    assert (dest_dir / "model_meshinstance.tscn").is_file()
+
+
+def test_export_assets_to_godot_bg_keeps_source_when_wrapper_generation_fails(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    from unittest.mock import patch
+
+    from asset_catalogue import godot_export
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    s = settings.Settings(
+        staging_folder=str(catalogue.staging_folder()),
+        library_folder=str(catalogue._thumbnail_dir.parent),
+    )
+    settings.save(s)
+
+    pack_root = catalogue.staging_folder() / "Pack"
+    pack_root.mkdir()
+    (pack_root / "model.glb").write_bytes(b"fake glb bytes")
+    pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
+    asset_id = catalogue._conn.execute("SELECT id FROM assets").fetchone()["id"]
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+
+    failed_stats = godot_export.GodotWrapperStats(failed=1, failures=["model.glb: no mesh content found"])
+
+    with (
+        patch.object(catalogue, "resolve_godot", return_value=Path("godot.exe")),
+        patch.object(godot_export, "generate_meshinstance_wrappers", return_value=failed_stats),
+    ):
+        stats = catalogue.export_assets_to_godot_bg([asset_id], project_root)
+
+    assert stats.generated == 0
+    assert stats.failed == 1
+    # Nothing generated for it -- the copied source is the only usable
+    # result, so it must not have been deleted.
+    assert (project_root / "exported_assets" / "Pack" / "model.glb").is_file()
+
+
 def test_model_preview_path_for(catalogue_with_asset: tuple[Catalogue, int]) -> None:
     from asset_catalogue import model_preview
 

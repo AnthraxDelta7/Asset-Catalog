@@ -103,3 +103,85 @@ def test_export_assets_sanitizes_pack_name_with_slashes(
 
     exporting.export_assets(conn, staging_folder, project_root, str(project_root), "exported_assets", assets)
     assert (project_root / "exported_assets" / "Weird_Pack" / "a.png").is_file()
+
+
+def test_is_godot_export_eligible_true_for_all_godot_importable_models(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "a.glb").write_bytes(b"fake")
+    (pack_root / "b.fbx").write_bytes(b"fake")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assets = exporting.select_assets(conn)
+    assert exporting.is_godot_export_eligible(assets) is True
+
+
+def test_is_godot_export_eligible_false_for_a_mixed_selection(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    """A model plus a non-Godot-importable asset (a texture here, but the
+    same reasoning applies to .stl/.blend) must never be treated as
+    eligible -- see is_godot_export_eligible's own docstring for why a
+    mixed selection isn't partially handled.
+    """
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "a.glb").write_bytes(b"fake")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+    write_texture(staging_folder, "Pack", "b.png")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assets = exporting.select_assets(conn)
+    assert len(assets) == 2
+    assert exporting.is_godot_export_eligible(assets) is False
+
+
+def test_is_godot_export_eligible_false_for_a_non_importable_model_format(
+    conn: sqlite3.Connection, staging_folder: Path
+) -> None:
+    # Godot has no built-in .stl importer -- a real model asset this app
+    # catalogues just fine, but never something a wrapper scene can be
+    # built for.
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "a.stl").write_bytes(b"fake")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    assets = exporting.select_assets(conn)
+    assert exporting.is_godot_export_eligible(assets) is False
+
+
+def test_is_godot_export_eligible_false_for_an_empty_selection() -> None:
+    assert exporting.is_godot_export_eligible([]) is False
+
+
+def test_export_assets_to_godot_returns_destination_paths(
+    conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
+) -> None:
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "a.glb").write_bytes(b"fake glb bytes")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+    assets = exporting.select_assets(conn)
+
+    stats, destinations = exporting.export_assets_to_godot(
+        conn, staging_folder, project_root, str(project_root), "exported_assets", assets
+    )
+
+    assert stats.copied == 1
+    expected = project_root / "exported_assets" / "Pack" / "a.glb"
+    assert destinations == [expected]
+    assert expected.is_file()
+    # Same recording as a plain export -- the exports table doesn't
+    # distinguish which export mode produced a given row.
+    row = conn.execute("SELECT * FROM exports").fetchone()
+    assert row["destination_path"] == str(expected)

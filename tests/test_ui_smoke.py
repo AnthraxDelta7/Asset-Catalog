@@ -220,3 +220,91 @@ def test_self_update_is_disabled_pending_code_signing() -> None:
     from asset_catalogue.ui.main_window import SELF_UPDATE_ENABLED
 
     assert SELF_UPDATE_ENABLED is False
+
+
+def _make_asset_summary(relative_path: str, asset_id: int = 1) -> "AssetSummary":
+    from asset_catalogue.catalogue import AssetSummary
+
+    return AssetSummary(
+        id=asset_id,
+        filename=Path(relative_path).name,
+        pack_name="Pack",
+        asset_type="model",
+        thumbnail_status="pending",
+        content_hash=f"hash-{asset_id}",
+        relative_path=relative_path,
+    )
+
+
+def test_is_godot_export_eligible_true_for_godot_importable_models() -> None:
+    from asset_catalogue.ui.main_window import _is_godot_export_eligible
+
+    assets = [_make_asset_summary("a.glb", 1), _make_asset_summary("b.fbx", 2)]
+    assert _is_godot_export_eligible(assets) is True
+
+
+def test_is_godot_export_eligible_false_for_non_model_or_mixed_selection() -> None:
+    from asset_catalogue.ui.main_window import _is_godot_export_eligible
+
+    assert _is_godot_export_eligible([]) is False
+    assert _is_godot_export_eligible([_make_asset_summary("a.stl")]) is False
+    assert _is_godot_export_eligible([_make_asset_summary("a.glb", 1), _make_asset_summary("b.png", 2)]) is False
+
+
+def test_remember_last_export_mode_persists_only_on_change(tmp_path: Path, monkeypatch) -> None:
+    from asset_catalogue.ui.main_window import _remember_last_export_mode
+
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings())
+    assert settings.load().last_export_mode == "standard"
+
+    _remember_last_export_mode("godot")
+    assert settings.load().last_export_mode == "godot"
+
+    _remember_last_export_mode("godot")  # no-op write path -- must not raise or change anything
+    assert settings.load().last_export_mode == "godot"
+
+    _remember_last_export_mode("standard")
+    assert settings.load().last_export_mode == "standard"
+
+
+def test_export_dialog_hides_godot_checkbox_when_not_eligible(qapp) -> None:
+    from asset_catalogue.ui.main_window import ExportDialog
+
+    dialog = ExportDialog(3, godot_eligible=False)
+    assert dialog.godot_check is None
+
+
+def test_export_dialog_godot_checkbox_defaults_to_last_export_mode(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    from asset_catalogue.ui.main_window import ExportDialog
+
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(last_export_mode="godot"))
+
+    dialog = ExportDialog(1, godot_eligible=True)
+    assert dialog.godot_check is not None
+    assert dialog.godot_check.isChecked() is True
+
+
+def test_export_dialog_accept_sets_mode_from_checkbox(qapp, tmp_path: Path) -> None:
+    from asset_catalogue.ui.main_window import ExportDialog
+
+    dialog = ExportDialog(1, godot_eligible=True)
+    dialog.project_edit.setText(str(tmp_path))
+    dialog.godot_check.setChecked(True)
+    dialog._on_accept()
+
+    assert dialog.mode == "godot"
+    assert dialog.project_root == tmp_path
+
+
+def test_export_dialog_accept_defaults_to_standard_mode_when_ineligible(qapp, tmp_path: Path) -> None:
+    from asset_catalogue.ui.main_window import ExportDialog
+
+    dialog = ExportDialog(1, godot_eligible=False)
+    dialog.project_edit.setText(str(tmp_path))
+    dialog._on_accept()
+
+    assert dialog.mode == "standard"

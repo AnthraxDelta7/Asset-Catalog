@@ -882,6 +882,58 @@ class Catalogue:
         finally:
             conn.close()
 
+    def export_assets_to_godot_bg(
+        self,
+        asset_ids: list[int],
+        project_root: Path,
+        dest_subfolder: str = "exported_assets",
+        on_progress: Callable[[str], None] | None = None,
+    ) -> godot_export.GodotWrapperStats:
+        """Exports the given assets the same way export_assets_bg does,
+        then additionally generates a clean MeshInstance3D wrapper scene
+        for each one (see godot_export.generate_meshinstance_wrappers) and
+        deletes the intermediate .glb/.fbx/.obj copy (and its .import
+        residue) once its wrapper is confirmed generated -- the wrapper
+        scene is fully self-contained (verified directly against a real
+        Godot install: mesh and material are embedded, a texture stays a
+        proper reference to Godot's own auto-extracted image file), so
+        what actually lands in the project is the Godot asset itself, not
+        a source file next to it. A source whose wrapper generation
+        failed is left in place instead -- something usable beats
+        nothing.
+
+        Caller must have already confirmed the selection is Godot-export
+        eligible (see exporting.is_godot_export_eligible) -- this doesn't
+        re-check, since there's no sensible fallback to make that
+        decision here.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        godot_exe = self.resolve_godot()
+        conn = db.connect(settings.load().db_path())
+        try:
+            assets = exporting.select_assets(conn, asset_ids=asset_ids)
+            project_identifier = str(Path(project_root).resolve())
+            _copy_stats, destinations = exporting.export_assets_to_godot(
+                conn,
+                self._staging_folder,
+                Path(project_root),
+                project_identifier,
+                dest_subfolder,
+                assets,
+                on_progress=on_progress,
+            )
+        finally:
+            conn.close()
+
+        wrapper_stats = godot_export.generate_meshinstance_wrappers(
+            godot_exe, Path(project_root), destinations, on_progress=on_progress
+        )
+        for source_path in wrapper_stats.succeeded_sources:
+            source_path.unlink(missing_ok=True)
+            Path(f"{source_path}.import").unlink(missing_ok=True)
+        return wrapper_stats
+
     def tag_pack_bg(self, pack_name: str, tag_name: str, category: str | None = None) -> int:
         conn = db.connect(settings.load().db_path())
         try:

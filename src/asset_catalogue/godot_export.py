@@ -45,6 +45,7 @@ ProgressCallback = Callable[[str], None]
 MIN_GODOT_VERSION = (4, 0, 0)
 
 EXPORT_SCRIPT_PATH = paths.package_dir() / "godot_export_script.gd"
+WRAPPER_SCRIPT_PATH = paths.package_dir() / "godot_meshinstance_wrapper_script.gd"
 
 _WINDOWS_SEARCH_DIRS = (
     Path("C:/Program Files/Godot"),
@@ -297,6 +298,176 @@ def export_scenes_to_glb(
         for job in missing:
             stats.failed += 1
             stats.failures.append(f"{Path(job['scene_path']).name}: Godot exited before finishing")
+    finally:
+        job_list_path.unlink(missing_ok=True)
+
+    return stats
+
+
+@dataclass
+class GodotWrapperStats:
+    generated: int = 0
+    failed: int = 0
+    failures: list[str] = field(default_factory=list)
+    # Absolute source .glb paths a wrapper was actually generated for --
+    # Catalogue.export_assets_to_godot_bg uses this to know exactly which
+    # intermediate .glb copies are now safe to delete (the wrapper scene
+    # is fully self-contained, confirmed directly against a real Godot
+    # install -- see the wrapper script's own docstring) versus which
+    # ones failed and should be left in place as the only usable result
+    # for that asset.
+    succeeded_sources: list[Path] = field(default_factory=list)
+
+
+def _run_godot_import_pass(godot_exe: Path, project_root: Path) -> bool:
+    """Forces Godot to import any newly-added files under project_root --
+    a .glb this app just copied in has no .import cache yet, and a bare
+    SceneTree script run (-s, what generate_meshinstance_wrappers uses for
+    the actual work) can't load a resource without one: confirmed
+    directly, load() on an unimported .glb fails outright with "No loader
+    found for resource", not a recoverable error. export_scenes_to_glb
+    doesn't need this same step -- that direction's project is assumed
+    already-imported from the user's own prior use of it in the real
+    Godot editor.
+
+    Godot's own headless-editor progress-dialog machinery prints noisy
+    but harmless ERROR lines to stderr during this even on a fully
+    successful run (confirmed directly against a real project) -- only
+    the process's own exit code is checked, not its output.
+    """
+    result = subprocess.run(
+        [str(godot_exe), "--headless", "--editor", "--path", str(project_root), "--import"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    return result.returncode == 0
+
+
+def _build_wrapper_jobs(
+    project_root: Path, glb_paths: list[Path]
+) -> tuple[list[dict], dict[str, Path]]:
+    """Turns absolute .glb paths (already copied under project_root) into
+    the res://-relative job list the wrapper script expects, plus a
+    res:// -> output-path lookup for matching each GODOT_WRAPPER_RESULT
+    line back to a real filesystem path. Pulled out of
+    generate_meshinstance_wrappers as pure, no-subprocess logic so it can
+    be tested directly, mirroring _build_export_jobs's own reasoning.
+    """
+    jobs = []
+    output_by_glb: dict[str, Path] = {}
+    for glb_path in glb_paths:
+        relative = glb_path.relative_to(project_root).as_posix()
+        output_path = glb_path.with_name(f"{glb_path.stem}_meshinstance.tscn")
+        output_relative = output_path.relative_to(project_root).as_posix()
+        res_path = f"res://{relative}"
+        jobs.append({"glb_path": res_path, "output_path": f"res://{output_relative}"})
+        output_by_glb[res_path] = output_path
+    return jobs, output_by_glb
+
+
+def _parse_wrapper_result_line(line: str) -> tuple[str, str, str] | None:
+    """Parses one GODOT_WRAPPER_RESULT|<glb_path>|<status>|<detail> line
+    from the wrapper script's stdout into (glb_path, status, detail).
+    Returns None for any other line -- same reasoning as
+    _parse_export_result_line: Godot's own startup/shutdown logging
+    shares this stdout stream and is expected, harmless noise to skip.
+    """
+    if not line.startswith("GODOT_WRAPPER_RESULT|"):
+        return None
+    _, glb_res_path, status, detail = line.split("|", 3)
+    return glb_res_path, status, detail
+
+
+def generate_meshinstance_wrappers(
+    godot_exe: Path,
+    project_root: Path,
+    glb_paths: list[Path],
+    on_progress: ProgressCallback | None = None,
+) -> GodotWrapperStats:
+    """For each of glb_paths (absolute paths under project_root, already
+    copied there by the caller), generates a companion
+    <name>_meshinstance.tscn: a clean scene whose root is a single
+    MeshInstance3D (or, for a source with more than one mesh, a Node3D
+    root with one MeshInstance3D child per mesh, each at its correct
+    relative position) instead of whatever raw node hierarchy Godot's own
+    glTF importer produced -- an arbitrary root node type, potentially
+    carrying an AnimationPlayer/Skeleton3D import artifact even for a
+    static prop. See godot_meshinstance_wrapper_script.gd for the actual
+    scene-building logic and what's been verified about it directly.
+
+    Runs a full headless project import pass first (see
+    _run_godot_import_pass) so the just-copied .glb files can actually be
+    loaded at all, then one Godot process for the whole batch, mirroring
+    export_scenes_to_glb's own "one process, many jobs" shape.
+    """
+    report = on_progress or (lambda _text: None)
+    stats = GodotWrapperStats()
+    if not glb_paths:
+        return stats
+
+    report("Importing new files into the Godot project...")
+    if not _run_godot_import_pass(godot_exe, project_root):
+        stats.failed = len(glb_paths)
+        stats.failures.append("Godot's headless import pass failed")
+        return stats
+
+    jobs, output_by_glb = _build_wrapper_jobs(project_root, glb_paths)
+    source_by_res_path = {job["glb_path"]: source for job, source in zip(jobs, glb_paths)}
+
+    report(f"Generating {len(jobs)} MeshInstance3D scene{'s' if len(jobs) != 1 else ''}...")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        json.dump({"jobs": jobs}, f)
+        job_list_path = Path(f.name)
+
+    try:
+        process = subprocess.Popen(
+            [
+                str(godot_exe),
+                "--headless",
+                "--path",
+                str(project_root),
+                "-s",
+                str(WRAPPER_SCRIPT_PATH),
+                "--",
+                str(job_list_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+
+        seen: set[str] = set()
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            parsed = _parse_wrapper_result_line(raw_line.strip())
+            if parsed is None:
+                continue
+            glb_res_path, status, detail = parsed
+            seen.add(glb_res_path)
+            display_name = Path(glb_res_path).name
+            if status != "ok":
+                stats.failed += 1
+                stats.failures.append(f"{display_name}: {detail}")
+                report(f"Failed to generate wrapper for {display_name}: {detail}")
+                continue
+
+            stats.generated += 1
+            stats.succeeded_sources.append(source_by_res_path[glb_res_path])
+            output_path = output_by_glb[glb_res_path]
+            report(f"Generated {output_path.name} ({stats.generated}/{len(jobs)})")
+
+        process.wait()
+
+        missing = [job for job in jobs if job["glb_path"] not in seen]
+        for job in missing:
+            stats.failed += 1
+            stats.failures.append(f"{Path(job['glb_path']).name}: Godot exited before finishing")
     finally:
         job_list_path.unlink(missing_ok=True)
 

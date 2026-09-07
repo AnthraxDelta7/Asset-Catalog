@@ -305,3 +305,95 @@ def test_export_scenes_to_glb_orchestrates_exported_failed_and_missing(tmp_path:
     # The empty scene's output must be cleaned up, not left behind.
     assert not (project_root / "empty.glb").exists()
     assert (project_root / "real.glb").exists()
+
+
+def test__build_wrapper_jobs_builds_res_paths_and_output_lookup(tmp_path: Path) -> None:
+    project_root = tmp_path / "Project"
+    (project_root / "models").mkdir(parents=True)
+    glb_path = project_root / "models" / "Crate.glb"
+    glb_path.write_bytes(b"fake glb bytes")
+
+    jobs, output_by_glb = godot_export._build_wrapper_jobs(project_root, [glb_path])
+
+    assert jobs == [
+        {"glb_path": "res://models/Crate.glb", "output_path": "res://models/Crate_meshinstance.tscn"}
+    ]
+    assert output_by_glb == {"res://models/Crate.glb": project_root / "models" / "Crate_meshinstance.tscn"}
+
+
+def test__parse_wrapper_result_line_ok_and_error() -> None:
+    assert godot_export._parse_wrapper_result_line("GODOT_WRAPPER_RESULT|res://a.glb|ok|res://a.tscn") == (
+        "res://a.glb", "ok", "res://a.tscn",
+    )
+    assert godot_export._parse_wrapper_result_line("GODOT_WRAPPER_RESULT|res://a.glb|error|no mesh") == (
+        "res://a.glb", "error", "no mesh",
+    )
+
+
+def test__parse_wrapper_result_line_ignores_unrelated_output() -> None:
+    assert godot_export._parse_wrapper_result_line("Godot Engine v4.4.stable") is None
+    assert godot_export._parse_wrapper_result_line("") is None
+
+
+def test_generate_meshinstance_wrappers_returns_empty_stats_for_no_paths(tmp_path: Path) -> None:
+    stats = godot_export.generate_meshinstance_wrappers(Path("godot.exe"), tmp_path, [])
+    assert stats.generated == 0
+    assert stats.failed == 0
+
+
+def test_generate_meshinstance_wrappers_fails_fast_when_import_pass_fails(tmp_path: Path) -> None:
+    glb_path = tmp_path / "model.glb"
+    glb_path.write_bytes(b"fake glb bytes")
+
+    with patch.object(godot_export, "_run_godot_import_pass", return_value=False):
+        stats = godot_export.generate_meshinstance_wrappers(Path("godot.exe"), tmp_path, [glb_path])
+
+    assert stats.failed == 1
+    assert stats.generated == 0
+    assert any("import pass failed" in f for f in stats.failures)
+
+
+def test_generate_meshinstance_wrappers_orchestrates_generated_failed_and_missing(tmp_path: Path) -> None:
+    """Mirrors test_export_scenes_to_glb_orchestrates_exported_failed_and_
+    missing's own shape: the pure helpers are tested in isolation above,
+    this is about the streaming-Popen orchestration around them --
+    including succeeded_sources only ever containing the genuinely
+    successful one, since that list is what Catalogue.
+    export_assets_to_godot_bg trusts to decide which source files are
+    safe to delete.
+    """
+    glb_paths = [tmp_path / name for name in ("real.glb", "broken.glb", "unreported.glb")]
+    for glb_path in glb_paths:
+        glb_path.write_bytes(b"fake glb bytes")
+
+    lines = [
+        "GODOT_WRAPPER_RESULT|res://real.glb|ok|res://real_meshinstance.tscn",
+        "GODOT_WRAPPER_RESULT|res://broken.glb|error|no mesh content found",
+        # res://unreported.glb is deliberately never reported at all.
+    ]
+
+    with (
+        patch.object(godot_export, "_run_godot_import_pass", return_value=True),
+        patch.object(godot_export.subprocess, "Popen", return_value=_fake_export_popen(lines)),
+    ):
+        stats = godot_export.generate_meshinstance_wrappers(Path("godot.exe"), tmp_path, glb_paths)
+
+    assert stats.generated == 1
+    assert stats.failed == 2  # one explicit error + one never reported
+    assert stats.succeeded_sources == [tmp_path / "real.glb"]
+    assert any("no mesh content found" in f for f in stats.failures)
+    assert any("exited before finishing" in f for f in stats.failures)
+
+
+def test__run_godot_import_pass_checks_process_returncode() -> None:
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    with patch.object(godot_export.subprocess, "run", return_value=fake_result) as mock_run:
+        assert godot_export._run_godot_import_pass(Path("godot.exe"), Path("Project")) is True
+    args = mock_run.call_args.args[0]
+    assert "--import" in args
+    assert "--editor" in args
+
+    fake_result.returncode = 1
+    with patch.object(godot_export.subprocess, "run", return_value=fake_result):
+        assert godot_export._run_godot_import_pass(Path("godot.exe"), Path("Project")) is False
