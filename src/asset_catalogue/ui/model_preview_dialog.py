@@ -684,6 +684,9 @@ class Model3DPreviewDialog(QDialog):
             animation_row.addWidget(QLabel("Animation:"))
             self.animation_combo = QComboBox()
             self.animation_combo.addItems(self._clips)
+            # Connected after addItems, which would otherwise fire this
+            # while the first item becomes current during construction.
+            self.animation_combo.currentTextChanged.connect(self._on_clip_changed)
             animation_row.addWidget(self.animation_combo, stretch=1)
             self.play_animation_button = QPushButton("▶ Play")
             self.play_animation_button.clicked.connect(self._play_selected_clip)
@@ -700,10 +703,25 @@ class Model3DPreviewDialog(QDialog):
         if self._animation_timer.isActive():
             self._stop_animation()
             return
-        clip = self.animation_combo.currentText()
+        self._request_clip(self.animation_combo.currentText())
+
+    def _on_clip_changed(self, clip: str) -> None:
+        """Picking a different clip mid-playback cuts straight to it,
+        rather than making you stop and start again. Ignored while
+        nothing is playing -- then the combo is just a selection, and
+        changing it shouldn't start playing something on its own.
+        """
+        if self._animation_timer.isActive():
+            self._request_clip(clip)
+
+    def _request_clip(self, clip: str) -> None:
         if not clip:
             return
+        # The combo is disabled alongside the button while frames are
+        # being fetched, so a second switch can't race the first and
+        # arrive out of order. Both are re-enabled in _show_animation.
         self.play_animation_button.setEnabled(False)
+        self.animation_combo.setEnabled(False)
         self._on_play_clip(clip, self._show_animation)
 
     def _show_animation(self, frames: list, interval_ms: int, error: str | None) -> None:
@@ -711,8 +729,11 @@ class Model3DPreviewDialog(QDialog):
         from PySide6.QtWidgets import QMessageBox
 
         self.play_animation_button.setEnabled(True)
+        self.animation_combo.setEnabled(True)
         if error or not frames:
             QMessageBox.warning(self, "Asset Catalogue", error or "No frames to play")
+            # Whatever was already playing keeps playing -- a clip that
+            # failed to render is no reason to stop the one that worked.
             return
         # Scaled once, here, rather than per tick: the frames are rendered
         # smaller than the pane they play in, and rescaling 24 pixmaps on
@@ -737,6 +758,7 @@ class Model3DPreviewDialog(QDialog):
 
     def _stop_animation(self) -> None:
         self._animation_timer.stop()
+        self.animation_combo.setEnabled(True)
         self._animation_frames = []
         self.play_animation_button.setText("▶ Play")
         self._view_stack.setCurrentWidget(self.view)
