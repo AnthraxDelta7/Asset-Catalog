@@ -625,6 +625,11 @@ class Model3DPreviewDialog(QDialog):
         # plays -- pressing Stop returns to the interactive mesh.
         self._animation_label = QLabel()
         self._animation_label.setAlignment(Qt.AlignCenter)
+        # The same grey the GL viewport is cleared to, and the same grey
+        # the frames are rendered against -- all three matching is what
+        # stops playback reading as the pane flashing a different colour.
+        red, green, blue = BACKGROUND_COLOR[:3]
+        self._animation_label.setStyleSheet(f"background: rgb({red},{green},{blue});")
         self._animation_frames: list = []
         self._animation_index = 0
         self._animation_timer = QTimer(self)
@@ -709,7 +714,16 @@ class Model3DPreviewDialog(QDialog):
         if error or not frames:
             QMessageBox.warning(self, "Asset Catalogue", error or "No frames to play")
             return
-        self._animation_frames = [QPixmap(str(path)) for path in frames]
+        # Scaled once, here, rather than per tick: the frames are rendered
+        # smaller than the pane they play in, and rescaling 24 pixmaps on
+        # every frame change would be visible as stutter.
+        target = self._view_stack.size()
+        self._animation_frames = [
+            QPixmap(str(path)).scaled(
+                target, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            for path in frames
+        ]
         self._animation_index = 0
         self._animation_label.setPixmap(self._animation_frames[0])
         self._view_stack.setCurrentWidget(self._animation_label)

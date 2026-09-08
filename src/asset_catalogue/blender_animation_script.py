@@ -24,8 +24,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from blender_common import IMPORTERS, apply_corrections, get_job_list_path
 
-RESOLUTION = 320  # smaller than the 512 static thumbnail: this is a moving preview
-WORLD_COLOR = (0.05, 0.05, 0.06)
+# Rendered larger than it's displayed at, because the preview scales
+# frames up to fill the viewport pane -- 320 upscaled to ~700 was visibly
+# soft. Workbench is cheap enough to absorb this.
+RESOLUTION = 512
+# Deliberately the same grey the interactive 3D viewport uses
+# (model_preview_dialog.BACKGROUND_COLOR, sRGB 128,128,128), expressed
+# linear for Blender. The animation plays in place of that viewport, so
+# any difference here reads as the whole pane flashing a new colour when
+# playback starts. 0.2159 linear is what sRGB 128 decodes to.
+VIEWPORT_GREY_LINEAR = (0.2159, 0.2159, 0.2159)
 CAMERA_DIRECTION = mathutils.Vector((1, -1, 0.7)).normalized()
 CAMERA_DISTANCE_FACTOR = 3.2
 # Bounds are sampled at a handful of frames rather than every one: a
@@ -53,8 +61,14 @@ def setup_scene() -> None:
     world = bpy.data.worlds.get("World") or bpy.data.worlds.new("World")
     background = world.node_tree.nodes.get("Background")
     if background is not None:
-        background.inputs[0].default_value = (*WORLD_COLOR, 1.0)
+        background.inputs[0].default_value = (*VIEWPORT_GREY_LINEAR, 1.0)
     scene.world = world
+
+    # "Standard", not the default filmic/AgX view transform: those are
+    # tone-mapping curves meant for photographic renders, and they would
+    # shift the flat backdrop grey away from the exact value the viewport
+    # uses -- which is the whole point of setting it.
+    scene.view_settings.view_transform = "Standard"
 
     # Workbench, not EEVEE. This is a motion preview -- what matters is
     # reading the movement, not lighting fidelity -- and Workbench is the
@@ -65,6 +79,10 @@ def setup_scene() -> None:
     scene.display.shading.light = "STUDIO"
     scene.display.shading.color_type = "TEXTURE"
     scene.display.shading.show_object_outline = False
+    # Workbench draws its own background and ignores the world unless
+    # told otherwise, so the matching grey has to be set here too.
+    scene.display.shading.background_type = "VIEWPORT"
+    scene.display.shading.background_color = VIEWPORT_GREY_LINEAR
     scene.display.render_aa = "FXAA"
     scene.render.resolution_x = RESOLUTION
     scene.render.resolution_y = RESOLUTION

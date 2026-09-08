@@ -44,8 +44,22 @@ def _safe_clip_name(clip_name: str) -> str:
     return f"{slug[:40]}_{digest}"
 
 
+# Bumped whenever the render settings change in a way that makes older
+# cached frames look wrong beside new ones -- v1 was 320px on a
+# near-black backdrop, v2 is 512px on the viewport's own grey. Old
+# folders are simply never looked at again rather than deleted, since
+# they cost little and nothing else knows how to clean them.
+RENDER_VERSION = 2
+
+
 def clip_frames_dir(preview_dir: Path, content_hash: str, clip_name: str) -> Path:
-    return preview_dir / "animations" / content_hash / _safe_clip_name(clip_name)
+    return (
+        preview_dir
+        / "animations"
+        / f"v{RENDER_VERSION}"
+        / content_hash
+        / _safe_clip_name(clip_name)
+    )
 
 
 def cached_frames(frames_dir: Path) -> list[Path]:
