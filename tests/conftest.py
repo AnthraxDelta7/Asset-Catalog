@@ -85,3 +85,23 @@ def write_wav(
         w.setframerate(8000)
         w.writeframes(tone * 800)
     return path
+
+
+def write_minimal_glb(path, document=None):
+    """A real, structurally valid .glb holding nothing but a single
+    static mesh -- what an export test needs in order to exercise the
+    flattening path at all.
+
+    Placeholder bytes won't do any more: anything the glTF inspector
+    can't read is now deliberately preserved untouched rather than
+    rewritten (see gltf_metadata.preservation_reasons), so a test using
+    fake content would silently take the "preserve" branch and stop
+    testing what it meant to.
+    """
+    import json
+    import struct
+
+    payload = json.dumps(document if document is not None else {"meshes": [{}]}).encode("utf-8")
+    payload += b" " * ((4 - len(payload) % 4) % 4)  # glTF chunks are 4-byte aligned
+    chunk = struct.pack("<II", len(payload), 0x4E4F534A) + payload
+    path.write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + len(chunk)) + chunk)

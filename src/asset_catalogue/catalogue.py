@@ -1058,14 +1058,18 @@ class Catalogue:
         # and AnimationPlayer, and it's strictly better than anything
         # this could synthesize. Only genuinely static geometry goes
         # through the MeshInstance3D step.
-        preserved = [
-            path
-            for path in landed
-            if (meta := gltf_metadata.read(path)) is not None and meta.needs_native_import
-        ]
-        for path in preserved:
-            report(f"Keeping {path.name} as-is (rigged/animated -- Godot imports it natively)")
-        to_flatten = [path for path in landed if path not in set(preserved)]
+        preserved = []
+        to_flatten = []
+        for path in landed:
+            metadata = gltf_metadata.read(path)
+            # An unreadable file is preserved too: "we couldn't tell what
+            # is in here" is never a reason to rewrite something.
+            reasons = metadata.preservation_reasons if metadata is not None else ["unreadable glTF"]
+            if reasons:
+                preserved.append(path)
+                report(f"Keeping {path.name} intact -- it contains {', '.join(reasons)}")
+            else:
+                to_flatten.append(path)
 
         wrapper_stats = godot_export.generate_meshinstance_wrappers(
             godot_exe, Path(project_root), to_flatten, on_progress=on_progress

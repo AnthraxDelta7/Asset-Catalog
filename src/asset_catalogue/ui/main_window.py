@@ -885,11 +885,16 @@ class DetailPanel(QWidget):
             metadata = gltf_metadata.read(archived)
             summary = gltf_metadata.describe(metadata)
             clips = list(metadata.animation_names) if metadata is not None else []
+        # Always rewritten, not just when there's something to say: the
+        # panel is reused for every selection, so leaving the previous
+        # asset's text behind a hidden label is one styling change away
+        # from showing one asset's rig on a different asset.
+        self.rig_label.setText(f"contains: {summary}" if summary else "")
         if summary:
-            self.rig_label.setText(f"contains: {summary}")
             self.rig_label.setToolTip(
-                "Export to Godot keeps this as a .glb so Godot imports the "
-                "skeleton and animations itself."
+                "Export to Godot keeps this file intact rather than converting it "
+                "to a Mesh resource, so none of this is lost -- Godot imports it "
+                "natively instead."
             )
         self.rig_label.setVisible(bool(summary))
 

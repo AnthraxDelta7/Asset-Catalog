@@ -311,3 +311,54 @@ def test_export_dialog_accept_defaults_to_standard_mode_when_ineligible(qapp, tm
     dialog._on_accept()
 
     assert dialog.mode == "standard"
+
+
+def test_detail_panel_shows_rig_and_clips_only_for_an_animated_asset(tmp_path: Path) -> None:
+    """Also guards a real bug: the panel is reused for every selection,
+    so the previous asset's rig text has to be cleared, not just hidden.
+    A static prop selected after a rigged character was showing that
+    character's "79-joint skeleton" text on a hidden label.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from asset_catalogue import db, ingest, library_assets
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import DetailPanel
+    from conftest import write_minimal_glb
+
+    staging, library = tmp_path / "staging", tmp_path / "library"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir(parents=True)
+    write_minimal_glb(pack / "static_prop.glb", {"meshes": [{}]})
+    write_minimal_glb(
+        pack / "hero.glb",
+        {
+            "meshes": [{}],
+            "skins": [{"joints": list(range(79))}],
+            "animations": [{"name": "@idle"}, {"name": "@walk"}],
+        },
+    )
+
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    library_assets.archive_pack(conn, staging, library / "assets", pack_id)
+
+    QApplication.instance() or QApplication([])
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    noop = lambda *a, **k: None  # noqa: E731
+    panel = DetailPanel(catalogue, *([noop] * 14))
+    by_name = {asset.filename: asset for asset in catalogue.list_assets()}
+
+    panel.show_asset(by_name["hero.glb"])
+    assert "79-joint skeleton" in panel.rig_label.text()
+    assert "2 animations" in panel.rig_label.text()
+    assert [
+        panel.animation_combo.itemText(i) for i in range(panel.animation_combo.count())
+    ] == ["@idle", "@walk"]
+
+    panel.show_asset(by_name["static_prop.glb"])
+    assert panel.rig_label.text() == ""
+    assert panel.animation_combo.count() == 0
+    conn.close()

@@ -8,7 +8,7 @@ import pytest
 from asset_catalogue import db, ingest, settings
 from asset_catalogue.catalogue import Catalogue
 
-from conftest import write_texture
+from conftest import write_minimal_glb, write_texture
 
 
 @pytest.fixture
@@ -266,7 +266,7 @@ def test_export_assets_to_godot_bg_generates_wrapper_and_removes_source(
 
     pack_root = catalogue.staging_folder() / "Pack"
     pack_root.mkdir()
-    (pack_root / "model.glb").write_bytes(b"fake glb bytes")
+    write_minimal_glb(pack_root / "model.glb")
     pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
     ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
     asset_id = catalogue._conn.execute("SELECT id FROM assets").fetchone()["id"]
@@ -309,7 +309,7 @@ def test_export_assets_to_godot_bg_keeps_source_when_wrapper_generation_fails(
 
     pack_root = catalogue.staging_folder() / "Pack"
     pack_root.mkdir()
-    (pack_root / "model.glb").write_bytes(b"fake glb bytes")
+    write_minimal_glb(pack_root / "model.glb")
     pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
     ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
     asset_id = catalogue._conn.execute("SELECT id FROM assets").fetchone()["id"]
@@ -380,7 +380,7 @@ def test_export_assets_to_godot_bg_converts_an_fbx_from_staging_not_from_a_copy(
     def fake_convert(blender_exe, jobs, display_names=None, on_progress=None):
         seen_jobs.extend(jobs)
         for job in jobs:
-            Path(job["output_path"]).write_bytes(b"converted glb")
+            write_minimal_glb(Path(job["output_path"]))
         return conversion.ExportConversionResult(
             converted_asset_ids=[job["asset_id"] for job in jobs]
         )
@@ -439,7 +439,7 @@ def test_export_assets_to_godot_bg_reports_a_missing_blender_without_losing_the_
     )
     pack_root = catalogue.staging_folder() / "Pack"
     pack_root.mkdir()
-    (pack_root / "fine.glb").write_bytes(b"fake glb bytes")
+    write_minimal_glb(pack_root / "fine.glb")
     (pack_root / "needy.fbx").write_bytes(b"fake fbx bytes")
     pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
     ingest.ingest_pack(catalogue._conn, pack_root, pack_id)

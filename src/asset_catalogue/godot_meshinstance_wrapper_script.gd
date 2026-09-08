@@ -117,6 +117,25 @@ func _all_surfaces_are_triangles(mesh: Mesh) -> bool:
 	return true
 
 
+# Second line of defence behind the caller's own glTF inspection (see
+# gltf_metadata.py), which already refuses to send anything here that
+# carries a rig, animations, blend shapes and so on. This re-checks what
+# it can actually see in the loaded mesh, so a model that reaches this
+# script by some other route still can't lose data silently:
+#
+#   blend shapes -- SurfaceTool has no blend-shape support at all, so
+#     flattening would delete every morph target without a word.
+#   non-triangle surfaces -- SurfaceTool.append_from only handles
+#     triangles.
+#
+# Failing this isn't an error: the scene form carries everything on a
+# real MeshInstance3D node instead, so the fallback is lossless.
+func _is_safe_to_flatten(mesh: Mesh) -> bool:
+	if mesh.get_blend_shape_count() > 0:
+		return false
+	return _all_surfaces_are_triangles(mesh)
+
+
 # Rebuilds the mesh with xform applied to its vertex data and every
 # surface's effective material baked in, so the result stands completely
 # on its own -- no node needed to carry a transform or an override for it
@@ -192,20 +211,21 @@ func _generate_one(glb_path: String, output_base: String) -> void:
 
 	if mesh_instances.size() == 1:
 		var source: MeshInstance3D = mesh_instances[0]
-		# Baking needs triangles (SurfaceTool's own constraint). Godot's
-		# glTF import produces them in every real case, but rather than
-		# silently drop a transform we can't bake, fall back to the scene
-		# form, which carries it on the node instead.
-		if _all_surfaces_are_triangles(source.mesh):
+		if _is_safe_to_flatten(source.mesh):
 			var mesh := _flattened_mesh(source, _relative_transform(source, scene_root))
-			var mesh_path := "%s.res" % output_base
-			var mesh_err := ResourceSaver.save(mesh, mesh_path)
-			scene_root.free()
-			if mesh_err != OK:
-				print("GODOT_WRAPPER_RESULT|%s|error|save failed (%s)" % [glb_path, mesh_err])
+			# Every surface has to survive the rebuild. A dropped one
+			# means geometry vanished, so fall through to the scene form
+			# (which references the original mesh untouched) rather than
+			# saving a quietly incomplete model.
+			if mesh.get_surface_count() == source.mesh.get_surface_count():
+				var mesh_path := "%s.res" % output_base
+				var mesh_err := ResourceSaver.save(mesh, mesh_path)
+				scene_root.free()
+				if mesh_err != OK:
+					print("GODOT_WRAPPER_RESULT|%s|error|save failed (%s)" % [glb_path, mesh_err])
+					return
+				print("GODOT_WRAPPER_RESULT|%s|ok|%s" % [glb_path, mesh_path])
 				return
-			print("GODOT_WRAPPER_RESULT|%s|ok|%s" % [glb_path, mesh_path])
-			return
 
 	var new_root := Node3D.new()
 	for source in mesh_instances:
