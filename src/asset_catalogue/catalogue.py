@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from asset_catalogue import (
+    animation_preview,
     archives,
     audio_thumbnails,
     blender_render,
@@ -311,6 +313,68 @@ class Catalogue:
     def library_asset_path_if_archived(self, pack_name: str, relative_path: str) -> Path | None:
         path = library_assets.asset_library_path(self._assets_dir, pack_name, relative_path)
         return path if path.exists() else None
+
+    def list_animation_clips(self, asset_id: int) -> list[str]:
+        """Named animation clips inside this asset, read straight from the
+        glTF header (see gltf_metadata) -- [] for anything that has none,
+        isn't glTF, or hasn't been archived into the library yet.
+        """
+        row = self._conn.execute(
+            "SELECT assets.relative_path, packs.name AS pack_name "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        path = self.library_asset_path_if_archived(row["pack_name"], row["relative_path"])
+        if path is None:
+            return []
+        metadata = gltf_metadata.read(path)
+        return list(metadata.animation_names) if metadata is not None else []
+
+    def render_animation_clip_bg(
+        self,
+        asset_id: int,
+        clip_name: str,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> tuple[list[Path], str | None]:
+        """Renders one clip to a cached PNG sequence and returns
+        (frames, error). Background-safe; a cache hit never launches
+        Blender (see animation_preview.render_clip).
+
+        Renders from the staging copy rather than the library's archived
+        one so the pack's own corrections resolve against the textures
+        sitting beside it, the same way thumbnail rendering does.
+        """
+        if self._staging_folder is None:
+            raise RuntimeError("No staging folder configured.")
+        conn = db.connect(settings.load().db_path())
+        try:
+            row = conn.execute(
+                "SELECT assets.relative_path, assets.extension, assets.content_hash, "
+                "packs.pack_folder, packs.corrections "
+                "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
+                (asset_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return [], "Asset not found"
+
+        pack_root = self._staging_folder / row["pack_folder"]
+        frames_dir = animation_preview.clip_frames_dir(
+            self._preview_dir, row["content_hash"], clip_name
+        )
+        return animation_preview.render_clip(
+            self.resolve_blender(),
+            pack_root / row["relative_path"],
+            pack_root,
+            row["extension"],
+            json.loads(row["corrections"]) if row["corrections"] else {},
+            frames_dir,
+            clip_name,
+            on_progress=on_progress,
+        )
 
     def has_pending_conversion(self, asset_id: int) -> bool:
         return conversion.has_pending_conversion(self._conn, asset_id)

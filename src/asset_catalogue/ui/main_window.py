@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 from asset_catalogue import (
     blender_render,
     crash_log,
+    animation_preview,
     exporting,
     gltf_metadata,
     godot_export,
@@ -520,6 +521,7 @@ class DetailPanel(QWidget):
         on_quick_export,
         on_generate_thumbnail,
         on_toggle_favorite,
+        on_play_animation,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -536,6 +538,7 @@ class DetailPanel(QWidget):
         self._on_quick_export = on_quick_export
         self._on_generate_thumbnail = on_generate_thumbnail
         self._on_toggle_favorite = on_toggle_favorite
+        self._on_play_animation = on_play_animation
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -576,6 +579,20 @@ class DetailPanel(QWidget):
         self.rig_label.setWordWrap(True)
         self.rig_label.setVisible(False)
         layout.addWidget(self.rig_label)
+        # Clip picker + Play. Nothing is rendered when this appears --
+        # frames are produced only once Play is actually pressed (see
+        # animation_preview.py), since a rigged character often carries
+        # half a dozen clips nobody may ever look at.
+        self.animation_row = QWidget()
+        animation_layout = QHBoxLayout(self.animation_row)
+        animation_layout.setContentsMargins(0, 0, 0, 0)
+        self.animation_combo = QComboBox()
+        animation_layout.addWidget(self.animation_combo, 1)
+        self.play_animation_button = QPushButton("▶ Play")
+        self.play_animation_button.clicked.connect(self._play_selected_animation)
+        animation_layout.addWidget(self.play_animation_button)
+        self.animation_row.setVisible(False)
+        layout.addWidget(self.animation_row)
 
         # Only shown for a single-selected asset whose thumbnail isn't
         # 'done' yet, and whose asset_type actually has a thumbnail
@@ -863,8 +880,11 @@ class DetailPanel(QWidget):
         searchable or filterable, which is a different feature.
         """
         summary = ""
+        clips: list[str] = []
         if archived is not None:
-            summary = gltf_metadata.describe(gltf_metadata.read(archived))
+            metadata = gltf_metadata.read(archived)
+            summary = gltf_metadata.describe(metadata)
+            clips = list(metadata.animation_names) if metadata is not None else []
         if summary:
             self.rig_label.setText(f"contains: {summary}")
             self.rig_label.setToolTip(
@@ -872,6 +892,15 @@ class DetailPanel(QWidget):
                 "skeleton and animations itself."
             )
         self.rig_label.setVisible(bool(summary))
+
+        self.animation_combo.clear()
+        self.animation_combo.addItems(clips)
+        self.animation_row.setVisible(bool(clips))
+
+    def _play_selected_animation(self) -> None:
+        clip = self.animation_combo.currentText()
+        if self._asset_id is not None and clip:
+            self._on_play_animation(self._asset_id, clip)
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
@@ -3519,6 +3548,7 @@ class MainWindow(QMainWindow):
             self._quick_export,
             self._handle_generate_thumbnail,
             self._handle_toggle_favorite,
+            self._handle_play_animation,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -4457,6 +4487,35 @@ class MainWindow(QMainWindow):
             subprocess.Popen(f'explorer /select,"{path}"')
         else:
             QMessageBox.information(self, "Asset Catalogue", f"Library copy is at:\n{path}")
+
+    def _handle_play_animation(self, asset_id: int, clip_name: str) -> None:
+        """Renders the clip (or reuses an already-rendered one) and then
+        opens the player. The render is where the cost is, so it runs as
+        a normal background job with the usual progress feed -- a cache
+        hit comes straight back and the player opens immediately.
+        """
+        self._run_background_job(
+            lambda report: self._catalogue.render_animation_clip_bg(
+                asset_id, clip_name, on_progress=report
+            ),
+            f"Rendering {clip_name}...",
+            lambda result: "",
+            lambda: None,
+            on_complete=lambda result: self._show_animation_player(clip_name, result),
+        )
+
+    def _show_animation_player(self, clip_name: str, result) -> None:
+        from asset_catalogue.ui.animation_player_dialog import AnimationPlayerDialog
+
+        frames, error = result
+        if not frames:
+            QMessageBox.warning(
+                self, "Asset Catalogue", error or f"Could not render {clip_name}"
+            )
+            return
+        AnimationPlayerDialog(
+            clip_name, frames, animation_preview.frame_interval_ms(len(frames)), self
+        ).exec()
 
     def _run_background_job(
         self, fn, progress_text: str, format_result, on_success_refresh, on_complete=None
