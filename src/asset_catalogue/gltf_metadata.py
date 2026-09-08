@@ -24,6 +24,10 @@ from pathlib import Path
 _GLB_MAGIC = 0x46546C67  # "glTF"
 _CHUNK_JSON = 0x4E4F534A  # "JSON"
 
+# Only applies to text .gltf; a .glb of any size is fine, since only its
+# JSON chunk is ever read.
+MAX_GLTF_TEXT_BYTES = 64 * 1024 * 1024
+
 
 # glTF extensions that survive being flattened, because they are
 # resolved during Godot's own import into the material or mesh that the
@@ -118,6 +122,15 @@ def _read_gltf_json(path: Path) -> dict | None:
     """
     try:
         if path.suffix.lower() == ".gltf":
+            # A .gltf is JSON all the way down, and one with its buffers
+            # embedded as base64 data URIs can run to hundreds of MB --
+            # unlike a .glb, there's no header to read in isolation. This
+            # runs on every grid selection, so an unbounded read here
+            # would visibly freeze the UI. Past the cap it reports
+            # "unknown", which callers treat as a reason to leave the
+            # file alone rather than rewrite it.
+            if path.stat().st_size > MAX_GLTF_TEXT_BYTES:
+                return None
             return json.loads(path.read_text(encoding="utf-8"))
         with path.open("rb") as f:
             magic, _version, _total = struct.unpack("<III", f.read(12))

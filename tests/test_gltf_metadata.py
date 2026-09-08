@@ -147,3 +147,17 @@ def test_cameras_prevent_flattening(tmp_path: Path) -> None:
     _write_glb(path, {"meshes": [{}], "cameras": [{"type": "perspective"}]})
 
     assert gltf_metadata.read(path).needs_native_import is True
+
+
+def test_an_oversized_text_gltf_is_reported_as_unknown(tmp_path: Path, monkeypatch) -> None:
+    """A .gltf with embedded base64 buffers has no header to read in
+    isolation, and this runs on every grid selection -- so past a size
+    cap it declines to parse rather than freezing the UI. Unknown means
+    preserved, never rewritten.
+    """
+    path = tmp_path / "huge.gltf"
+    path.write_text(json.dumps({"meshes": [{}]}), encoding="utf-8")
+    assert gltf_metadata.read(path) is not None
+
+    monkeypatch.setattr(gltf_metadata, "MAX_GLTF_TEXT_BYTES", 4)
+    assert gltf_metadata.read(path) is None

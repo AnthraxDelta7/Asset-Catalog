@@ -4817,7 +4817,12 @@ class MainWindow(QMainWindow):
                 ),
                 f"Exporting {len(selected_ids)} asset(s) to Godot...",
                 lambda stats: (
-                    f"Generated {stats.generated} Godot MeshInstance3D scene(s) in {project_root}"
+                    f"Exported {stats.generated} asset(s) to {project_root}"
+                    + (
+                        f" -- {stats.preserved} kept as-is so nothing in them was lost"
+                        if stats.preserved
+                        else ""
+                    )
                     + (f" ({stats.failed} failed)" if stats.failed else "")
                 ),
                 lambda: self._remember_export_project(project_root),

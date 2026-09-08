@@ -365,6 +365,19 @@ class Catalogue:
         frames_dir = animation_preview.clip_frames_dir(
             self._preview_dir, row["content_hash"], clip_name
         )
+        # The clip list comes from the library's archived copy, but
+        # rendering needs the staging one (so the pack's corrections
+        # resolve against the textures beside it). Those can disagree --
+        # a staged pack the user has since cleaned up still shows its
+        # clips -- and without this the failure surfaces as a raw Blender
+        # import error that says nothing about why.
+        if not animation_preview.cached_frames(frames_dir) and not (
+            pack_root / row["relative_path"]
+        ).is_file():
+            return [], (
+                f"The staged copy of this asset is no longer in {pack_root}, so its "
+                "animation can't be rendered. Re-stage the pack to preview it."
+            )
         return animation_preview.render_clip(
             self.resolve_blender(),
             pack_root / row["relative_path"],
@@ -1078,6 +1091,7 @@ class Catalogue:
         # rewritten -- counting them as generated keeps the reported
         # total equal to what the user actually selected.
         wrapper_stats.generated += len(preserved)
+        wrapper_stats.preserved = len(preserved)
         wrapper_stats.failed += len(conversion_failures)
         wrapper_stats.failures.extend(conversion_failures)
         for source_path in wrapper_stats.succeeded_sources:

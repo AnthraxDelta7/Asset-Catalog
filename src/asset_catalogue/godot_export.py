@@ -308,6 +308,13 @@ def export_scenes_to_glb(
 class GodotWrapperStats:
     generated: int = 0
     failed: int = 0
+    # How many of `generated` were exported by being left exactly as they
+    # are, because flattening them would have destroyed something (see
+    # gltf_metadata.preservation_reasons). Counted separately purely so
+    # the UI can say what actually happened -- reporting a preserved
+    # rigged character as a "generated MeshInstance3D scene" states the
+    # opposite of the truth.
+    preserved: int = 0
     failures: list[str] = field(default_factory=list)
     # Absolute source .glb paths a wrapper was actually generated for --
     # Catalogue.export_assets_to_godot_bg uses this to know exactly which
