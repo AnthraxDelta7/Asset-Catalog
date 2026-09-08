@@ -178,7 +178,10 @@ func _initialize() -> void:
 		return
 
 	for job in payload["jobs"]:
-		_generate_one(job["glb_path"], job["output_base"])
+		if job.get("mode", "mesh") == "scene":
+			_generate_scene(job["glb_path"], job["output_base"])
+		else:
+			_generate_one(job["glb_path"], job["output_base"])
 
 	quit(0)
 
@@ -194,6 +197,63 @@ func _initialize() -> void:
 # Anything with more than one mesh still becomes a scene, because that's
 # the only thing that can express several meshes at their own positions
 # relative to each other.
+# For a model that must NOT be flattened -- a rigged character, anything
+# with animations or blend shapes (see gltf_metadata.preservation_reasons
+# on the caller's side). Instead of reducing it to geometry, the whole
+# imported hierarchy is re-saved as an ordinary .tscn with a plain Node3D
+# root: skeleton, skinned meshes and AnimationPlayer all intact.
+#
+# The point is losing the .glb dependency, not the content. Godot's own
+# glTF import leaves you with a scene you can't edit in place and a
+# source file the project must keep forever. Confirmed directly against
+# Godot 4.6 with a real 79-joint, 6-clip character that the saved scene
+# embeds the skeleton, every skin and every animation, referencing only
+# the .png files Godot's importer extracted on its own -- the .glb and
+# its .import were deleted outright and the scene still loaded with all
+# 79 bones, 3 skinned meshes and all 6 clips.
+func _generate_scene(glb_path: String, output_base: String) -> void:
+	var packed_scene = load(glb_path)
+	if packed_scene == null or not (packed_scene is PackedScene):
+		print("GODOT_WRAPPER_RESULT|%s|error|could not load .glb" % glb_path)
+		return
+
+	var scene_root: Node = packed_scene.instantiate()
+	var new_root: Node = scene_root
+	# glTF normally imports under a Node3D already; anything else (a bare
+	# Skeleton3D, say) gets wrapped so the result always has the plain
+	# Node3D parent this exists to provide.
+	if not (scene_root is Node3D):
+		new_root = Node3D.new()
+		new_root.add_child(scene_root)
+		scene_root.owner = new_root
+
+	var output_path := "%s.tscn" % output_base
+	new_root.name = output_path.get_file().get_basename()
+	# Every descendant needs .owner set to the root or PackedScene.pack
+	# silently drops it -- the same ownership rule the mesh path relies on,
+	# applied to a whole hierarchy instead of one child.
+	_own_all(new_root, new_root)
+
+	var new_packed := PackedScene.new()
+	var err := new_packed.pack(new_root)
+	if err != OK:
+		print("GODOT_WRAPPER_RESULT|%s|error|pack failed (%s)" % [glb_path, err])
+		new_root.free()
+		return
+	err = ResourceSaver.save(new_packed, output_path)
+	new_root.free()
+	if err != OK:
+		print("GODOT_WRAPPER_RESULT|%s|error|save failed (%s)" % [glb_path, err])
+		return
+	print("GODOT_WRAPPER_RESULT|%s|ok|%s" % [glb_path, output_path])
+
+
+func _own_all(node: Node, root: Node) -> void:
+	for child in node.get_children():
+		child.owner = root
+		_own_all(child, root)
+
+
 func _generate_one(glb_path: String, output_base: String) -> void:
 	var packed_scene = load(glb_path)
 	if packed_scene == null or not (packed_scene is PackedScene):

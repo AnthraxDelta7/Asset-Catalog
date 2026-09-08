@@ -1084,33 +1084,37 @@ class Catalogue:
             for item in items
             if not item.needs_conversion or item.asset_id in converted_ids
         ]
-        # A rig or an animation cannot survive being flattened to a plain
-        # mesh, so anything carrying one is left as the .glb it is and
-        # imported by Godot natively -- that's what builds the Skeleton3D
-        # and AnimationPlayer, and it's strictly better than anything
-        # this could synthesize. Only genuinely static geometry goes
-        # through the MeshInstance3D step.
-        preserved = []
+        # Two ways to become a native Godot asset, and which one depends
+        # on what the file actually holds. Plain static geometry is
+        # flattened to a Mesh resource or a small scene. Anything that
+        # flattening would damage -- a rig, animations, blend shapes --
+        # keeps its whole imported hierarchy instead, re-saved as a .tscn
+        # under a plain Node3D root. Either way the .glb itself is gone
+        # afterward: confirmed against Godot 4.6 that the saved scene
+        # embeds the skeleton, every skin and every animation, so a real
+        # 79-joint character loads with all 6 clips after its .glb and
+        # .import were deleted outright.
+        to_preserve = []
         to_flatten = []
         for path in landed:
             metadata = gltf_metadata.read(path)
-            # An unreadable file is preserved too: "we couldn't tell what
-            # is in here" is never a reason to rewrite something.
+            # An unreadable file keeps its hierarchy too: "we couldn't
+            # tell what is in here" is never a reason to reduce it.
             reasons = metadata.preservation_reasons if metadata is not None else ["unreadable glTF"]
             if reasons:
-                preserved.append(path)
-                report(f"Keeping {path.name} intact -- it contains {', '.join(reasons)}")
+                to_preserve.append(path)
+                report(f"Keeping {path.name} whole -- it contains {', '.join(reasons)}")
             else:
                 to_flatten.append(path)
 
         wrapper_stats = godot_export.generate_meshinstance_wrappers(
-            godot_exe, Path(project_root), to_flatten, on_progress=on_progress
+            godot_exe,
+            Path(project_root),
+            to_flatten,
+            on_progress=on_progress,
+            scene_paths=to_preserve,
         )
-        # Preserved models are exports that succeeded, just not by being
-        # rewritten -- counting them as generated keeps the reported
-        # total equal to what the user actually selected.
-        wrapper_stats.generated += len(preserved)
-        wrapper_stats.preserved = len(preserved)
+        wrapper_stats.preserved = len(to_preserve)
         wrapper_stats.failed += len(conversion_failures)
         wrapper_stats.failures.extend(conversion_failures)
         for source_path in wrapper_stats.succeeded_sources:

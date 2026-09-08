@@ -320,7 +320,35 @@ def test__build_wrapper_jobs_builds_res_paths_with_an_extensionless_output_base(
     # No extension: whether this becomes Crate.res (one mesh) or
     # Crate_meshinstance.tscn (several) can't be known until Godot loads
     # it, so the script chooses and reports back what it wrote.
-    assert jobs == [{"glb_path": "res://models/Crate.glb", "output_base": "res://models/Crate"}]
+    assert jobs == [
+        {
+            "glb_path": "res://models/Crate.glb",
+            "output_base": "res://models/Crate",
+            "mode": "mesh",
+        }
+    ]
+
+
+def test__build_wrapper_jobs_marks_preserved_models_as_scene_mode(tmp_path: Path) -> None:
+    """A model that must keep its hierarchy (a rig, animations, blend
+    shapes) is re-saved whole under a Node3D root rather than flattened,
+    so it's the same job list with a different mode.
+    """
+    project_root = tmp_path / "Project"
+    (project_root / "models").mkdir(parents=True)
+    prop = project_root / "models" / "Crate.glb"
+    hero = project_root / "models" / "Hero.glb"
+    for path in (prop, hero):
+        path.write_bytes(b"fake glb bytes")
+
+    jobs = godot_export._build_wrapper_jobs(project_root, [prop], scene_paths=[hero])
+
+    assert [(job["glb_path"], job["mode"]) for job in jobs] == [
+        ("res://models/Crate.glb", "mesh"),
+        ("res://models/Hero.glb", "scene"),
+    ]
+    # Both still write next to themselves; only the produced form differs.
+    assert jobs[1]["output_base"] == "res://models/Hero"
 
 
 def test__parse_wrapper_result_line_ok_and_error() -> None:

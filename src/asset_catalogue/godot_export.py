@@ -352,7 +352,9 @@ def _run_godot_import_pass(godot_exe: Path, project_root: Path) -> bool:
     return result.returncode == 0
 
 
-def _build_wrapper_jobs(project_root: Path, glb_paths: list[Path]) -> list[dict]:
+def _build_wrapper_jobs(
+    project_root: Path, glb_paths: list[Path], scene_paths: list[Path] | None = None
+) -> list[dict]:
     """Turns absolute .glb paths (already copied under project_root) into
     the res://-relative job list the wrapper script expects. Pulled out of
     generate_meshinstance_wrappers as pure, no-subprocess logic so it can
@@ -364,11 +366,21 @@ def _build_wrapper_jobs(project_root: Path, glb_paths: list[Path]) -> list[dict]
     turns out to contain, which nothing here can know without loading it
     in Godot. The script decides and reports the path it actually wrote.
     """
+    scene_set = {Path(p) for p in (scene_paths or [])}
     jobs = []
-    for glb_path in glb_paths:
+    for glb_path in list(glb_paths) + list(scene_paths or []):
         relative = glb_path.relative_to(project_root).as_posix()
         base_relative = glb_path.with_suffix("").relative_to(project_root).as_posix()
-        jobs.append({"glb_path": f"res://{relative}", "output_base": f"res://{base_relative}"})
+        jobs.append(
+            {
+                "glb_path": f"res://{relative}",
+                "output_base": f"res://{base_relative}",
+                # "scene" re-saves the whole imported hierarchy under a
+                # plain Node3D root; "mesh" reduces it to geometry. The
+                # caller decides from the glTF's own contents.
+                "mode": "scene" if Path(glb_path) in scene_set else "mesh",
+            }
+        )
     return jobs
 
 
@@ -390,6 +402,7 @@ def generate_meshinstance_wrappers(
     project_root: Path,
     glb_paths: list[Path],
     on_progress: ProgressCallback | None = None,
+    scene_paths: list[Path] | None = None,
 ) -> GodotWrapperStats:
     """For each of glb_paths (absolute paths under project_root, already
     copied there by the caller), generates a companion
@@ -409,7 +422,7 @@ def generate_meshinstance_wrappers(
     """
     report = on_progress or (lambda _text: None)
     stats = GodotWrapperStats()
-    if not glb_paths:
+    if not glb_paths and not scene_paths:
         return stats
 
     report("Importing new files into the Godot project...")
@@ -418,8 +431,9 @@ def generate_meshinstance_wrappers(
         stats.failures.append("Godot's headless import pass failed")
         return stats
 
-    jobs = _build_wrapper_jobs(project_root, glb_paths)
-    source_by_res_path = {job["glb_path"]: source for job, source in zip(jobs, glb_paths)}
+    jobs = _build_wrapper_jobs(project_root, glb_paths, scene_paths)
+    all_sources = list(glb_paths) + list(scene_paths or [])
+    source_by_res_path = {job["glb_path"]: source for job, source in zip(jobs, all_sources)}
 
     report(f"Generating {len(jobs)} Godot asset{'s' if len(jobs) != 1 else ''}...")
     with tempfile.NamedTemporaryFile(

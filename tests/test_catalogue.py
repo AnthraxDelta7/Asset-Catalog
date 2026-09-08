@@ -274,7 +274,7 @@ def test_export_assets_to_godot_bg_generates_wrapper_and_removes_source(
     project_root = tmp_path / "GodotProject"
     project_root.mkdir()
 
-    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None, scene_paths=None):
         assert len(glb_paths) == 1
         wrapper_path = glb_paths[0].with_name("model_meshinstance.tscn")
         wrapper_path.write_text("[gd_scene]")
@@ -385,7 +385,7 @@ def test_export_assets_to_godot_bg_converts_an_fbx_from_staging_not_from_a_copy(
             converted_asset_ids=[job["asset_id"] for job in jobs]
         )
 
-    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None, scene_paths=None):
         for path in glb_paths:
             path.with_name(f"{path.stem}_meshinstance.tscn").write_text("[gd_scene]")
         return godot_export.GodotWrapperStats(
@@ -448,7 +448,7 @@ def test_export_assets_to_godot_bg_reports_a_missing_blender_without_losing_the_
     project_root = tmp_path / "GodotProject"
     project_root.mkdir()
 
-    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None, scene_paths=None):
         for path in glb_paths:
             path.with_name(f"{path.stem}_meshinstance.tscn").write_text("[gd_scene]")
         return godot_export.GodotWrapperStats(
