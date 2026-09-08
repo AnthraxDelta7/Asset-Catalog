@@ -2,7 +2,10 @@ extends SceneTree
 # Run headlessly via:
 #   godot --headless --path <project_root> -s godot_meshinstance_wrapper_script.gd -- <job_list_json_path>
 # job_list_json_path points at a JSON object: {"jobs": [{"glb_path":
-# "res://...", "output_path": "res://..._meshinstance.tscn"}, ...]}
+# "res://...", "output_base": "res://.../<name>"}, ...]}
+# output_base carries no extension: which one a job produces isn't known
+# until the .glb is loaded and its meshes counted, so the script picks it
+# and reports the real path back on its result line.
 # Every .glb referenced must already have a .import cache -- the caller
 # runs a full headless project import pass first (see godot_export.py's
 # _run_godot_import_pass); load() on an unimported resource fails outright
@@ -19,15 +22,24 @@ extends SceneTree
 # awkward to just "instance and use" compared to a clean MeshInstance3D,
 # and not something worth hand-configuring per asset via the per-file
 # import "Root Type" override in the editor. This walks the imported
-# scene, finds every MeshInstance3D in it, and builds a fresh, minimal
-# scene from just those: a single MeshInstance3D at the root if there's
-# exactly one, or a Node3D root with one MeshInstance3D child per mesh
-# for anything with more than one. Either way, every mesh keeps its own
-# rotation/scale/position exactly as it was in the source (see
-# _relative_transform) -- confirmed directly against a real Godot 4.4
-# install with a genuine scene-graph-level transform (not one baked into
-# the mesh's own vertex data, which some export tools do instead and
-# needs no help from this at all).
+# scene, finds every MeshInstance3D in it, and produces one of two things
+# from just those:
+#
+#   exactly one mesh  -> <name>.res, a bare Mesh resource. Dropping one
+#     into a scene gives a plain, local MeshInstance3D you can edit like
+#     any other node; a .tscn would instead give an *instanced* scene,
+#     linked to its file and needing "Make Local" first. The mesh's node
+#     transform is baked into its vertex data so nothing is lost by
+#     dropping the node that used to carry it (see _flattened_mesh).
+#   more than one     -> <name>_meshinstance.tscn, a Node3D root with one
+#     named MeshInstance3D child per mesh. A scene is the only thing that
+#     can express several meshes positioned relative to each other.
+#
+# Either way, every mesh keeps its own rotation/scale/position exactly as
+# it was in the source (see _relative_transform) -- confirmed directly
+# against a real Godot install with a genuine scene-graph-level transform
+# (not one baked into the mesh's own vertex data, which some export tools
+# do instead and needs no help from this at all).
 #
 # Confirmed directly against a real Godot 4.4 install that
 # ResourceSaver.save() on the result fully embeds the mesh geometry and
@@ -87,6 +99,45 @@ func _copy_surface_overrides(source: MeshInstance3D, dest: MeshInstance3D) -> vo
 			dest.set_surface_override_material(i, mat)
 
 
+# The material actually shown for a surface: an override set on the node
+# wins over the one baked into the mesh, exactly as Godot itself resolves
+# it at render time. Matters when flattening to a standalone Mesh, which
+# has nowhere to keep a node-level override.
+func _effective_material(source: MeshInstance3D, surface: int) -> Material:
+	var override_mat = source.get_surface_override_material(surface)
+	if override_mat != null:
+		return override_mat
+	return source.mesh.surface_get_material(surface)
+
+
+func _all_surfaces_are_triangles(mesh: Mesh) -> bool:
+	for i in range(mesh.get_surface_count()):
+		if mesh.surface_get_primitive_type(i) != Mesh.PRIMITIVE_TRIANGLES:
+			return false
+	return true
+
+
+# Rebuilds the mesh with xform applied to its vertex data and every
+# surface's effective material baked in, so the result stands completely
+# on its own -- no node needed to carry a transform or an override for it
+# to look right. SurfaceTool.append_from does the geometry properly,
+# including the inverse-transpose handling normals need under non-uniform
+# scale, rather than us transforming raw arrays by hand.
+func _flattened_mesh(source: MeshInstance3D, xform: Transform3D) -> Mesh:
+	var mesh: Mesh = source.mesh
+	var out := ArrayMesh.new()
+	for i in range(mesh.get_surface_count()):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		st.append_from(mesh, i, xform)
+		out = st.commit(out)
+		var mat := _effective_material(source, i)
+		if mat != null:
+			out.surface_set_material(out.get_surface_count() - 1, mat)
+	out.resource_name = mesh.resource_name
+	return out
+
+
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.size() < 1:
@@ -108,12 +159,23 @@ func _initialize() -> void:
 		return
 
 	for job in payload["jobs"]:
-		_generate_one(job["glb_path"], job["output_path"])
+		_generate_one(job["glb_path"], job["output_base"])
 
 	quit(0)
 
 
-func _generate_one(glb_path: String, output_path: String) -> void:
+# A lone mesh is saved as a bare Mesh resource, not a scene: dropping one
+# into a Godot scene gives a plain, local MeshInstance3D, where a .tscn
+# would give an *instanced* scene that has to be made local before it can
+# be edited like an ordinary node. Its node transform is baked into the
+# vertex data on the way out (see _flattened_mesh) -- a Mesh has nowhere
+# to keep one, and silently dropping it would undo exactly the
+# rotation/scale preservation this script was fixed to do.
+#
+# Anything with more than one mesh still becomes a scene, because that's
+# the only thing that can express several meshes at their own positions
+# relative to each other.
+func _generate_one(glb_path: String, output_base: String) -> void:
 	var packed_scene = load(glb_path)
 	if packed_scene == null or not (packed_scene is PackedScene):
 		print("GODOT_WRAPPER_RESULT|%s|error|could not load .glb" % glb_path)
@@ -128,23 +190,34 @@ func _generate_one(glb_path: String, output_path: String) -> void:
 		scene_root.free()
 		return
 
-	var new_root: Node3D
 	if mesh_instances.size() == 1:
 		var source: MeshInstance3D = mesh_instances[0]
-		new_root = MeshInstance3D.new()
-		new_root.mesh = source.mesh
-		new_root.transform = _relative_transform(source, scene_root)
-		_copy_surface_overrides(source, new_root)
-	else:
-		new_root = Node3D.new()
-		for source in mesh_instances:
-			var wrapper := MeshInstance3D.new()
-			wrapper.name = source.name
-			wrapper.mesh = source.mesh
-			wrapper.transform = _relative_transform(source, scene_root)
-			_copy_surface_overrides(source, wrapper)
-			new_root.add_child(wrapper)
-			wrapper.owner = new_root
+		# Baking needs triangles (SurfaceTool's own constraint). Godot's
+		# glTF import produces them in every real case, but rather than
+		# silently drop a transform we can't bake, fall back to the scene
+		# form, which carries it on the node instead.
+		if _all_surfaces_are_triangles(source.mesh):
+			var mesh := _flattened_mesh(source, _relative_transform(source, scene_root))
+			var mesh_path := "%s.res" % output_base
+			var mesh_err := ResourceSaver.save(mesh, mesh_path)
+			scene_root.free()
+			if mesh_err != OK:
+				print("GODOT_WRAPPER_RESULT|%s|error|save failed (%s)" % [glb_path, mesh_err])
+				return
+			print("GODOT_WRAPPER_RESULT|%s|ok|%s" % [glb_path, mesh_path])
+			return
+
+	var new_root := Node3D.new()
+	for source in mesh_instances:
+		var wrapper := MeshInstance3D.new()
+		wrapper.name = source.name
+		wrapper.mesh = source.mesh
+		wrapper.transform = _relative_transform(source, scene_root)
+		_copy_surface_overrides(source, wrapper)
+		new_root.add_child(wrapper)
+		wrapper.owner = new_root
+
+	var output_path := "%s_meshinstance.tscn" % output_base
 	new_root.name = output_path.get_file().get_basename()
 
 	var new_packed := PackedScene.new()

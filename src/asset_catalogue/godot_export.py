@@ -345,26 +345,24 @@ def _run_godot_import_pass(godot_exe: Path, project_root: Path) -> bool:
     return result.returncode == 0
 
 
-def _build_wrapper_jobs(
-    project_root: Path, glb_paths: list[Path]
-) -> tuple[list[dict], dict[str, Path]]:
+def _build_wrapper_jobs(project_root: Path, glb_paths: list[Path]) -> list[dict]:
     """Turns absolute .glb paths (already copied under project_root) into
-    the res://-relative job list the wrapper script expects, plus a
-    res:// -> output-path lookup for matching each GODOT_WRAPPER_RESULT
-    line back to a real filesystem path. Pulled out of
+    the res://-relative job list the wrapper script expects. Pulled out of
     generate_meshinstance_wrappers as pure, no-subprocess logic so it can
     be tested directly, mirroring _build_export_jobs's own reasoning.
+
+    Each job carries an extension-less output_base rather than a full
+    output path: whether a model becomes a bare <name>.res Mesh resource
+    or a <name>_meshinstance.tscn scene depends on how many meshes it
+    turns out to contain, which nothing here can know without loading it
+    in Godot. The script decides and reports the path it actually wrote.
     """
     jobs = []
-    output_by_glb: dict[str, Path] = {}
     for glb_path in glb_paths:
         relative = glb_path.relative_to(project_root).as_posix()
-        output_path = glb_path.with_name(f"{glb_path.stem}_meshinstance.tscn")
-        output_relative = output_path.relative_to(project_root).as_posix()
-        res_path = f"res://{relative}"
-        jobs.append({"glb_path": res_path, "output_path": f"res://{output_relative}"})
-        output_by_glb[res_path] = output_path
-    return jobs, output_by_glb
+        base_relative = glb_path.with_suffix("").relative_to(project_root).as_posix()
+        jobs.append({"glb_path": f"res://{relative}", "output_base": f"res://{base_relative}"})
+    return jobs
 
 
 def _parse_wrapper_result_line(line: str) -> tuple[str, str, str] | None:
@@ -413,10 +411,10 @@ def generate_meshinstance_wrappers(
         stats.failures.append("Godot's headless import pass failed")
         return stats
 
-    jobs, output_by_glb = _build_wrapper_jobs(project_root, glb_paths)
+    jobs = _build_wrapper_jobs(project_root, glb_paths)
     source_by_res_path = {job["glb_path"]: source for job, source in zip(jobs, glb_paths)}
 
-    report(f"Generating {len(jobs)} MeshInstance3D scene{'s' if len(jobs) != 1 else ''}...")
+    report(f"Generating {len(jobs)} Godot asset{'s' if len(jobs) != 1 else ''}...")
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"
     ) as f:
@@ -459,8 +457,9 @@ def generate_meshinstance_wrappers(
 
             stats.generated += 1
             stats.succeeded_sources.append(source_by_res_path[glb_res_path])
-            output_path = output_by_glb[glb_res_path]
-            report(f"Generated {output_path.name} ({stats.generated}/{len(jobs)})")
+            # detail is the res:// path the script actually wrote -- only
+            # it knows whether this became a .res or a .tscn.
+            report(f"Generated {Path(detail).name} ({stats.generated}/{len(jobs)})")
 
         process.wait()
 

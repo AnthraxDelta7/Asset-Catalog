@@ -307,18 +307,20 @@ def test_export_scenes_to_glb_orchestrates_exported_failed_and_missing(tmp_path:
     assert (project_root / "real.glb").exists()
 
 
-def test__build_wrapper_jobs_builds_res_paths_and_output_lookup(tmp_path: Path) -> None:
+def test__build_wrapper_jobs_builds_res_paths_with_an_extensionless_output_base(
+    tmp_path: Path,
+) -> None:
     project_root = tmp_path / "Project"
     (project_root / "models").mkdir(parents=True)
     glb_path = project_root / "models" / "Crate.glb"
     glb_path.write_bytes(b"fake glb bytes")
 
-    jobs, output_by_glb = godot_export._build_wrapper_jobs(project_root, [glb_path])
+    jobs = godot_export._build_wrapper_jobs(project_root, [glb_path])
 
-    assert jobs == [
-        {"glb_path": "res://models/Crate.glb", "output_path": "res://models/Crate_meshinstance.tscn"}
-    ]
-    assert output_by_glb == {"res://models/Crate.glb": project_root / "models" / "Crate_meshinstance.tscn"}
+    # No extension: whether this becomes Crate.res (one mesh) or
+    # Crate_meshinstance.tscn (several) can't be known until Godot loads
+    # it, so the script chooses and reports back what it wrote.
+    assert jobs == [{"glb_path": "res://models/Crate.glb", "output_base": "res://models/Crate"}]
 
 
 def test__parse_wrapper_result_line_ok_and_error() -> None:

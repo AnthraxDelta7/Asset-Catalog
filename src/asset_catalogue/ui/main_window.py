@@ -47,6 +47,7 @@ from asset_catalogue import (
     blender_render,
     crash_log,
     exporting,
+    gltf_metadata,
     godot_export,
     library_health,
     library_stats,
@@ -88,7 +89,7 @@ def _is_godot_export_eligible(assets: list[AssetSummary]) -> bool:
     if not assets:
         return False
     return all(
-        Path(asset.relative_path).suffix.lower() in exporting.GODOT_IMPORTABLE_EXTENSIONS
+        Path(asset.relative_path).suffix.lower() in exporting.GODOT_EXPORTABLE_EXTENSIONS
         for asset in assets
     )
 
@@ -568,6 +569,13 @@ class DetailPanel(QWidget):
 
         self.meta_label = QLabel("")
         layout.addWidget(self.meta_label)
+        # Only ever populated for a glTF model that actually carries a rig
+        # or animations -- hidden entirely otherwise, so a plain static
+        # prop doesn't get a line announcing what it doesn't have.
+        self.rig_label = QLabel("")
+        self.rig_label.setWordWrap(True)
+        self.rig_label.setVisible(False)
+        layout.addWidget(self.rig_label)
 
         # Only shown for a single-selected asset whose thumbnail isn't
         # 'done' yet, and whose asset_type actually has a thumbnail
@@ -757,6 +765,7 @@ class DetailPanel(QWidget):
         self.title_label.setText("No asset selected")
         self.pack_label.setText("")
         self.meta_label.setText("")
+        self.rig_label.setVisible(False)
         self.tag_list.clear()
         self._set_idle_state()
 
@@ -779,6 +788,7 @@ class DetailPanel(QWidget):
             self.pack_label.setText("")
             self.pack_label.setToolTip("Click to filter the grid to this pack")
 
+        self.rig_label.setVisible(False)
         common_tags = sorted(set.intersection(*(set(asset.tags) for asset in assets))) if assets else []
         self.tag_list.clear()
         self.tag_list.addItems(common_tags)
@@ -827,6 +837,7 @@ class DetailPanel(QWidget):
             asset.pack_name, asset.relative_path
         )
         self.show_in_library_button.setEnabled(archived is not None)
+        self._show_rig_summary(archived)
         self.generate_thumbnail_button.setVisible(
             asset.thumbnail_status != "done" and asset.asset_type in THUMBNAIL_CAPABLE_TYPES
         )
@@ -841,6 +852,26 @@ class DetailPanel(QWidget):
         self._playable_audio_path = archived if asset.asset_type == "audio" else None
         self.play_button.setVisible(self._playable_audio_path is not None)
         self.play_button.setText("▶ Play")
+
+    def _show_rig_summary(self, archived: Path | None) -> None:
+        """Reads the rig/animation facts straight out of the glTF's own
+        JSON header (see gltf_metadata) rather than storing them in the
+        database -- one cheap read of a file already on disk, on a
+        selection that has already touched that file anyway, versus a
+        schema change plus a migration plus a re-scan of every existing
+        library. Worth revisiting only if these ever need to be
+        searchable or filterable, which is a different feature.
+        """
+        summary = ""
+        if archived is not None:
+            summary = gltf_metadata.describe(gltf_metadata.read(archived))
+        if summary:
+            self.rig_label.setText(f"contains: {summary}")
+            self.rig_label.setToolTip(
+                "Export to Godot keeps this as a .glb so Godot imports the "
+                "skeleton and animations itself."
+            )
+        self.rig_label.setVisible(bool(summary))
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()

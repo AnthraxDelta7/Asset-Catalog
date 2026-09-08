@@ -247,8 +247,11 @@ def test_is_godot_export_eligible_false_for_non_model_or_mixed_selection() -> No
     from asset_catalogue.ui.main_window import _is_godot_export_eligible
 
     assert _is_godot_export_eligible([]) is False
-    assert _is_godot_export_eligible([_make_asset_summary("a.stl")]) is False
+    assert _is_godot_export_eligible([_make_asset_summary("a.wav")]) is False
     assert _is_godot_export_eligible([_make_asset_summary("a.glb", 1), _make_asset_summary("b.png", 2)]) is False
+    # A model Blender converts on the way in still counts -- Godot never
+    # sees the .stl itself, only the .glb it becomes.
+    assert _is_godot_export_eligible([_make_asset_summary("a.stl")]) is True
 
 
 def test_remember_last_export_mode_persists_only_on_change(tmp_path: Path, monkeypatch) -> None:

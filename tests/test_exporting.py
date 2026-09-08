@@ -199,12 +199,12 @@ def test_is_godot_export_eligible_false_for_a_mixed_selection(
     assert exporting.is_godot_export_eligible(assets) is False
 
 
-def test_is_godot_export_eligible_false_for_a_non_importable_model_format(
+def test_is_godot_export_eligible_true_for_a_blender_only_model_format(
     conn: sqlite3.Connection, staging_folder: Path
 ) -> None:
-    # Godot has no built-in .stl importer -- a real model asset this app
-    # catalogues just fine, but never something a wrapper scene can be
-    # built for.
+    # Godot has no built-in .stl importer, but it never sees the .stl:
+    # Blender converts it to a textured .glb on the way in, so a wrapper
+    # scene can be built for it after all.
     pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
     pack_root = staging_folder / "Pack"
     pack_root.mkdir()
@@ -212,14 +212,14 @@ def test_is_godot_export_eligible_false_for_a_non_importable_model_format(
     ingest.ingest_pack(conn, pack_root, pack_id)
 
     assets = exporting.select_assets(conn)
-    assert exporting.is_godot_export_eligible(assets) is False
+    assert exporting.is_godot_export_eligible(assets) is True
 
 
 def test_is_godot_export_eligible_false_for_an_empty_selection() -> None:
     assert exporting.is_godot_export_eligible([]) is False
 
 
-def test_export_assets_to_godot_returns_destination_paths(
+def test_plan_godot_export_copies_a_glb_straight_in(
     conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
 ) -> None:
     pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
@@ -232,15 +232,82 @@ def test_export_assets_to_godot_returns_destination_paths(
     project_root.mkdir()
     assets = exporting.select_assets(conn)
 
-    stats, destinations = exporting.export_assets_to_godot(
+    items = exporting.plan_godot_export(
         conn, staging_folder, project_root, str(project_root), "exported_assets", assets
     )
 
-    assert stats.copied == 1
     expected = project_root / "exported_assets" / "Pack" / "a.glb"
-    assert destinations == [expected]
+    assert [item.destination for item in items] == [expected]
+    assert items[0].needs_conversion is False
+    # A .glb already embeds its textures, so it's copied here and now
+    # rather than waiting on Blender.
     assert expected.is_file()
     # Same recording as a plain export -- the exports table doesn't
     # distinguish which export mode produced a given row.
     row = conn.execute("SELECT * FROM exports").fetchone()
     assert row["destination_path"] == str(expected)
+
+
+def test_plan_godot_export_defers_a_convertible_model_and_renames_it_to_glb(
+    conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
+) -> None:
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    (pack_root / "Models").mkdir(parents=True)
+    (pack_root / "Models" / "prop.fbx").write_bytes(b"fake fbx bytes")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+    assets = exporting.select_assets(conn)
+
+    items = exporting.plan_godot_export(
+        conn, staging_folder, project_root, str(project_root), "exported_assets", assets
+    )
+
+    item = items[0]
+    assert item.needs_conversion is True
+    # Named for what it will be, not what it was.
+    assert item.destination == project_root / "exported_assets" / "Pack" / "prop.glb"
+    # Source stays the staging library's own copy -- converting anywhere
+    # else would separate the .fbx from the textures it references.
+    assert item.source == pack_root / "Models" / "prop.fbx"
+    # Nothing copied and nothing recorded yet: Blender hasn't run.
+    assert not item.destination.exists()
+    assert not (project_root / "exported_assets" / "Pack" / "prop.fbx").exists()
+    assert conn.execute("SELECT COUNT(*) AS n FROM exports").fetchone()["n"] == 0
+
+
+def test_plan_godot_export_resolves_a_collision_between_fbx_and_glb_of_one_name(
+    conn: sqlite3.Connection, staging_folder: Path, tmp_path: Path
+) -> None:
+    # prop.fbx becomes prop.glb, which would otherwise silently overwrite
+    # a real prop.glb exported in the same batch.
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    pack_root = staging_folder / "Pack"
+    pack_root.mkdir()
+    (pack_root / "prop.fbx").write_bytes(b"fake fbx bytes")
+    (pack_root / "prop.glb").write_bytes(b"fake glb bytes")
+    ingest.ingest_pack(conn, pack_root, pack_id)
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+    assets = exporting.select_assets(conn)
+
+    items = exporting.plan_godot_export(
+        conn, staging_folder, project_root, str(project_root), "exported_assets", assets
+    )
+
+    destinations = {item.source.name: item.destination.name for item in items}
+    assert destinations == {"prop.fbx": "prop.glb", "prop.glb": "prop (2).glb"} or destinations == {
+        "prop.fbx": "prop (2).glb",
+        "prop.glb": "prop.glb",
+    }
+    assert len({item.destination for item in items}) == 2
+
+
+def test_godot_destination_name_only_renames_what_blender_converts() -> None:
+    assert exporting.godot_destination_name("Models/prop.fbx") == "prop.glb"
+    assert exporting.godot_destination_name("Models/prop.obj") == "prop.glb"
+    assert exporting.godot_destination_name("Models/prop.stl") == "prop.glb"
+    assert exporting.godot_destination_name("Models/prop.glb") == "prop.glb"

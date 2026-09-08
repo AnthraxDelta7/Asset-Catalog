@@ -332,6 +332,150 @@ def test_export_assets_to_godot_bg_keeps_source_when_wrapper_generation_fails(
     assert (project_root / "exported_assets" / "Pack" / "model.glb").is_file()
 
 
+def _staged_godot_export_setup(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch, filename: str
+) -> tuple[int, Path]:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(catalogue._thumbnail_dir.parent),
+        )
+    )
+    pack_root = catalogue.staging_folder() / "Pack"
+    (pack_root / "Models").mkdir(parents=True)
+    (pack_root / "Models" / filename).write_bytes(b"fake bytes")
+    pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
+    asset_id = catalogue._conn.execute("SELECT id FROM assets").fetchone()["id"]
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+    return asset_id, project_root
+
+
+def test_export_assets_to_godot_bg_converts_an_fbx_from_staging_not_from_a_copy(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    """Blender resolves a .fbx's texture references relative to the model
+    file's own location, so the conversion has to read the staging
+    library's copy -- the one still sitting next to its Textures/ folder.
+    Converting a copy already flattened into the project would strip
+    exactly the textures this path exists to preserve.
+
+    Blender and Godot are both mocked here; the real pipeline was run
+    end-to-end against Blender 5.2 and Godot 4.6 with a genuine
+    externally-textured .fbx, which is what confirmed the texture
+    actually survives.
+    """
+    from unittest.mock import patch
+
+    from asset_catalogue import blender_render, conversion, godot_export
+
+    asset_id, project_root = _staged_godot_export_setup(
+        catalogue, tmp_path, monkeypatch, "prop.fbx"
+    )
+    seen_jobs: list[dict] = []
+
+    def fake_convert(blender_exe, jobs, display_names=None, on_progress=None):
+        seen_jobs.extend(jobs)
+        for job in jobs:
+            Path(job["output_path"]).write_bytes(b"converted glb")
+        return conversion.ExportConversionResult(
+            converted_asset_ids=[job["asset_id"] for job in jobs]
+        )
+
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+        for path in glb_paths:
+            path.with_name(f"{path.stem}_meshinstance.tscn").write_text("[gd_scene]")
+        return godot_export.GodotWrapperStats(
+            generated=len(glb_paths), succeeded_sources=list(glb_paths)
+        )
+
+    with (
+        patch.object(catalogue, "resolve_godot", return_value=Path("godot.exe")),
+        patch.object(blender_render, "resolve_blender", return_value=(Path("blender.exe"), None)),
+        patch.object(conversion, "convert_for_export", side_effect=fake_convert),
+        patch.object(godot_export, "generate_meshinstance_wrappers", side_effect=fake_generate),
+    ):
+        stats = catalogue.export_assets_to_godot_bg([asset_id], project_root)
+
+    assert stats.generated == 1
+    assert len(seen_jobs) == 1
+    # Read from staging, where the textures still are.
+    assert Path(seen_jobs[0]["source_path"]) == (
+        catalogue.staging_folder() / "Pack" / "Models" / "prop.fbx"
+    )
+    dest_dir = project_root / "exported_assets" / "Pack"
+    # Written straight to its final .glb name, and the raw .fbx never
+    # gets copied into the project at all.
+    assert Path(seen_jobs[0]["output_path"]) == dest_dir / "prop.glb"
+    assert not (dest_dir / "prop.fbx").exists()
+    assert not (dest_dir / "prop.glb").exists()  # intermediate cleaned up after wrapping
+    assert (dest_dir / "prop_meshinstance.tscn").is_file()
+    # Export history records the .glb that actually landed.
+    row = catalogue._conn.execute("SELECT destination_path FROM exports").fetchone()
+    assert row["destination_path"] == str(dest_dir / "prop.glb")
+
+
+def test_export_assets_to_godot_bg_reports_a_missing_blender_without_losing_the_glbs(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    """A .glb in the same selection needs no Blender at all, so it still
+    exports; the .fbx that does is reported as a failure rather than
+    silently copied in untextured.
+    """
+    from unittest.mock import patch
+
+    from asset_catalogue import blender_render, godot_export
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(catalogue._thumbnail_dir.parent),
+        )
+    )
+    pack_root = catalogue.staging_folder() / "Pack"
+    pack_root.mkdir()
+    (pack_root / "fine.glb").write_bytes(b"fake glb bytes")
+    (pack_root / "needy.fbx").write_bytes(b"fake fbx bytes")
+    pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(catalogue._conn, pack_root, pack_id)
+    asset_ids = [row["id"] for row in catalogue._conn.execute("SELECT id FROM assets")]
+
+    project_root = tmp_path / "GodotProject"
+    project_root.mkdir()
+
+    def fake_generate(godot_exe, proj_root, glb_paths, on_progress=None):
+        for path in glb_paths:
+            path.with_name(f"{path.stem}_meshinstance.tscn").write_text("[gd_scene]")
+        return godot_export.GodotWrapperStats(
+            generated=len(glb_paths), succeeded_sources=list(glb_paths)
+        )
+
+    with (
+        patch.object(catalogue, "resolve_godot", return_value=Path("godot.exe")),
+        patch.object(
+            blender_render,
+            "resolve_blender",
+            return_value=(None, "Blender not found. Set its path in Settings."),
+        ),
+        patch.object(godot_export, "generate_meshinstance_wrappers", side_effect=fake_generate),
+    ):
+        stats = catalogue.export_assets_to_godot_bg(asset_ids, project_root)
+
+    dest_dir = project_root / "exported_assets" / "Pack"
+    assert (dest_dir / "fine_meshinstance.tscn").is_file()
+    assert stats.generated == 1
+    assert stats.failed == 1
+    assert any("needy.fbx" in failure and "Blender" in failure for failure in stats.failures)
+    # Deliberately not copied in raw -- an untextured model quietly
+    # sitting in the project is worse than an obvious absence.
+    assert not (dest_dir / "needy.fbx").exists()
+
+
 def test_model_preview_path_for(catalogue_with_asset: tuple[Catalogue, int]) -> None:
     from asset_catalogue import model_preview
 

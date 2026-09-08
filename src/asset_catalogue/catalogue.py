@@ -14,6 +14,7 @@ from asset_catalogue import (
     credits,
     db,
     exporting,
+    gltf_metadata,
     godot_export,
     ingest,
     library_assets,
@@ -889,18 +890,25 @@ class Catalogue:
         dest_subfolder: str = "exported_assets",
         on_progress: Callable[[str], None] | None = None,
     ) -> godot_export.GodotWrapperStats:
-        """Exports the given assets the same way export_assets_bg does,
-        then additionally generates a clean MeshInstance3D wrapper scene
-        for each one (see godot_export.generate_meshinstance_wrappers) and
-        deletes the intermediate .glb/.fbx/.obj copy (and its .import
-        residue) once its wrapper is confirmed generated -- the wrapper
-        scene is fully self-contained (verified directly against a real
-        Godot install: mesh and material are embedded, a texture stays a
-        proper reference to Godot's own auto-extracted image file), so
-        what actually lands in the project is the Godot asset itself, not
-        a source file next to it. A source whose wrapper generation
-        failed is left in place instead -- something usable beats
-        nothing.
+        """Turns the given model assets into clean, native Godot
+        MeshInstance3D scenes inside project_root.
+
+        Three stages. A .glb is copied straight in, since it already
+        embeds its own textures. Anything else (.fbx/.obj/.gltf/.stl/
+        .blend) is converted to a .glb by Blender first, reading from the
+        staging library rather than from a copy -- these formats
+        reference their textures as sibling files by relative path, so
+        converting anywhere else would strip them (see
+        exporting.GodotExportItem). Then every resulting .glb goes
+        through godot_export.generate_meshinstance_wrappers, and the
+        intermediate .glb (plus its .import residue) is deleted once its
+        wrapper is confirmed generated -- the wrapper scene is fully
+        self-contained (verified directly against a real Godot install:
+        mesh and material are embedded, a texture stays a proper
+        reference to Godot's own auto-extracted image file), so what
+        lands in the project is the Godot asset itself, not a source file
+        next to it. A .glb whose wrapper generation failed is left in
+        place instead -- something usable beats nothing.
 
         Caller must have already confirmed the selection is Godot-export
         eligible (see exporting.is_godot_export_eligible) -- this doesn't
@@ -914,7 +922,7 @@ class Catalogue:
         try:
             assets = exporting.select_assets(conn, asset_ids=asset_ids)
             project_identifier = str(Path(project_root).resolve())
-            _copy_stats, destinations = exporting.export_assets_to_godot(
+            items = exporting.plan_godot_export(
                 conn,
                 self._staging_folder,
                 Path(project_root),
@@ -923,12 +931,87 @@ class Catalogue:
                 assets,
                 on_progress=on_progress,
             )
+            to_convert = [item for item in items if item.needs_conversion]
+            conversion_failures: list[str] = []
+            converted_ids: set[int] = set()
+
+            if to_convert:
+                blender_exe, blender_error = blender_render.resolve_blender(
+                    settings.load().blender_path
+                )
+                if blender_exe is None:
+                    # Degrade rather than abort: any .glb in the same
+                    # selection has already landed and is perfectly good,
+                    # and throwing that away would help nobody. The raw
+                    # .fbx deliberately isn't copied in as a consolation
+                    # prize either -- an untextured model quietly sitting
+                    # in the project is the exact outcome this path
+                    # exists to prevent, and is worse than an obvious
+                    # absence. One entry per asset so the reported
+                    # failure count matches reality, each carrying the
+                    # reason so a single line still explains itself.
+                    conversion_failures = [
+                        f"{item.display_name}: needs Blender to convert to .glb ({blender_error})"
+                        for item in to_convert
+                    ]
+                else:
+                    result = conversion.convert_for_export(
+                        blender_exe,
+                        [
+                            conversion.build_export_conversion_job(
+                                item.asset_id,
+                                item.source,
+                                item.pack_root,
+                                item.destination,
+                                item.extension,
+                                item.corrections,
+                            )
+                            for item in to_convert
+                        ],
+                        {item.asset_id: item.display_name for item in to_convert},
+                        on_progress=on_progress,
+                    )
+                    converted_ids = set(result.converted_asset_ids)
+                    conversion_failures = result.failures
+                    for item in to_convert:
+                        if item.asset_id in converted_ids:
+                            exporting.record_export(
+                                conn, item.asset_id, project_identifier, item.destination
+                            )
+                    conn.commit()
         finally:
             conn.close()
 
+        report = on_progress or (lambda _text: None)
+        landed = [
+            item.destination
+            for item in items
+            if not item.needs_conversion or item.asset_id in converted_ids
+        ]
+        # A rig or an animation cannot survive being flattened to a plain
+        # mesh, so anything carrying one is left as the .glb it is and
+        # imported by Godot natively -- that's what builds the Skeleton3D
+        # and AnimationPlayer, and it's strictly better than anything
+        # this could synthesize. Only genuinely static geometry goes
+        # through the MeshInstance3D step.
+        preserved = [
+            path
+            for path in landed
+            if (meta := gltf_metadata.read(path)) is not None and meta.needs_native_import
+        ]
+        for path in preserved:
+            report(f"Keeping {path.name} as-is (rigged/animated -- Godot imports it natively)")
+        to_flatten = [path for path in landed if path not in set(preserved)]
+
         wrapper_stats = godot_export.generate_meshinstance_wrappers(
-            godot_exe, Path(project_root), destinations, on_progress=on_progress
+            godot_exe, Path(project_root), to_flatten, on_progress=on_progress
         )
+        # Preserved models are exports that succeeded, just not by being
+        # rewritten -- counting them as generated keeps the reported
+        # total equal to what the user actually selected.
+        wrapper_stats.generated += len(preserved)
+        wrapper_stats.failed += len(conversion_failures)
+        wrapper_stats.failures.extend(conversion_failures)
         for source_path in wrapper_stats.succeeded_sources:
             source_path.unlink(missing_ok=True)
             Path(f"{source_path}.import").unlink(missing_ok=True)

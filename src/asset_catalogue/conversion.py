@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from asset_catalogue import ingest, library_assets, paths
 
@@ -36,6 +36,67 @@ class ConversionBatchResult:
     errors: list[str] = field(default_factory=list)
     smart_texture_notes: list[str] = field(default_factory=list)
     broken_materials: list[tuple[int, str, str]] = field(default_factory=list)
+
+
+# Every line blender_convert_script.py emits is PREFIX|<asset_id>|<rest>,
+# so one split(maxsplit=2) covers all four kinds uniformly.
+_RESULT_PREFIXES = {
+    "ASSET_CATALOGUE_CONVERT_RESULT|": "result",
+    "ASSET_CATALOGUE_CONVERT_ERROR|": "error",
+    "ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|": "smart_texture",
+    "ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|": "broken_material",
+}
+
+
+def _stream_conversion_results(
+    blender_exe: Path, jobs: list[dict]
+) -> Iterator[tuple[str, int, str]]:
+    """Runs one Blender process for the whole of `jobs` and yields
+    (kind, asset_id, payload) for each recognized line it prints, in
+    order. One process per batch, not per job, because Blender's startup
+    dominates the per-asset cost (same reasoning as
+    blender_render.generate_model_thumbnails).
+
+    A generator rather than a return-everything call so a caller can act
+    on each result as it arrives -- convert_assets_to_gltf commits its
+    database work per asset and reports progress as it goes, rather than
+    going quiet for the length of a long batch.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        json.dump(jobs, f)
+        job_list_path = Path(f.name)
+
+    try:
+        process = subprocess.Popen(
+            [
+                str(blender_exe),
+                "--background",
+                "--python",
+                str(CONVERT_SCRIPT_PATH),
+                "--",
+                str(job_list_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            kind = next(
+                (k for prefix, k in _RESULT_PREFIXES.items() if line.startswith(prefix)), None
+            )
+            if kind is None:
+                continue
+            _, asset_id_str, payload = line.split("|", 2)
+            yield kind, int(asset_id_str), payload
+        process.wait()
+    finally:
+        job_list_path.unlink(missing_ok=True)
 
 
 def _resolve_conversion_row(conn: sqlite3.Connection, asset_id: int) -> sqlite3.Row | None:
@@ -246,60 +307,26 @@ def convert_assets_to_gltf(
     if not jobs:
         return result
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as f:
-        json.dump(jobs, f)
-        job_list_path = Path(f.name)
-
     report(
         f"Starting Blender to convert {len(jobs)} model{'s' if len(jobs) != 1 else ''} to .glb..."
     )
-    try:
-        process = subprocess.Popen(
-            [
-                str(blender_exe),
-                "--background",
-                "--python",
-                str(CONVERT_SCRIPT_PATH),
-                "--",
-                str(job_list_path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
 
-        seen_ids: set[int] = set()
-        assert process.stdout is not None
-        for line in process.stdout:
-            line = line.strip()
-            if line.startswith("ASSET_CATALOGUE_CONVERT_ERROR|"):
-                _, asset_id_str, message = line.split("|", 2)
-                result.errors.append(f"asset {asset_id_str}: {message}")
-                continue
-            if line.startswith("ASSET_CATALOGUE_CONVERT_SMART_TEXTURE|"):
-                _, smart_asset_id_str, note = line.split("|", 2)
-                row = job_context.get(int(smart_asset_id_str), (None,))[0]
-                display_name = row["filename"] if row is not None else f"asset {smart_asset_id_str}"
-                result.smart_texture_notes.append(f"{display_name}: {note}")
-                continue
-            if line.startswith("ASSET_CATALOGUE_CONVERT_BROKEN_MATERIAL|"):
-                _, broken_asset_id_str, material_name = line.split("|", 2)
-                broken_asset_id = int(broken_asset_id_str)
-                row = job_context.get(broken_asset_id, (None,))[0]
-                display_name = row["filename"] if row is not None else f"asset {broken_asset_id_str}"
-                result.broken_materials.append((broken_asset_id, display_name, material_name))
-                continue
-            if not line.startswith("ASSET_CATALOGUE_CONVERT_RESULT|"):
-                continue
-            _, asset_id_str, status = line.split("|")
-            asset_id = int(asset_id_str)
+    def display_name_for(asset_id: int) -> str:
+        row = job_context.get(asset_id, (None,))[0]
+        return row["filename"] if row is not None else f"asset {asset_id}"
+
+    seen_ids: set[int] = set()
+    for kind, asset_id, payload in _stream_conversion_results(blender_exe, jobs):
+        if kind == "error":
+            result.errors.append(f"asset {asset_id}: {payload}")
+        elif kind == "smart_texture":
+            result.smart_texture_notes.append(f"{display_name_for(asset_id)}: {payload}")
+        elif kind == "broken_material":
+            result.broken_materials.append((asset_id, display_name_for(asset_id), payload))
+        else:
             seen_ids.add(asset_id)
             row, new_relative_path, output_path = job_context[asset_id]
-            if status != "ok":
+            if payload != "ok":
                 result.failed += 1
                 report(f"Failed to convert {row['filename']} ({len(seen_ids)}/{len(jobs)})")
                 if output_path.exists():
@@ -312,17 +339,104 @@ def convert_assets_to_gltf(
             result.converted_asset_ids.append(asset_id)
             report(f"Converted {row['filename']} to .glb ({len(seen_ids)}/{len(jobs)})")
 
-        process.wait()
+    missing = [job for job in jobs if job["asset_id"] not in seen_ids]
+    for job in missing:
+        result.failed += 1
+        result.errors.append(f"asset {job['asset_id']}: Blender exited before completing this job")
 
-        missing = [job for job in jobs if job["asset_id"] not in seen_ids]
-        for job in missing:
-            result.failed += 1
-            result.errors.append(
-                f"asset {job['asset_id']}: Blender exited before completing this job"
+    return result
+
+
+@dataclass
+class ExportConversionResult:
+    converted_asset_ids: list[int] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def build_export_conversion_job(
+    asset_id: int,
+    source: Path,
+    pack_root: Path,
+    output_path: Path,
+    extension: str,
+    corrections: dict,
+) -> dict:
+    """One job for convert_for_export, in the shape blender_convert_
+    script.py already reads. Deliberately the same shape
+    _build_conversion_job produces for the library-side conversion, so
+    both directions run the identical Blender script rather than
+    maintaining a second one that would drift.
+    """
+    return {
+        "asset_id": asset_id,
+        "source_path": str(source),
+        "pack_root": str(pack_root),
+        "output_path": str(output_path),
+        "extension": extension,
+        "corrections": corrections,
+    }
+
+
+def convert_for_export(
+    blender_exe: Path,
+    jobs: list[dict],
+    display_names: dict[int, str] | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> ExportConversionResult:
+    """Converts models to .glb straight into an export destination,
+    touching no database and no catalogue state at all -- the asset in
+    the library stays exactly the .fbx/.obj/.stl it was. This is the
+    export-time counterpart to convert_assets_to_gltf, which converts the
+    library's own copy in place and records a pending_conversions row so
+    it can be reverted; nothing here is revertible because nothing here
+    is a change to anything the user owns.
+
+    Its whole reason for existing is textures: every format this handles
+    references them as sibling files by relative path, and a .glb embeds
+    them instead, so converting is what makes an exported model arrive in
+    Godot actually textured. The pack's own corrections get applied on the
+    way through as a bonus.
+    """
+    report = on_progress or (lambda _text: None)
+    names = display_names or {}
+    result = ExportConversionResult()
+    if not jobs:
+        return result
+
+    def display_name_for(asset_id: int) -> str:
+        return names.get(asset_id, f"asset {asset_id}")
+
+    report(
+        f"Converting {len(jobs)} model{'s' if len(jobs) != 1 else ''} to .glb with Blender "
+        "(preserving textures)..."
+    )
+    seen_ids: set[int] = set()
+    # blender_convert_script.py prints its ERROR line (carrying the real
+    # reason) before the RESULT|fail line for the same asset, so a failure
+    # already explained isn't restated with a vaguer message.
+    explained: set[int] = set()
+    for kind, asset_id, payload in _stream_conversion_results(blender_exe, jobs):
+        if kind == "error":
+            explained.add(asset_id)
+            result.failures.append(f"{display_name_for(asset_id)}: {payload}")
+        elif kind == "result":
+            seen_ids.add(asset_id)
+            if payload == "ok":
+                result.converted_asset_ids.append(asset_id)
+                report(
+                    f"Converted {display_name_for(asset_id)} to .glb "
+                    f"({len(result.converted_asset_ids)}/{len(jobs)})"
+                )
+                continue
+            if asset_id not in explained:
+                result.failures.append(f"{display_name_for(asset_id)}: conversion failed")
+            report(f"Failed to convert {display_name_for(asset_id)}")
+
+    for job in jobs:
+        if job["asset_id"] not in seen_ids:
+            result.failures.append(
+                f"{display_name_for(job['asset_id'])}: Blender exited before completing this job"
             )
-    finally:
-        job_list_path.unlink(missing_ok=True)
-
     return result
 
 

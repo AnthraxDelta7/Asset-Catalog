@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -55,7 +56,8 @@ def select_assets(
         return []
 
     query = (
-        "SELECT assets.id, assets.relative_path, packs.pack_folder, packs.name AS pack_name "
+        "SELECT assets.id, assets.relative_path, packs.pack_folder, packs.name AS pack_name, "
+        "packs.corrections "
         "FROM assets JOIN packs ON packs.id = assets.pack_id"
     )
     clauses: list[str] = []
@@ -86,13 +88,42 @@ def select_assets(
     return conn.execute(query, params).fetchall()
 
 
-# Formats Godot's own importers can actually turn into a scene on their
-# own (glTF/.glb natively, .fbx/.obj via its built-in importers) -- the
-# MeshInstance3D wrapper step (see godot_export.generate_meshinstance_
-# wrappers) only makes sense for these. .stl/.blend are real model assets
-# this app catalogues, but Godot doesn't import either directly, so a
-# wrapper scene can never be built for them.
-GODOT_IMPORTABLE_EXTENSIONS = frozenset({".glb", ".gltf", ".fbx", ".obj"})
+# Model formats Blender can import, and so that this app can turn into a
+# textured .glb on the way into a Godot project (see
+# conversion.convert_for_export). Every one of these references its
+# textures as sibling files by relative path rather than embedding them,
+# so copying the file alone into a project -- especially into the one
+# flat folder per pack that _copy_assets now produces -- reliably lands
+# it with its materials pointing at nothing. Converting via Blender
+# sidesteps that entirely: a .glb embeds its textures, and the pack's own
+# corrections (material_fallback, broken_texture_fallback) get applied on
+# the way through, which no engine-side importer could do.
+BLENDER_CONVERTIBLE_EXTENSIONS = frozenset({".gltf", ".fbx", ".obj", ".stl", ".blend"})
+
+# Everything a Godot MeshInstance3D wrapper scene can be produced for:
+# .glb goes straight to Godot (already self-contained), anything else
+# goes through Blender first. Deliberately NOT "what Godot itself can
+# import" -- .stl and .blend are in here despite Godot being unable to
+# read either, precisely because Godot never sees them in that form.
+GODOT_EXPORTABLE_EXTENSIONS = frozenset({".glb"}) | BLENDER_CONVERTIBLE_EXTENSIONS
+
+
+def needs_blender_conversion(relative_path: str) -> bool:
+    return Path(relative_path).suffix.lower() in BLENDER_CONVERTIBLE_EXTENSIONS
+
+
+def godot_destination_name(relative_path: str) -> str:
+    """The filename this asset lands under in the Godot project. Anything
+    Blender converts on the way in arrives as a .glb, so its destination
+    is named for what it will actually be, not what it started as --
+    decided here, before collision resolution, so a pack holding both
+    prop.fbx and prop.glb resolves that collision against the real final
+    names rather than discovering it after the fact.
+    """
+    name = Path(relative_path).name
+    if needs_blender_conversion(name):
+        return str(Path(name).with_suffix(".glb"))
+    return name
 
 
 def is_godot_export_eligible(assets: list[sqlite3.Row]) -> bool:
@@ -106,9 +137,57 @@ def is_godot_export_eligible(assets: list[sqlite3.Row]) -> bool:
     if not assets:
         return False
     return all(
-        Path(asset["relative_path"]).suffix.lower() in GODOT_IMPORTABLE_EXTENSIONS
+        Path(asset["relative_path"]).suffix.lower() in GODOT_EXPORTABLE_EXTENSIONS
         for asset in assets
     )
+
+
+def record_export(
+    conn: sqlite3.Connection, asset_id: int, project_identifier: str, destination: Path
+) -> None:
+    """Logs one asset landing in one project. Public because the Godot
+    path records its converted models from Catalogue.export_assets_to_
+    godot_bg -- only once Blender has actually produced the .glb, so a
+    failed conversion leaves no export history claiming a file that isn't
+    there. Caller commits.
+    """
+    conn.execute(
+        "INSERT INTO exports (asset_id, project_identifier, destination_path, timestamp) "
+        "VALUES (?, ?, ?, ?)",
+        (asset_id, project_identifier, str(destination), datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def _plan_destinations(
+    project_root: Path,
+    dest_subfolder: str,
+    assets: list[sqlite3.Row],
+    namer: Callable[[str], str],
+) -> list[Path]:
+    """Where each asset lands, with same-name collisions already resolved.
+
+    One flat folder per pack -- not the pack's own internal subfolder
+    structure (Models/, Textures/, a creator's own nested layout, ...)
+    reproduced underneath it. A real downloaded pack's own organization
+    is rarely something worth preserving once you've already deliberately
+    picked out the handful of assets you're exporting; see
+    _unique_destination for how a same-name collision this can now cause
+    gets resolved instead of silently overwriting.
+
+    Planned for the whole batch up front rather than as each file is
+    written, because the Godot path has to know a converted model's final
+    .glb name before Blender runs -- the conversion writes straight to
+    its destination, so there's no "copy it and rename later" step to
+    resolve a collision in.
+    """
+    destinations: list[Path] = []
+    taken: set[Path] = set()
+    for asset in assets:
+        pack_dir = project_root / dest_subfolder / _sanitize_folder_name(asset["pack_name"])
+        destination = _unique_destination(pack_dir, namer(asset["relative_path"]), taken)
+        taken.add(destination)
+        destinations.append(destination)
+    return destinations
 
 
 def _copy_assets(
@@ -120,44 +199,18 @@ def _copy_assets(
     assets: list[sqlite3.Row],
     on_progress: ProgressCallback | None = None,
 ) -> tuple[ExportStats, list[Path]]:
-    """The actual file-copy loop shared by export_assets and
-    export_assets_to_godot -- the latter additionally needs the resulting
-    destination paths (to know exactly which files to hand to Godot for
-    wrapper generation), which export_assets' own public signature has
-    never needed to expose.
-    """
+    """The actual file-copy loop behind export_assets."""
     report = on_progress or (lambda _text: None)
     stats = ExportStats()
-    destinations: list[Path] = []
-    taken: set[Path] = set()
-    for asset in assets:
+    destinations = _plan_destinations(
+        project_root, dest_subfolder, assets, lambda rel: Path(rel).name
+    )
+    for asset, destination in zip(assets, destinations):
         report(f"Exporting {asset['relative_path']}...")
         source = staging_folder / asset["pack_folder"] / asset["relative_path"]
-        # One flat folder per pack -- not the pack's own internal
-        # subfolder structure (Models/, Textures/, a creator's own nested
-        # layout, ...) reproduced underneath it. A real downloaded pack's
-        # own organization is rarely something worth preserving once
-        # you've already deliberately picked out the handful of assets
-        # you're exporting; see _unique_destination for how a same-name
-        # collision this can now cause gets resolved instead of silently
-        # overwriting.
-        pack_dir = project_root / dest_subfolder / _sanitize_folder_name(asset["pack_name"])
-        destination = _unique_destination(pack_dir, Path(asset["relative_path"]).name, taken)
-        taken.add(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-        destinations.append(destination)
-
-        conn.execute(
-            "INSERT INTO exports (asset_id, project_identifier, destination_path, timestamp) "
-            "VALUES (?, ?, ?, ?)",
-            (
-                asset["id"],
-                project_identifier,
-                str(destination),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
+        record_export(conn, asset["id"], project_identifier, destination)
         stats.copied += 1
     conn.commit()
     return stats, destinations
@@ -178,7 +231,29 @@ def export_assets(
     return stats
 
 
-def export_assets_to_godot(
+@dataclass
+class GodotExportItem:
+    """One model on its way into a Godot project as a .glb.
+
+    source is the file in the *staging library*, deliberately not a copy
+    of it made inside the project: Blender resolves a .fbx/.obj/.gltf's
+    texture references relative to the model file's own location, so a
+    conversion run against a copy that flattening has already separated
+    from its sibling texture folder would produce exactly the untextured
+    result this whole path exists to avoid.
+    """
+
+    asset_id: int
+    display_name: str
+    source: Path
+    destination: Path
+    pack_root: Path
+    extension: str
+    corrections: dict
+    needs_conversion: bool
+
+
+def plan_godot_export(
     conn: sqlite3.Connection,
     staging_folder: Path,
     project_root: Path,
@@ -186,15 +261,42 @@ def export_assets_to_godot(
     dest_subfolder: str,
     assets: list[sqlite3.Row],
     on_progress: ProgressCallback | None = None,
-) -> tuple[ExportStats, list[Path]]:
-    """Same copy as export_assets, plus the destination paths -- callers
-    (see Catalogue.export_assets_to_godot_bg) pass every model's path
-    straight into godot_export.generate_meshinstance_wrappers afterward.
+) -> list[GodotExportItem]:
+    """Works out where every selected model lands as a .glb, and copies
+    the ones that already are one straight there. Anything Blender has to
+    convert is only *planned* here and returned with needs_conversion set
+    -- see Catalogue.export_assets_to_godot_bg, which runs the whole batch
+    through a single Blender process afterward rather than paying its
+    startup cost per file.
+
     Caller is expected to have already checked is_godot_export_eligible;
     this doesn't check it again, since it has no sensible fallback of its
     own for an ineligible asset -- deciding what to do about that belongs
     at the point the export mode itself gets chosen, not buried here.
     """
-    return _copy_assets(
-        conn, staging_folder, project_root, project_identifier, dest_subfolder, assets, on_progress
+    report = on_progress or (lambda _text: None)
+    destinations = _plan_destinations(
+        project_root, dest_subfolder, assets, godot_destination_name
     )
+    items: list[GodotExportItem] = []
+    for asset, destination in zip(assets, destinations):
+        pack_root = staging_folder / asset["pack_folder"]
+        relative_path = asset["relative_path"]
+        item = GodotExportItem(
+            asset_id=asset["id"],
+            display_name=Path(relative_path).name,
+            source=pack_root / relative_path,
+            destination=destination,
+            pack_root=pack_root,
+            extension=Path(relative_path).suffix.lower(),
+            corrections=json.loads(asset["corrections"]) if asset["corrections"] else {},
+            needs_conversion=needs_blender_conversion(relative_path),
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not item.needs_conversion:
+            report(f"Exporting {relative_path}...")
+            shutil.copy2(item.source, destination)
+            record_export(conn, item.asset_id, project_identifier, destination)
+        items.append(item)
+    conn.commit()
+    return items
