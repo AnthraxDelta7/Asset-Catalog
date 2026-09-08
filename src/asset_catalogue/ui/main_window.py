@@ -906,6 +906,16 @@ class DetailPanel(QWidget):
             "animations: " + ", ".join(clips) if clips else ""
         )
         self.animations_label.setVisible(bool(clips))
+        # The label says so when there's something to play, since the 3D
+        # viewer is also where animations live -- otherwise nothing on
+        # this panel tells you where the clips it just listed are watched.
+        if clips:
+            count = len(clips)
+            self.view_3d_button.setText(
+                f"View in 3D / Play {count} Animation{'s' if count != 1 else ''}"
+            )
+        else:
+            self.view_3d_button.setText("View in 3D")
         self.view_3d_button.setVisible(
             self._current_asset is not None and self._current_asset.asset_type == "model"
         )
@@ -2651,7 +2661,12 @@ class CalibrationReviewDialog(QDialog):
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
         self._set_buttons_enabled(False)
-        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
+        # Parented to the modal dialog on top, when there is one: a
+        # progress dialog parented to the main window would be blocked by
+        # an open modal (the 3D preview) and never become visible.
+        progress = ProgressLogDialog(
+            "Asset Catalogue", progress_text, QApplication.activeModalWidget() or self
+        )
         progress.show()
 
         worker = _BackgroundWorker(fn)
@@ -4472,7 +4487,9 @@ class MainWindow(QMainWindow):
                 parts,
                 self,
                 clips=clips,
-                on_play_clip=lambda clip: self._handle_play_animation(asset_id, clip),
+                on_play_clip=lambda clip, on_ready: self._handle_play_animation(
+                    asset_id, clip, on_ready
+                ),
             )
             dialog.exec()
 
@@ -4533,11 +4550,11 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "Asset Catalogue", f"Library copy is at:\n{path}")
 
-    def _handle_play_animation(self, asset_id: int, clip_name: str) -> None:
-        """Renders the clip (or reuses an already-rendered one) and then
-        opens the player. The render is where the cost is, so it runs as
-        a normal background job with the usual progress feed -- a cache
-        hit comes straight back and the player opens immediately.
+    def _handle_play_animation(self, asset_id: int, clip_name: str, on_ready) -> None:
+        """Renders the clip (or reuses a cached one) and hands the frames
+        back to whoever asked, rather than opening a window of its own --
+        the 3D preview plays them in place of its viewport, so playback
+        never costs a second window to manage.
         """
         self._run_background_job(
             lambda report: self._catalogue.render_animation_clip_bg(
@@ -4546,21 +4563,10 @@ class MainWindow(QMainWindow):
             f"Rendering {clip_name}...",
             lambda result: "",
             lambda: None,
-            on_complete=lambda result: self._show_animation_player(clip_name, result),
+            on_complete=lambda result: on_ready(
+                result[0], animation_preview.frame_interval_ms(len(result[0])), result[1]
+            ),
         )
-
-    def _show_animation_player(self, clip_name: str, result) -> None:
-        from asset_catalogue.ui.animation_player_dialog import AnimationPlayerDialog
-
-        frames, error = result
-        if not frames:
-            QMessageBox.warning(
-                self, "Asset Catalogue", error or f"Could not render {clip_name}"
-            )
-            return
-        AnimationPlayerDialog(
-            clip_name, frames, animation_preview.frame_interval_ms(len(frames)), self
-        ).exec()
 
     def _run_background_job(
         self, fn, progress_text: str, format_result, on_success_refresh, on_complete=None

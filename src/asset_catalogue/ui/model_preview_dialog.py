@@ -27,7 +27,7 @@ import trimesh
 from OpenGL import GL
 from PIL import Image
 from pyqtgraph.opengl.shaders import FragmentShader, ShaderProgram, VertexShader
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QOpenGLContext, QPixmap
 from PySide6.QtOpenGL import QOpenGLBuffer
 from PySide6.QtWidgets import (
@@ -618,9 +618,22 @@ class Model3DPreviewDialog(QDialog):
         self._texture_preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self._texture_preview_label.customContextMenuRequested.connect(self._show_texture_context_menu)
         self._current_texture: tuple[str, Image.Image] | None = None
+        # A third page on the same stack, for the same reason the texture
+        # preview is one: an animation plays in place of the 3D view
+        # rather than in a second window to manage. It's a rendered
+        # flipbook from a fixed camera, so orbiting is paused while it
+        # plays -- pressing Stop returns to the interactive mesh.
+        self._animation_label = QLabel()
+        self._animation_label.setAlignment(Qt.AlignCenter)
+        self._animation_frames: list = []
+        self._animation_index = 0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.timeout.connect(self._advance_animation)
+
         self._view_stack = QStackedWidget()
         self._view_stack.addWidget(self.view)
         self._view_stack.addWidget(self._texture_preview_label)
+        self._view_stack.addWidget(self._animation_label)
         body.addWidget(self._view_stack, stretch=1)
 
         # Populated by _build. Every part in the file gets its own row here
@@ -679,9 +692,46 @@ class Model3DPreviewDialog(QDialog):
         self._build(parts)
 
     def _play_selected_clip(self) -> None:
+        if self._animation_timer.isActive():
+            self._stop_animation()
+            return
         clip = self.animation_combo.currentText()
-        if clip:
-            self._on_play_clip(clip)
+        if not clip:
+            return
+        self.play_animation_button.setEnabled(False)
+        self._on_play_clip(clip, self._show_animation)
+
+    def _show_animation(self, frames: list, interval_ms: int, error: str | None) -> None:
+        """Called back once the frames exist (rendered or from cache)."""
+        from PySide6.QtWidgets import QMessageBox
+
+        self.play_animation_button.setEnabled(True)
+        if error or not frames:
+            QMessageBox.warning(self, "Asset Catalogue", error or "No frames to play")
+            return
+        self._animation_frames = [QPixmap(str(path)) for path in frames]
+        self._animation_index = 0
+        self._animation_label.setPixmap(self._animation_frames[0])
+        self._view_stack.setCurrentWidget(self._animation_label)
+        self._animation_timer.setInterval(max(1, interval_ms))
+        self._animation_timer.start()
+        self.play_animation_button.setText("⏹ Stop")
+
+    def _advance_animation(self) -> None:
+        self._animation_index = (self._animation_index + 1) % len(self._animation_frames)
+        self._animation_label.setPixmap(self._animation_frames[self._animation_index])
+
+    def _stop_animation(self) -> None:
+        self._animation_timer.stop()
+        self._animation_frames = []
+        self.play_animation_button.setText("▶ Play")
+        self._view_stack.setCurrentWidget(self.view)
+
+    def done(self, result: int) -> None:
+        # Otherwise the timer keeps firing at a closed dialog's label and
+        # holds every decoded frame alive with it.
+        self._animation_timer.stop()
+        super().done(result)
 
     def _build(self, parts: list[PreviewPart]) -> None:
         if not parts:
