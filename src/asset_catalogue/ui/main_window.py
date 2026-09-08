@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from asset_catalogue.ui.commands import CommandRegistry
 from asset_catalogue import (
     blender_render,
     crash_log,
@@ -3656,72 +3657,228 @@ class MainWindow(QMainWindow):
         self._refresh_grid()
 
     def _build_menu(self) -> None:
+        # Menus are built from the command registry rather than creating
+        # their own QActions, so a menu item and a keypress are literally
+        # the same action -- see ui/commands.py. That's what makes every
+        # function here bindable, and what stops a shortcut and a menu
+        # entry drifting apart.
+        self.commands = CommandRegistry(self)
+        self.commands.build(settings.load().shortcuts)
+        for command_id, handler in {
+            "file.settings": self._open_settings_dialog,
+            "file.switch_library": self._switch_library,
+            "file.exit": self.close,
+            # self.grid doesn't exist yet at this point in __init__ -- the
+            # lambda defers the lookup to trigger-time.
+            "edit.select_all": lambda: self.grid.selectAll(),
+            "edit.trash": self._remove_selected_assets,
+            "edit.focus_search": self._focus_search,
+            "edit.clear_filters": self._clear_all_filters,
+            "tools.convert_gltf": self._convert_selected_to_gltf,
+            "tools.convert_flagged": self._convert_all_flagged_to_gltf,
+            "export.dialog": self._export_selected_to_project,
+            "export.quick": self._export_to_last_project,
+            "tools.godot_extract": self._open_godot_extract_dialog,
+            "tools.tag_pack": self._open_tag_pack_dialog,
+            "tools.cleanup_conversions": self._cleanup_all_pending_conversions,
+            "tools.credits": self._open_credits_dialog,
+            "tools.stats": self._open_library_stats_dialog,
+            "tools.trash": self._open_trash_dialog,
+            "tools.library_health": self._open_library_health_dialog,
+            "thumbs.2d": self._generate_2d_thumbnails,
+            "thumbs.3d": self._generate_model_thumbnails,
+            "thumbs.audio": self._generate_audio_thumbnails,
+            "asset.favorite": self._toggle_favorite_for_selection,
+            "asset.show_in_library": self._show_in_library_for_selection,
+            "asset.regenerate_thumbnail": self._regenerate_thumbnail_for_selection,
+            "preview.open_3d": self._open_preview_for_selection,
+            "nav.next_asset": lambda: self._step_selection(1),
+            "nav.previous_asset": lambda: self._step_selection(-1),
+            "tools.ingest": self._open_ingest_dialog,
+            "asset.add_tag": self._add_tag_to_selection,
+            "pack.edit_metadata": self._edit_pack_for_selection,
+            "nav.filter_to_pack": self._filter_to_selected_pack,
+            "preview.render_previews": lambda: self._render_model_previews_for_selection(
+                self._selected_asset_ids()
+            ),
+            "help.check_updates": lambda: self._check_for_updates(silent=False),
+            "help.about": self._show_about_dialog,
+        }.items():
+            self.commands.bind(command_id, handler)
+
         menu_bar = self.menuBar()
 
-        file_menu = menu_bar.addMenu("&File")
-        settings_action = file_menu.addAction("Settings...")
-        settings_action.triggered.connect(self._open_settings_dialog)
-        switch_library_action = file_menu.addAction("Switch Library...")
-        switch_library_action.triggered.connect(self._switch_library)
-        file_menu.addSeparator()
-        exit_action = file_menu.addAction("Exit")
-        exit_action.triggered.connect(self.close)
+        def add(menu, *command_ids) -> None:
+            for command_id in command_ids:
+                if command_id is None:
+                    menu.addSeparator()
+                else:
+                    menu.addAction(self.commands.action(command_id))
 
-        edit_menu = menu_bar.addMenu("&Edit")
-        select_all_action = edit_menu.addAction("Select All")
-        select_all_action.setShortcut(QKeySequence.SelectAll)
-        # self.grid doesn't exist yet at this point in __init__ -- a lambda
-        # defers the lookup to trigger-time instead of connect-time.
-        select_all_action.triggered.connect(lambda: self.grid.selectAll())
-        remove_action = edit_menu.addAction("Move Selected to Trash")
-        remove_action.setShortcut(QKeySequence.Delete)
-        remove_action.triggered.connect(self._remove_selected_assets)
-
+        add(menu_bar.addMenu("&File"), "file.settings", "file.switch_library", None, "file.exit")
+        add(
+            menu_bar.addMenu("&Edit"),
+            "edit.select_all",
+            "edit.trash",
+            None,
+            "edit.focus_search",
+            "edit.clear_filters",
+        )
         # Selection-scoped actions that transform/export rather than edit
         # the catalogue directly, plus pack- and library-wide maintenance --
         # kept out of Edit so it doesn't become a junk drawer of every bulk
         # feature that's landed here over time.
-        tools_menu = menu_bar.addMenu("&Tools")
-        convert_action = tools_menu.addAction("Convert Selected to glTF (.glb)...")
-        convert_action.triggered.connect(self._convert_selected_to_gltf)
-        convert_flagged_action = tools_menu.addAction("Convert All Flagged to glTF (.glb)...")
-        convert_flagged_action.triggered.connect(self._convert_all_flagged_to_gltf)
-        export_action = tools_menu.addAction("Export Selected to Project...")
-        export_action.triggered.connect(self._export_selected_to_project)
-        tools_menu.addSeparator()
-        godot_extract_action = tools_menu.addAction("Extract Godot Scenes to GLB...")
-        godot_extract_action.triggered.connect(self._open_godot_extract_dialog)
-        tools_menu.addSeparator()
-        tag_pack_action = tools_menu.addAction("Tag Pack...")
-        tag_pack_action.triggered.connect(self._open_tag_pack_dialog)
-        tools_menu.addSeparator()
-        cleanup_conversions_action = tools_menu.addAction("Clean Up Pre-Conversion Assets...")
-        cleanup_conversions_action.triggered.connect(self._cleanup_all_pending_conversions)
-        tools_menu.addSeparator()
-        credits_action = tools_menu.addAction("Generate Credits Report...")
-        credits_action.triggered.connect(self._open_credits_dialog)
-        stats_action = tools_menu.addAction("Library Statistics...")
-        stats_action.triggered.connect(self._open_library_stats_dialog)
-        trash_action = tools_menu.addAction("View Trash...")
-        trash_action.triggered.connect(self._open_trash_dialog)
-        health_action = tools_menu.addAction("Check Library Integrity...")
-        health_action.triggered.connect(self._open_library_health_dialog)
-
-        thumbnails_menu = menu_bar.addMenu("&Thumbnails")
-        gen_2d_action = thumbnails_menu.addAction("Generate 2D Thumbnails (current pack filter)")
-        gen_2d_action.triggered.connect(self._generate_2d_thumbnails)
-        gen_3d_action = thumbnails_menu.addAction(
-            "Generate 3D Thumbnails via Blender (current pack filter)"
+        add(
+            menu_bar.addMenu("&Tools"),
+            "tools.convert_gltf",
+            "tools.convert_flagged",
+            "export.dialog",
+            None,
+            "tools.godot_extract",
+            None,
+            "tools.tag_pack",
+            None,
+            "tools.cleanup_conversions",
+            None,
+            "tools.credits",
+            "tools.stats",
+            "tools.trash",
+            "tools.library_health",
         )
-        gen_3d_action.triggered.connect(self._generate_model_thumbnails)
-        gen_audio_action = thumbnails_menu.addAction("Generate Audio Thumbnails (current pack filter)")
-        gen_audio_action.triggered.connect(self._generate_audio_thumbnails)
+        add(menu_bar.addMenu("&Thumbnails"), "thumbs.2d", "thumbs.3d", "thumbs.audio")
+        add(menu_bar.addMenu("&Help"), "help.check_updates", "help.about")
 
-        help_menu = menu_bar.addMenu("&Help")
-        check_updates_action = help_menu.addAction("Check for Updates...")
-        check_updates_action.triggered.connect(lambda: self._check_for_updates(silent=False))
-        about_action = help_menu.addAction("About Asset Catalogue")
-        about_action.triggered.connect(self._show_about_dialog)
+        # Bare-key shortcuts (F, Space, R) have to stand down while a text
+        # field is focused, or typing in the search box fires commands.
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+    # -- Keyboard-reachable versions of things that previously only
+    # existed as a button or a context-menu entry on one specific asset.
+    # Each resolves "what is selected right now" itself, so a shortcut
+    # works from the grid without a click first.
+
+    def _current_asset(self):
+        selected = self._selected_asset_ids()
+        return self._catalogue.get_asset(selected[0]) if len(selected) == 1 else None
+
+    def _focus_search(self) -> None:
+        self.filter_panel.search_edit.setFocus()
+        self.filter_panel.search_edit.selectAll()
+
+    def _clear_all_filters(self) -> None:
+        """Resets every filter at once. Each widget is blocked while it's
+        reset so the shared on_change handler fires one grid refresh at
+        the end instead of five in a row.
+        """
+        panel = self.filter_panel
+        for widget in (
+            panel.search_edit,
+            panel.favorites_checkbox,
+            panel.needs_conversion_checkbox,
+            panel.type_combo,
+            panel.format_combo,
+            panel.pack_list,
+            panel.tag_list,
+        ):
+            widget.blockSignals(True)
+        panel.search_edit.clear()
+        panel.favorites_checkbox.setChecked(False)
+        panel.needs_conversion_checkbox.setChecked(False)
+        panel.type_combo.setCurrentIndex(0)
+        panel.format_combo.setCurrentIndex(0)
+        panel.pack_list.clearSelection()
+        panel.tag_list.clearSelection()
+        for widget in (
+            panel.search_edit,
+            panel.favorites_checkbox,
+            panel.needs_conversion_checkbox,
+            panel.type_combo,
+            panel.format_combo,
+            panel.pack_list,
+            panel.tag_list,
+        ):
+            widget.blockSignals(False)
+        self._refresh_grid()
+
+    def _toggle_favorite_for_selection(self) -> None:
+        selected = self._selected_asset_ids()
+        if not selected:
+            return
+        # Whole selection follows the first asset's new state rather than
+        # each row flipping independently, so a mixed selection lands
+        # somewhere predictable instead of inverting into another mix.
+        first = self._catalogue.get_asset(selected[0])
+        self._catalogue.set_favorite(selected, not first.favorite)
+        self._refresh_grid()
+
+    def _show_in_library_for_selection(self) -> None:
+        asset = self._current_asset()
+        if asset is not None:
+            self._show_in_library_folder(asset.pack_name, asset.relative_path)
+
+    def _regenerate_thumbnail_for_selection(self) -> None:
+        asset = self._current_asset()
+        if asset is not None:
+            self._handle_generate_thumbnail(asset.id, asset.asset_type)
+
+    def _open_preview_for_selection(self) -> None:
+        asset = self._current_asset()
+        if asset is not None and asset.asset_type == "model":
+            self._open_model_preview(asset.filename, asset.id, asset.content_hash)
+
+    def _export_to_last_project(self) -> None:
+        """Straight to the most recently used project, no dialog -- the
+        point of a one-key export. Falls back to the full dialog when
+        there's no remembered project yet, rather than doing nothing and
+        looking broken.
+        """
+        recents = settings.load().recent_export_projects
+        if not recents:
+            self._export_selected_to_project()
+            return
+        self._quick_export(recents[0], settings.load().last_export_mode)
+
+    def _add_tag_to_selection(self) -> None:
+        """Same prompt the panel's Add button uses, reachable from the
+        grid without moving focus into the tag field first.
+        """
+        selected = self._selected_asset_ids()
+        if not selected:
+            return
+        name, ok = QInputDialog.getText(self, "Add Tag", "Tag name:")
+        name = name.strip()
+        if ok and name:
+            self._handle_bulk_tag_assets(selected, name)
+
+    def _edit_pack_for_selection(self) -> None:
+        asset = self._current_asset()
+        if asset is not None:
+            self._edit_pack(asset.pack_name)
+
+    def _filter_to_selected_pack(self) -> None:
+        asset = self._current_asset()
+        if asset is not None:
+            self._filter_by_pack(asset.pack_name)
+
+    def _step_selection(self, delta: int) -> None:
+        """Moves the grid selection by one, so a whole pack can be
+        reviewed from the keyboard.
+        """
+        if not self._asset_ids:
+            return
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        current = rows[0] if rows else -delta
+        target = max(0, min(len(self._asset_ids) - 1, current + delta))
+        self.table.selectRow(target)
+
+    def _on_focus_changed(self, _old, new) -> None:
+        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit
+
+        editable = isinstance(new, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox))
+        # An editable combo box types into its own internal QLineEdit, so
+        # it's caught by the QLineEdit check above rather than needing its
+        # own case here.
+        self.commands.set_text_focus(editable)
 
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Ingest")

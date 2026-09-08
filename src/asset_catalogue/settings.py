@@ -52,6 +52,10 @@ class Settings:
     # no sense for it), but the next model-asset export goes right back to
     # whatever was last chosen on purpose, not the fallback.
     last_export_mode: str = "standard"
+    # command id -> key sequence, layered over the defaults declared in
+    # ui/commands.py. Only ever holds what the user actually changed, so
+    # a new command's default takes effect without touching this.
+    shortcuts: dict = field(default_factory=dict)
     # A release version the user explicitly dismissed via "Skip This
     # Version" in the update-available notice -- the automatic background
     # check won't nag about that exact version again, but a manual "Check
