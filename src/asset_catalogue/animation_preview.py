@@ -68,33 +68,37 @@ def frame_interval_ms(frame_count: int, clip_seconds: float = DEFAULT_CLIP_SECON
     return max(40, int(round(clip_seconds * 1000 / frame_count)))
 
 
-def render_clip(
+def render_clips(
     blender_exe: Path,
     source_path: Path,
     pack_root: Path,
     extension: str,
     corrections: dict,
-    frames_dir: Path,
-    clip_name: str,
+    targets: dict[str, Path],
     on_progress: ProgressCallback | None = None,
-) -> tuple[list[Path], str | None]:
-    """Renders clip_name into frames_dir. Returns (frames, error).
+) -> tuple[dict[str, list[Path]], str | None]:
+    """Renders every clip in `targets` (clip name -> frames directory) in
+    a single Blender session. Returns ({clip: frames}, error).
 
-    A cache hit returns immediately without launching Blender at all --
-    checked here rather than by callers so every entry point gets it.
+    Clips already cached are dropped before Blender is considered at all,
+    so a fully-cached model never launches it. Batching the rest into one
+    session is what makes this bearable: importing a large rigged
+    character costs far more than rendering a Workbench frame, so paying
+    that import once and rendering six clips beats six launches by a wide
+    margin.
     """
     report = on_progress or (lambda _text: None)
-    existing = cached_frames(frames_dir)
-    if existing:
-        return existing, None
+    results = {clip: cached_frames(path) for clip, path in targets.items()}
+    missing = {clip: path for clip, path in targets.items() if not results[clip]}
+    if not missing:
+        return results, None
 
     job = {
         "source_path": str(source_path),
         "pack_root": str(pack_root),
         "extension": extension,
         "corrections": corrections,
-        "output_dir": str(frames_dir),
-        "clip_name": clip_name,
+        "clips": {clip: str(path) for clip, path in missing.items()},
         "max_frames": MAX_FRAMES,
     }
     with tempfile.NamedTemporaryFile(
@@ -103,7 +107,10 @@ def render_clip(
         json.dump(job, f)
         job_path = Path(f.name)
 
-    report(f"Rendering {clip_name}...")
+    report(
+        f"Rendering {len(missing)} animation{'s' if len(missing) != 1 else ''} "
+        "(one Blender session for all of them)..."
+    )
     try:
         process = subprocess.run(
             [
@@ -120,26 +127,33 @@ def render_clip(
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return [], f"Rendering {clip_name} timed out"
+        return results, "Rendering the animations timed out"
+    except OSError as exc:
+        # Blender resolved when the job started but couldn't actually be
+        # launched -- moved, uninstalled, or permission-denied since.
+        # Reported like any other failure rather than escaping as a raw
+        # traceback out of a background job.
+        return results, f"Could not run Blender ({blender_exe}): {exc}"
     finally:
         job_path.unlink(missing_ok=True)
 
-    output = process.stdout + process.stderr
-    for line in output.splitlines():
+    failures = []
+    for line in (process.stdout + process.stderr).splitlines():
         if line.startswith("ASSET_CATALOGUE_ANIM_FRAME|"):
-            _, done, total = line.split("|", 2)
-            report(f"Rendering {clip_name}: frame {done}/{total}")
-    result = next(
-        (line for line in output.splitlines() if line.startswith("ASSET_CATALOGUE_ANIM_RESULT|")),
-        None,
-    )
-    if result is None:
-        return [], "Blender exited without rendering the animation"
-    _, status, detail = result.split("|", 2)
-    if status != "ok":
-        return [], detail
+            _, clip, done, total = line.split("|", 3)
+            report(f"Rendering {clip}: frame {done}/{total}")
+        elif line.startswith("ASSET_CATALOGUE_ANIM_RESULT|"):
+            _, clip, status, detail = line.split("|", 3)
+            if status == "ok":
+                results[clip] = cached_frames(targets[clip])
+            else:
+                failures.append(f"{clip}: {detail}")
 
-    frames = cached_frames(frames_dir)
-    if not frames:
-        return [], "No frames were produced"
-    return frames, None
+    for clip in missing:
+        if not results[clip] and not any(f.startswith(f"{clip}:") for f in failures):
+            failures.append(f"{clip}: Blender produced no frames")
+    # Only an outright error if nothing at all came back -- one bad clip
+    # shouldn't hide the others that rendered fine.
+    if not any(results.values()):
+        return results, "; ".join(failures) or "Blender exited without rendering anything"
+    return results, None

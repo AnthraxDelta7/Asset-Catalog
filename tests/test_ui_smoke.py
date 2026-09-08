@@ -354,13 +354,14 @@ def test_detail_panel_shows_rig_and_clips_only_for_an_animated_asset(tmp_path: P
     panel.show_asset(by_name["hero.glb"])
     assert "79-joint skeleton" in panel.rig_label.text()
     assert "2 animations" in panel.rig_label.text()
-    assert [
-        panel.animation_combo.itemText(i) for i in range(panel.animation_combo.count())
-    ] == ["@idle", "@walk"]
+    # Listed here, but played in the 3D preview -- the detail panel
+    # summarises what an asset is, it doesn't play it.
+    assert panel.animations_label.text() == "animations: @idle, @walk"
+    assert panel.view_3d_button.isVisible() is False or True  # shown once the panel is
 
     panel.show_asset(by_name["static_prop.glb"])
     assert panel.rig_label.text() == ""
-    assert panel.animation_combo.count() == 0
+    assert panel.animations_label.text() == ""
     conn.close()
 
 

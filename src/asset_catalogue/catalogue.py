@@ -378,16 +378,35 @@ class Catalogue:
                 f"The staged copy of this asset is no longer in {pack_root}, so its "
                 "animation can't be rendered. Re-stage the pack to preview it."
             )
-        return animation_preview.render_clip(
+        source = pack_root / row["relative_path"]
+        # Every clip in the model, not just the requested one. Blender has
+        # to import the character either way and that import dominates the
+        # cost, so rendering the siblings in the same session makes every
+        # later Play instant instead of paying the import again per clip.
+        metadata = gltf_metadata.read(source)
+        clip_names = list(metadata.animation_names) if metadata is not None else [clip_name]
+        if clip_name not in clip_names:
+            clip_names.append(clip_name)
+        targets = {
+            name: animation_preview.clip_frames_dir(
+                self._preview_dir, row["content_hash"], name
+            )
+            for name in clip_names
+        }
+
+        results, error = animation_preview.render_clips(
             self.resolve_blender(),
-            pack_root / row["relative_path"],
+            source,
             pack_root,
             row["extension"],
             json.loads(row["corrections"]) if row["corrections"] else {},
-            frames_dir,
-            clip_name,
+            targets,
             on_progress=on_progress,
         )
+        frames = results.get(clip_name, [])
+        if not frames and error is None:
+            error = f"Could not render {clip_name}"
+        return frames, error
 
     def has_pending_conversion(self, asset_id: int) -> bool:
         return conversion.has_pending_conversion(self._conn, asset_id)

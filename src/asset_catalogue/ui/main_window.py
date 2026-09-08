@@ -521,7 +521,7 @@ class DetailPanel(QWidget):
         on_quick_export,
         on_generate_thumbnail,
         on_toggle_favorite,
-        on_play_animation,
+        on_open_preview,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -538,7 +538,8 @@ class DetailPanel(QWidget):
         self._on_quick_export = on_quick_export
         self._on_generate_thumbnail = on_generate_thumbnail
         self._on_toggle_favorite = on_toggle_favorite
-        self._on_play_animation = on_play_animation
+        self._on_open_preview = on_open_preview
+        self._clips: list[str] = []
         self._asset_id: int | None = None
         self._current_asset: AssetSummary | None = None
         self._multi_asset_ids: list[int] = []
@@ -579,20 +580,18 @@ class DetailPanel(QWidget):
         self.rig_label.setWordWrap(True)
         self.rig_label.setVisible(False)
         layout.addWidget(self.rig_label)
-        # Clip picker + Play. Nothing is rendered when this appears --
-        # frames are produced only once Play is actually pressed (see
-        # animation_preview.py), since a rigged character often carries
-        # half a dozen clips nobody may ever look at.
-        self.animation_row = QWidget()
-        animation_layout = QHBoxLayout(self.animation_row)
-        animation_layout.setContentsMargins(0, 0, 0, 0)
-        self.animation_combo = QComboBox()
-        animation_layout.addWidget(self.animation_combo, 1)
-        self.play_animation_button = QPushButton("▶ Play")
-        self.play_animation_button.clicked.connect(self._play_selected_animation)
-        animation_layout.addWidget(self.play_animation_button)
-        self.animation_row.setVisible(False)
-        layout.addWidget(self.animation_row)
+        # The clips are *listed* here but played in the 3D preview: this
+        # panel is a summary of what an asset is, and watching a character
+        # run belongs next to the model you can orbit, not in a sidebar.
+        self.animations_label = QLabel("")
+        self.animations_label.setWordWrap(True)
+        self.animations_label.setVisible(False)
+        layout.addWidget(self.animations_label)
+
+        self.view_3d_button = QPushButton("View in 3D")
+        self.view_3d_button.clicked.connect(self._open_preview_for_current)
+        self.view_3d_button.setVisible(False)
+        layout.addWidget(self.view_3d_button)
 
         # Only shown for a single-selected asset whose thumbnail isn't
         # 'done' yet, and whose asset_type actually has a thumbnail
@@ -783,6 +782,8 @@ class DetailPanel(QWidget):
         self.pack_label.setText("")
         self.meta_label.setText("")
         self.rig_label.setVisible(False)
+        self.animations_label.setVisible(False)
+        self.view_3d_button.setVisible(False)
         self.tag_list.clear()
         self._set_idle_state()
 
@@ -806,6 +807,8 @@ class DetailPanel(QWidget):
             self.pack_label.setToolTip("Click to filter the grid to this pack")
 
         self.rig_label.setVisible(False)
+        self.animations_label.setVisible(False)
+        self.view_3d_button.setVisible(False)
         common_tags = sorted(set.intersection(*(set(asset.tags) for asset in assets))) if assets else []
         self.tag_list.clear()
         self.tag_list.addItems(common_tags)
@@ -898,14 +901,19 @@ class DetailPanel(QWidget):
             )
         self.rig_label.setVisible(bool(summary))
 
-        self.animation_combo.clear()
-        self.animation_combo.addItems(clips)
-        self.animation_row.setVisible(bool(clips))
+        self._clips = clips
+        self.animations_label.setText(
+            "animations: " + ", ".join(clips) if clips else ""
+        )
+        self.animations_label.setVisible(bool(clips))
+        self.view_3d_button.setVisible(
+            self._current_asset is not None and self._current_asset.asset_type == "model"
+        )
 
-    def _play_selected_animation(self) -> None:
-        clip = self.animation_combo.currentText()
-        if self._asset_id is not None and clip:
-            self._on_play_animation(self._asset_id, clip)
+    def _open_preview_for_current(self) -> None:
+        asset = self._current_asset
+        if asset is not None:
+            self._on_open_preview(asset.filename, asset.id, asset.content_hash)
 
     def _add_tag(self) -> None:
         name = self.new_tag_input.text().strip()
@@ -3578,7 +3586,7 @@ class MainWindow(QMainWindow):
             self._quick_export,
             self._handle_generate_thumbnail,
             self._handle_toggle_favorite,
-            self._handle_play_animation,
+            self._open_model_preview,
         )
 
         right_splitter = QSplitter(Qt.Vertical)
@@ -4458,7 +4466,14 @@ class MainWindow(QMainWindow):
         def on_complete(parts) -> None:
             from asset_catalogue.ui.model_preview_dialog import Model3DPreviewDialog
 
-            dialog = Model3DPreviewDialog(filename, parts, self)
+            clips = self._catalogue.list_animation_clips(asset_id)
+            dialog = Model3DPreviewDialog(
+                filename,
+                parts,
+                self,
+                clips=clips,
+                on_play_clip=lambda clip: self._handle_play_animation(asset_id, clip),
+            )
             dialog.exec()
 
         self._run_background_job(job, "Rendering 3D preview...", None, None, on_complete=on_complete)

@@ -37,7 +37,7 @@ def test_cached_frames_are_ordered_and_empty_when_unrendered(tmp_path: Path) -> 
     ]
 
 
-def test_render_clip_reuses_a_cached_render_without_launching_blender(tmp_path: Path) -> None:
+def test_render_clips_reuses_a_cached_render_without_launching_blender(tmp_path: Path) -> None:
     """The whole point of rendering lazily is undone if a second Play
     re-renders, so the cache check has to happen before Blender is
     considered at all -- proven here by passing a path that would fail
@@ -47,18 +47,51 @@ def test_render_clip_reuses_a_cached_render_without_launching_blender(tmp_path: 
     frames_dir.mkdir()
     (frames_dir / "frame_0000.png").write_bytes(b"png")
 
-    frames, error = animation_preview.render_clip(
+    results, error = animation_preview.render_clips(
         Path("definitely-not-a-real-blender.exe"),
         tmp_path / "model.glb",
         tmp_path,
         ".glb",
         {},
-        frames_dir,
-        "@idle",
+        {"@idle": frames_dir},
     )
 
     assert error is None
-    assert [p.name for p in frames] == ["frame_0000.png"]
+    assert [p.name for p in results["@idle"]] == ["frame_0000.png"]
+
+
+def test_render_clips_only_asks_blender_for_the_clips_not_yet_cached(tmp_path: Path) -> None:
+    """Every clip of a model is rendered in one session, but a clip
+    already on disk must not be re-rendered -- so a call where only some
+    are cached still has to reach Blender, while one where all are
+    cached must not.
+    """
+    cached, missing = tmp_path / "cached", tmp_path / "missing"
+    cached.mkdir()
+    (cached / "frame_0000.png").write_bytes(b"png")
+
+    results, error = animation_preview.render_clips(
+        Path("definitely-not-a-real-blender.exe"),
+        tmp_path / "model.glb",
+        tmp_path,
+        ".glb",
+        {},
+        {"@idle": cached},
+    )
+    assert error is None and results["@idle"]
+
+    # With one uncached clip it does try to run, and reports the failure
+    # rather than pretending it succeeded.
+    results, error = animation_preview.render_clips(
+        Path("definitely-not-a-real-blender.exe"),
+        tmp_path / "model.glb",
+        tmp_path,
+        ".glb",
+        {},
+        {"@walk": missing},
+    )
+    assert error is not None
+    assert results["@walk"] == []
 
 
 def test_playback_interval_preserves_roughly_the_clips_duration() -> None:

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -580,8 +581,21 @@ class Model3DPreviewDialog(QDialog):
     place of the 3D view. Right-click the preview to copy or save it.
     """
 
-    def __init__(self, filename: str, parts: list[PreviewPart], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        filename: str,
+        parts: list[PreviewPart],
+        parent: QWidget | None = None,
+        clips: list[str] | None = None,
+        on_play_clip=None,
+    ) -> None:
         super().__init__(parent)
+        # Playback lives here rather than in the detail panel: watching a
+        # character run belongs next to the model you can orbit. Both
+        # arguments are optional so every existing caller (and a static
+        # prop, which has no clips) keeps working untouched.
+        self._clips = clips or []
+        self._on_play_clip = on_play_clip
         self.setWindowTitle(f"3D Preview -- {filename}")
         self.resize(820, 560)
 
@@ -647,11 +661,27 @@ class Model3DPreviewDialog(QDialog):
         body.addWidget(self.parts_panel)
         layout.addLayout(body, stretch=1)
 
+        if self._clips and self._on_play_clip is not None:
+            animation_row = QHBoxLayout()
+            animation_row.addWidget(QLabel("Animation:"))
+            self.animation_combo = QComboBox()
+            self.animation_combo.addItems(self._clips)
+            animation_row.addWidget(self.animation_combo, stretch=1)
+            self.play_animation_button = QPushButton("▶ Play")
+            self.play_animation_button.clicked.connect(self._play_selected_clip)
+            animation_row.addWidget(self.play_animation_button)
+            layout.addLayout(animation_row)
+
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
 
         self._build(parts)
+
+    def _play_selected_clip(self) -> None:
+        clip = self.animation_combo.currentText()
+        if clip:
+            self._on_play_clip(clip)
 
     def _build(self, parts: list[PreviewPart]) -> None:
         if not parts:

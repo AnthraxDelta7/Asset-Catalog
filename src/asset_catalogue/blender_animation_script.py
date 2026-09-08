@@ -1,15 +1,15 @@
 """Runs inside Blender's own Python interpreter via `blender --background --python`.
 
-Renders one named animation clip of one model to a numbered PNG sequence.
+Renders animation clips of one model to numbered PNG sequences.
 Not part of the asset_catalogue package's normal import graph -- bpy only
 exists inside Blender. See animation_preview.py for the host-side half.
 
-Deliberately one clip per launch, unlike blender_thumbnail_script.py's
-batch: this only ever runs because someone pressed Play on a specific
-clip, so there's no batch to amortize Blender's startup over, and doing
-the work lazily is the entire point -- rendering every clip of every
-rigged asset up front would cost minutes per asset for frames nobody may
-ever look at.
+Lazy per *asset*, batched per *clip*: nothing renders until someone
+presses Play, but once they have, every clip of that model is rendered
+in the same session. Importing a large rigged character dominates the
+cost -- far more than rendering a Workbench frame -- so paying that
+import once makes every other clip of the same model nearly free, while
+still never touching a model nobody asked about.
 """
 
 import json
@@ -56,7 +56,16 @@ def setup_scene() -> None:
         background.inputs[0].default_value = (*WORLD_COLOR, 1.0)
     scene.world = world
 
-    scene.render.engine = "BLENDER_EEVEE"
+    # Workbench, not EEVEE. This is a motion preview -- what matters is
+    # reading the movement, not lighting fidelity -- and Workbench is the
+    # viewport's own solid-mode renderer, which is dramatically faster
+    # per frame. TEXTURE color keeps the model recognisable rather than
+    # flat grey.
+    scene.render.engine = "BLENDER_WORKBENCH"
+    scene.display.shading.light = "STUDIO"
+    scene.display.shading.color_type = "TEXTURE"
+    scene.display.shading.show_object_outline = False
+    scene.display.render_aa = "FXAA"
     scene.render.resolution_x = RESOLUTION
     scene.render.resolution_y = RESOLUTION
     scene.render.image_settings.file_format = "PNG"
@@ -141,14 +150,35 @@ def pick_frames(action, max_frames: int) -> list[int]:
     return [start + int(index * stride) for index in range(max_frames)]
 
 
+def render_clip(clip_name: str, output_dir: Path, mesh_objects: list, max_frames: int) -> int:
+    action = find_action(clip_name)
+    if action is None:
+        raise RuntimeError(f"no animation named {clip_name!r}")
+    bind_action(action)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    frames = pick_frames(action, max_frames)
+    aim_camera(*sampled_bounds(mesh_objects, frames))
+    for index, frame in enumerate(frames):
+        bpy.context.scene.frame_set(frame)
+        bpy.context.scene.render.filepath = str(output_dir / f"frame_{index:04d}")
+        bpy.ops.render.render(write_still=True)
+        print(f"ASSET_CATALOGUE_ANIM_FRAME|{clip_name}|{index + 1}|{len(frames)}", flush=True)
+    return len(frames)
+
+
 def main() -> None:
     with open(get_job_list_path(), "r", encoding="utf-8") as f:
         job = json.load(f)
 
-    output_dir = Path(job["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
     setup_scene()
+    max_frames = int(job.get("max_frames", 24))
 
+    # One import for the whole batch. Importing a large rigged character
+    # is by far the most expensive step here -- far more than rendering a
+    # Workbench frame -- so paying it once and rendering every requested
+    # clip in the same session is what makes the second, third and sixth
+    # clip effectively free compared to relaunching Blender per clip.
     try:
         importer = IMPORTERS.get(job["extension"].lower())
         if importer is None:
@@ -161,24 +191,17 @@ def main() -> None:
         )
         if not mesh_objects:
             raise RuntimeError("no mesh content to render")
+    except Exception as exc:  # noqa: BLE001
+        for clip_name in job["clips"]:
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|fail|{exc}", flush=True)
+        return
 
-        action = find_action(job["clip_name"])
-        if action is None:
-            raise RuntimeError(f"no animation named {job['clip_name']!r}")
-        bind_action(action)
-
-        frames = pick_frames(action, int(job.get("max_frames", 24)))
-        aim_camera(*sampled_bounds(mesh_objects, frames))
-
-        for index, frame in enumerate(frames):
-            bpy.context.scene.frame_set(frame)
-            bpy.context.scene.render.filepath = str(output_dir / f"frame_{index:04d}")
-            bpy.ops.render.render(write_still=True)
-            print(f"ASSET_CATALOGUE_ANIM_FRAME|{index + 1}|{len(frames)}", flush=True)
-
-        print(f"ASSET_CATALOGUE_ANIM_RESULT|ok|{len(frames)}", flush=True)
-    except Exception as exc:  # noqa: BLE001 - reported to the host, not raised
-        print(f"ASSET_CATALOGUE_ANIM_RESULT|fail|{exc}", flush=True)
+    for clip_name, output_dir in job["clips"].items():
+        try:
+            count = render_clip(clip_name, Path(output_dir), mesh_objects, max_frames)
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|ok|{count}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - one bad clip mustn't lose the rest
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|fail|{exc}", flush=True)
 
 
 main()
