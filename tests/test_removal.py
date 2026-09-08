@@ -157,3 +157,83 @@ def test_list_trashed_asset_ids_only_returns_trashed(
     stats = removal.remove_assets(conn, thumbnail_dir, assets_dir, [asset_id_a])
     assert stats.removed == 1
     assert removal.list_trashed_asset_ids(conn) == []
+
+
+# Every table carrying an asset_id REFERENCES assets(id). Kept as an
+# explicit list so the test below can compare it against what the schema
+# actually declares -- adding a child table without teaching
+# removal._remove_one_asset about it is the exact mistake that made
+# deleting a pack fail with "FOREIGN KEY constraint failed", and it stayed
+# invisible for two whole tables (broken_texture_materials,
+# excluded_tags) because a pack that never used those features deletes
+# fine regardless.
+_ASSET_CHILD_TABLES = {
+    "asset_tags",
+    "exports",
+    "excluded_tags",
+    "pending_conversions",
+    "broken_texture_materials",
+}
+
+
+def test_asset_child_tables_list_is_still_complete(conn: sqlite3.Connection) -> None:
+    """Fails the moment a new table references assets(id) -- at which
+    point it also has to be added to removal._remove_one_asset's delete
+    loop, or deleting any asset with a row in it raises IntegrityError.
+    """
+    tables = [
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    ]
+    referencing = {
+        table
+        for table in tables
+        if any(
+            fk["table"] == "assets"
+            for fk in conn.execute(f"PRAGMA foreign_key_list({table})")
+        )
+    }
+    assert referencing == _ASSET_CHILD_TABLES
+
+
+def test_remove_pack_succeeds_with_rows_in_every_child_table(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    """The real-world failure this reproduces: a pack whose assets had
+    missing textures recorded (broken_texture_materials) refused to
+    delete at all, because foreign_keys is ON and nothing cleared those
+    rows first.
+    """
+    from asset_catalogue import tagging
+
+    pack_id, asset_id = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+    tag_id = tagging.get_or_create_tag(conn, "weapons", None)
+    tagging.tag_asset(conn, asset_id, tag_id)
+    conn.execute(
+        "INSERT INTO exports (asset_id, project_identifier, destination_path, timestamp) "
+        "VALUES (?, 'proj', 'dest', '2026-01-01T00:00:00Z')",
+        (asset_id,),
+    )
+    conn.execute("INSERT INTO excluded_tags (asset_id, tag_id) VALUES (?, ?)", (asset_id, tag_id))
+    conn.execute(
+        "INSERT INTO pending_conversions (asset_id, original_relative_path, original_filename, "
+        "original_extension, original_content_hash, original_file_size, converted_at) "
+        "VALUES (?, 'a.fbx', 'a.fbx', '.fbx', 'hash', 1, '2026-01-01T00:00:00Z')",
+        (asset_id,),
+    )
+    conn.execute(
+        "INSERT INTO broken_texture_materials (asset_id, material_name) VALUES (?, 'Mat')",
+        (asset_id,),
+    )
+    conn.commit()
+
+    stats = removal.remove_pack(conn, thumbnail_dir, assets_dir, pack_id)
+
+    assert stats.pack_removed is True
+    assert stats.removed_assets == 1
+    for table in _ASSET_CHILD_TABLES:
+        remaining = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {table} WHERE asset_id = ?", (asset_id,)
+        ).fetchone()["n"]
+        assert remaining == 0, f"{table} still has rows for the deleted asset"
+    assert conn.execute("SELECT 1 FROM packs WHERE id = ?", (pack_id,)).fetchone() is None

@@ -92,12 +92,25 @@ def _remove_one_asset(
     )
     if library_path.exists():
         library_path.unlink()
-    conn.execute("DELETE FROM asset_tags WHERE asset_id = ?", (asset_id,))
-    conn.execute("DELETE FROM exports WHERE asset_id = ?", (asset_id,))
-    # pending_conversions.asset_id REFERENCES assets(id) with foreign_keys=ON
-    # -- deleting the asset row below without this first raises
-    # IntegrityError for any asset with an unresolved conversion pending.
-    conn.execute("DELETE FROM pending_conversions WHERE asset_id = ?", (asset_id,))
+    # Every table with an asset_id REFERENCES assets(id) has to be
+    # cleared before the asset row itself, because db.connect turns
+    # foreign_keys ON -- miss one and deleting the asset raises
+    # IntegrityError ("FOREIGN KEY constraint failed") for any asset that
+    # happens to have a row in it, which in practice means the failure
+    # shows up only on the packs where that feature was actually used.
+    # Both broken_texture_materials and excluded_tags were added to the
+    # schema after this function was first written and went unnoticed for
+    # exactly that reason: a pack with no missing textures and no
+    # explicitly-untagged assets deletes fine either way. Adding a new
+    # child table means adding it here too.
+    for table in (
+        "asset_tags",
+        "exports",
+        "excluded_tags",
+        "pending_conversions",
+        "broken_texture_materials",
+    ):
+        conn.execute(f"DELETE FROM {table} WHERE asset_id = ?", (asset_id,))
     conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
     return True
 
