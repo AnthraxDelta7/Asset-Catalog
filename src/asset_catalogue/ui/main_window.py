@@ -2498,6 +2498,17 @@ class UpdateDownloadDialog(QDialog):
         worker.start()
 
 
+def _render_all_label(models_pending: int) -> str:
+    """The proceed button's text. With a single-model pack the preview
+    already *is* the whole pack, so "Render Remaining 0 Model(s)" both
+    reads as nonsense and offers an action that does nothing -- it
+    becomes a plain confirmation instead.
+    """
+    if models_pending:
+        return f"Render Remaining {models_pending} Model(s)"
+    return "Looks Good -- Finish"
+
+
 class CalibrationReviewDialog(QDialog):
     """Shown right after a pack's first-ever model ingest, when exactly one
     model was rendered as a calibration preview (see
@@ -2542,8 +2553,13 @@ class CalibrationReviewDialog(QDialog):
         intro = QLabel(
             "This pack's models haven't been rendered before, so only one was "
             "rendered as a preview. Check it below -- if the orientation, scale, "
-            "or materials look wrong, adjust the corrections and re-render before "
-            f"rendering the remaining {models_pending} model(s)."
+            "or materials look wrong, adjust the corrections and re-render"
+            + (
+                f" before rendering the remaining {models_pending} model(s)."
+                if models_pending
+                else ". It's the only model in this pack, so there's nothing left "
+                "to render once it looks right."
+            )
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -2581,7 +2597,7 @@ class CalibrationReviewDialog(QDialog):
         layout.addLayout(rerender_row)
 
         proceed_row = QHBoxLayout()
-        self._render_all_button = QPushButton(f"Render Remaining {models_pending} Model(s)")
+        self._render_all_button = QPushButton(_render_all_label(models_pending))
         self._render_all_button.clicked.connect(self._on_render_all)
         proceed_row.addWidget(self._render_all_button)
 
@@ -2700,7 +2716,8 @@ class CalibrationReviewDialog(QDialog):
             self._preview_asset_id = next_asset_id
             self._reload_preview()
             models_pending = self._catalogue.count_pending_model_assets(self._pack_id)
-            self._render_all_button.setText(f"Render Remaining {models_pending} Model(s)")
+            self._models_pending = models_pending
+            self._render_all_button.setText(_render_all_label(models_pending))
             if stats.failed:
                 QMessageBox.warning(
                     self, "Asset Catalogue", "Render failed for this model -- check the pack's source files."
@@ -2709,6 +2726,14 @@ class CalibrationReviewDialog(QDialog):
         self._run_job(job, "Rendering next model as preview...", on_ok)
 
     def _on_render_all(self) -> None:
+        # A pack whose only model *is* the calibration preview has nothing
+        # left to render, so this finishes the dialog instead of launching
+        # Blender to do no work and then reporting "0 generated".
+        if self._catalogue.count_pending_model_assets(self._pack_id) == 0:
+            self.result_action = "render_all"
+            self.accept()
+            return
+
         def job(report):
             report("Checking Blender installation...")
             blender_exe = self._catalogue.resolve_blender()

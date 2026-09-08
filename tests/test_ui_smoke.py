@@ -362,3 +362,62 @@ def test_detail_panel_shows_rig_and_clips_only_for_an_animated_asset(tmp_path: P
     assert panel.rig_label.text() == ""
     assert panel.animation_combo.count() == 0
     conn.close()
+
+
+def _calibration_dialog(tmp_path: Path, model_count: int):
+    from PySide6.QtWidgets import QApplication
+
+    from asset_catalogue import db, ingest
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import CalibrationReviewDialog
+    from conftest import write_minimal_glb
+
+    staging, library = tmp_path / "staging", tmp_path / "library"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir(parents=True)
+    for index in range(model_count):
+        # Distinct content per file: assets.content_hash is UNIQUE, so
+        # byte-identical models would dedupe down to a single asset.
+        write_minimal_glb(pack / f"model_{index}.glb", {"meshes": [{"name": f"m{index}"}]})
+
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    ids = [row["id"] for row in conn.execute("SELECT id FROM assets ORDER BY id")]
+    # The calibration preview is rendered; the rest stay pending, exactly
+    # as generate_pack_thumbnails leaves them.
+    conn.execute("UPDATE assets SET thumbnail_status = 'done' WHERE id = ?", (ids[0],))
+    conn.commit()
+
+    QApplication.instance() or QApplication([])
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    pending = catalogue.count_pending_model_assets(pack_id)
+    dialog = CalibrationReviewDialog(catalogue, pack_id, "Pack", ids[0], pending, {})
+    return conn, dialog, pending
+
+
+def test_calibration_dialog_offers_no_render_when_the_pack_has_one_model(tmp_path: Path) -> None:
+    """A pack whose only model *is* the calibration preview has nothing
+    left to render, so the proceed button must not read "Render Remaining
+    0 Model(s)" or launch Blender to do no work.
+    """
+    conn, dialog, pending = _calibration_dialog(tmp_path, model_count=1)
+
+    assert pending == 0
+    assert dialog._render_all_button.text() == "Looks Good -- Finish"
+    # resolve_blender would raise if the render path were entered at all.
+    dialog._catalogue.resolve_blender = lambda: (_ for _ in ()).throw(
+        AssertionError("Blender must not run when nothing is pending")
+    )
+    dialog._on_render_all()
+    assert dialog.result_action == "render_all"
+    conn.close()
+
+
+def test_calibration_dialog_still_offers_to_render_the_rest(tmp_path: Path) -> None:
+    conn, dialog, pending = _calibration_dialog(tmp_path, model_count=3)
+
+    assert pending == 2
+    assert dialog._render_all_button.text() == "Render Remaining 2 Model(s)"
+    conn.close()
