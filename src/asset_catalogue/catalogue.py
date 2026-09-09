@@ -93,6 +93,11 @@ class Catalogue:
         # callers that don't care about the interactive 3D preview (most
         # tests) never need to pass this explicitly.
         self._preview_dir = preview_dir if preview_dir is not None else thumbnail_dir.parent / "previews"
+        # Set by extract_godot_scenes_batch_bg: the .glb files that run
+        # actually produced, which ingest then treats as the pack's only
+        # models. Initialised here so reading it never depends on an
+        # extraction having happened first.
+        self.last_extracted_glbs: set[Path] = set()
 
     @classmethod
     def open(cls) -> Catalogue:
@@ -113,9 +118,44 @@ class Catalogue:
     def staging_folder(self) -> Path | None:
         return self._staging_folder
 
-    def list_packs(self) -> list[str]:
-        rows = self._conn.execute("SELECT name FROM packs ORDER BY name").fetchall()
+    def list_packs(self, include_hidden: bool = False) -> list[str]:
+        """Pack names for the filter panel. Hidden packs are left out by
+        default -- that's the whole point of hiding one -- but the pack
+        manager passes include_hidden so they can be unhidden again.
+        """
+        where = "" if include_hidden else " WHERE hidden = 0"
+        rows = self._conn.execute(f"SELECT name FROM packs{where} ORDER BY name").fetchall()
         return [row["name"] for row in rows]
+
+    def list_pack_summaries(self) -> list[sqlite3.Row]:
+        """Every pack with the counts the pack manager shows, in one
+        query rather than a per-pack lookup -- a library with dozens of
+        packs would otherwise do dozens of round trips to open a dialog.
+        Trashed assets are excluded from the counts so a pack doesn't
+        claim to hold assets the grid won't show.
+        """
+        return self._conn.execute(
+            "SELECT packs.id, packs.name, packs.pack_folder, packs.creator, packs.licence, "
+            "packs.source_url, packs.notes, packs.rating, packs.hidden, packs.date_added, "
+            "COUNT(assets.id) AS asset_count, "
+            "SUM(CASE WHEN assets.asset_type = 'model' THEN 1 ELSE 0 END) AS model_count "
+            "FROM packs LEFT JOIN assets "
+            "  ON assets.pack_id = packs.id AND assets.deleted_at IS NULL "
+            "GROUP BY packs.id ORDER BY packs.name"
+        ).fetchall()
+
+    def set_packs_hidden(self, pack_ids: list[int], hidden: bool) -> None:
+        packs.set_hidden(self._conn, pack_ids, hidden)
+
+    def pack_source_exists(self, pack_folder: str) -> bool:
+        """Whether the pack's original staged folder is still on disk --
+        what re-ingest needs, and the thing most likely to have been
+        cleaned up since. Checked so the manager can say so up front
+        rather than failing partway through.
+        """
+        if self._staging_folder is None or pack_folder is None:
+            return False
+        return (self._staging_folder / pack_folder).exists()
 
     def list_asset_types(self) -> list[str]:
         rows = self._conn.execute(
@@ -572,13 +612,22 @@ class Catalogue:
             raise RuntimeError("No staging folder configured.")
         godot_exe = self.resolve_godot()
         results = []
+        extracted: set[Path] = set()
         for project_folder_name in project_folder_names:
             project_root = self._staging_folder / project_folder_name
             scenes = godot_export.find_scenes(project_root)
             stats = godot_export.export_scenes_to_glb(
                 godot_exe, project_root, scenes, include_colliders, on_progress=on_progress
             )
+            # Which .glb files actually landed -- ingest needs the exact
+            # set, since an extracted scene's name doesn't line up with
+            # the source model it was built from.
+            for scene in scenes:
+                exported = scene.with_suffix(".glb")
+                if exported.is_file():
+                    extracted.add(exported)
             results.append((project_folder_name, stats))
+        self.last_extracted_glbs = extracted
         return results
 
     def _resolve_pack_root(self, pack_folder_name: str) -> tuple[Path, str]:
@@ -633,6 +682,7 @@ class Catalogue:
         source_url: str | None,
         on_progress: Callable[[str], None] | None = None,
         format_selection: set[str] | None = None,
+        models_allowlist: set[Path] | None = None,
     ) -> tuple[ingest.IngestStats, list[str]]:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
@@ -655,7 +705,12 @@ class Catalogue:
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
             stats = ingest.ingest_pack(
-                conn, pack_root, pack_id, on_progress=on_progress, format_selection=format_selection
+                conn,
+                pack_root,
+                pack_id,
+                on_progress=on_progress,
+                format_selection=format_selection,
+                models_allowlist=models_allowlist,
             )
             stats.archived = library_assets.archive_pack(
                 conn, self._staging_folder, self._assets_dir, pack_id, on_progress=on_progress

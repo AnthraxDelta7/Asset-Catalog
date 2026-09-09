@@ -98,6 +98,9 @@ class IngestStats:
     # (an extension this app doesn't handle at all) -- this one's a real,
     # recognized asset that was deliberately left out by choice.
     skipped_duplicate_formats: int = 0
+    # Source model files skipped because the pack's own Godot scenes were
+    # extracted and supersede them -- see ingest_pack's models_allowlist.
+    skipped_superseded_models: int = 0
     archived: int = 0
     thumbnails_generated: int = 0
     thumbnails_failed: int = 0
@@ -285,8 +288,20 @@ def ingest_pack(
     pack_id: int,
     on_progress: ProgressCallback | None = None,
     format_selection: set[str] | None = None,
+    models_allowlist: set[Path] | None = None,
 ) -> IngestStats:
     """Walks pack_root and catalogues every file as an asset.
+
+    models_allowlist, when given, is the only set of *model* files that
+    may be catalogued; every other model found is skipped. Used after a
+    Godot project's scenes have been extracted to .glb: the raw .gltf/
+    .fbx under Models/ are inputs those scenes were built from, not
+    separate assets, and in a Unity-converted pack they reference a
+    texture atlas the pack doesn't even ship -- so cataloguing both gives
+    two copies of every prop, one of them untextured. Deliberately an
+    explicit set of paths rather than an extension rule: the names don't
+    line up (SM_Bg_01.prefab.glb vs SM_Bg_01.gltf), so there's nothing to
+    match on. Non-model assets are untouched.
 
     format_selection, when given, restricts which format a same-named
     asset is actually catalogued in when the pack ships more than one
@@ -316,6 +331,13 @@ def ingest_pack(
         files = kept_files
 
     for entry in files:
+        if (
+            models_allowlist is not None
+            and classify(entry.suffix) == "model"
+            and entry not in models_allowlist
+        ):
+            stats.skipped_superseded_models += 1
+            continue
         stats.total += 1
         # A single-file pack is rooted at the file itself, so its path
         # relative to that root would be "." -- it's just the filename,

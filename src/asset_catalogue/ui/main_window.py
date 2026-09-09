@@ -216,7 +216,15 @@ class FilterPanel(QWidget):
         # field directly under the asset search reads as clutter.
         pack_header = QHBoxLayout()
         pack_header.setContentsMargins(0, 0, 0, 0)
-        pack_header.addWidget(QLabel("Pack"))
+        # A link rather than a plain heading: this list is a filter, and
+        # the full pack view is a different job (bulk edits, contents,
+        # hiding). Making the heading the way in keeps that discoverable
+        # without spending another toolbar button on it.
+        self.packs_link = QLabel('<a href="#packs" style="color:#7aa2f7;">Packs &rsaquo;</a>')
+        self.packs_link.setToolTip("View all packs")
+        self.packs_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.packs_link.linkActivated.connect(lambda _href: self._on_open_pack_manager())
+        pack_header.addWidget(self.packs_link)
         pack_header.addStretch(1)
         self.pack_search_toggle = QToolButton()
         # Qt's own theme icon set, not an emoji character and not a
@@ -4489,12 +4497,20 @@ class MainWindow(QMainWindow):
             # the dialog's list, since a .zip source can't be inspected
             # until ingest has extracted it.
             projects = self._catalogue.find_godot_projects_for_pack(dialog.pack_folder_name)
+            models_allowlist = None
             if projects:
                 report(
                     f"Godot project detected -- converting {self._catalogue.count_godot_scenes(projects)} "
                     "scene(s) to .glb so their textures come through..."
                 )
                 self._catalogue.extract_godot_scenes_batch_bg(projects, on_progress=report)
+                # Only the extracted scenes get catalogued as models. The
+                # raw .gltf/.fbx they were built from are inputs, and in
+                # these packs they reference a texture atlas the pack
+                # doesn't ship -- cataloguing both gave two copies of
+                # every prop, one of them permanently untextured.
+                models_allowlist = self._catalogue.last_extracted_glbs
+                report(f"Cataloguing the {len(models_allowlist)} extracted scene(s) as this pack's models.")
             return self._catalogue.ingest_pack_bg(
                 dialog.pack_folder_name,
                 dialog.pack_name,
@@ -4503,6 +4519,7 @@ class MainWindow(QMainWindow):
                 dialog.source_url,
                 on_progress=report,
                 format_selection=format_selection,
+                models_allowlist=models_allowlist,
             )
 
         def format_result(result: tuple) -> str:

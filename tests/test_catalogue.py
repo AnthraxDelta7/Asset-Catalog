@@ -799,3 +799,52 @@ def test_list_broken_texture_materials_reflects_broken_textures_module(
     assert all_rows[0]["asset_id"] == asset_id
     assert all_rows[0]["material_name"] == "MaterialA"
     assert catalogue.list_broken_texture_materials_for_asset(asset_id) == ["MaterialA"]
+
+
+def test_ingest_skips_source_models_superseded_by_extracted_scenes(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch
+) -> None:
+    """A Unity-converted Godot pack ships both the authored scenes and
+    the raw models they were built from. The raw ones reference a texture
+    atlas the pack doesn't contain, so cataloguing both gives two copies
+    of every prop with the untextured one indistinguishable in the grid.
+    Real case: POLY_ForestVillage came in as 201 good .glb plus 193 .gltf
+    carrying 192 broken-texture materials.
+    """
+    from asset_catalogue import ingest as ingest_module
+    from conftest import write_minimal_glb, write_texture
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", settings_path)
+    settings.save(
+        settings.Settings(
+            staging_folder=str(catalogue.staging_folder()),
+            library_folder=str(catalogue._thumbnail_dir.parent),
+        )
+    )
+    pack_root = catalogue.staging_folder() / "GodotPack"
+    (pack_root / "Models").mkdir(parents=True)
+    (pack_root / "Prefabs").mkdir(parents=True)
+    # Names deliberately don't line up, exactly as the real converter
+    # leaves them -- there is nothing to match these on.
+    write_minimal_glb(pack_root / "Models" / "SM_Bg_01.gltf", {"meshes": [{"name": "raw"}]})
+    extracted = pack_root / "Prefabs" / "SM_Bg_01.prefab.glb"
+    write_minimal_glb(extracted, {"meshes": [{"name": "scene"}]})
+    write_texture(catalogue.staging_folder(), "GodotPack", "atlas.png")
+
+    pack_id, _ = ingest.get_or_create_pack(catalogue._conn, "GodotPack", "GodotPack", None, None, None)
+    stats = ingest_module.ingest_pack(
+        catalogue._conn, pack_root, pack_id, models_allowlist={extracted}
+    )
+
+    rows = [
+        row["relative_path"]
+        for row in catalogue._conn.execute(
+            "SELECT relative_path FROM assets WHERE pack_id = ? ORDER BY relative_path", (pack_id,)
+        )
+    ]
+    assert "Prefabs/SM_Bg_01.prefab.glb" in rows
+    assert "Models/SM_Bg_01.gltf" not in rows
+    assert stats.skipped_superseded_models == 1
+    # Textures and other non-model assets are untouched by the rule.
+    assert any(row.endswith("atlas.png") for row in rows)

@@ -86,3 +86,19 @@ def set_corrections(conn: sqlite3.Connection, pack_id: int, corrections: dict) -
         (json.dumps(corrections) if corrections else None, pack_id),
     )
     conn.commit()
+
+
+def set_hidden(conn: sqlite3.Connection, pack_ids: list[int], hidden: bool) -> None:
+    """Hides packs from the filter panel's list. Purely a listing
+    concern: the assets stay catalogued, searchable and exportable, and
+    an asset from a hidden pack still shows its pack name. Meant for the
+    long tail of packs someone has finished with, not as a delete.
+    """
+    if not pack_ids:
+        return
+    placeholders = ",".join("?" for _ in pack_ids)
+    conn.execute(
+        f"UPDATE packs SET hidden = ? WHERE id IN ({placeholders})",
+        [1 if hidden else 0, *pack_ids],
+    )
+    conn.commit()

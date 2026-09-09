@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS packs (
     date_added TEXT NOT NULL,
     corrections TEXT,
     notes TEXT,
-    rating INTEGER
+    rating INTEGER,
+    hidden INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -132,6 +133,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
     _ensure_column(conn, "packs", "notes", "notes TEXT")
     _ensure_column(conn, "packs", "rating", "rating INTEGER")
+    # Hidden packs stay fully catalogued and searchable -- this only
+    # takes them out of the filter panel's pack list, which is the thing
+    # that gets unusable once a library holds dozens of packs. Not a
+    # soft-delete: see assets.deleted_at for that.
+    _ensure_column(conn, "packs", "hidden", "hidden INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "assets", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "assets", "deleted_at", "deleted_at TEXT")
     # Set/cleared by blender_render.generate_model_thumbnails whenever a
