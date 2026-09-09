@@ -294,6 +294,8 @@ def test_export_scenes_to_glb_orchestrates_exported_failed_and_missing(tmp_path:
     with (
         patch.object(godot_export.subprocess, "Popen", return_value=_fake_export_popen(lines)),
         patch.object(godot_export, "_has_real_geometry", side_effect=fake_has_real_geometry),
+        # The import pass is a separate Godot run with its own test below.
+        patch.object(godot_export, "_run_godot_import_pass", return_value=True),
     ):
         stats = godot_export.export_scenes_to_glb(Path("godot.exe"), project_root, scene_paths)
 
@@ -427,3 +429,48 @@ def test__run_godot_import_pass_checks_process_returncode() -> None:
     fake_result.returncode = 1
     with patch.object(godot_export.subprocess, "run", return_value=fake_result):
         assert godot_export._run_godot_import_pass(Path("godot.exe"), Path("Project")) is False
+
+
+def test_export_scenes_imports_the_project_first(tmp_path: Path) -> None:
+    """A freshly downloaded pack has never been opened in the Godot
+    editor, and .godot/ is conventionally gitignored so packs routinely
+    ship without one. Without an import pass, load() fails on every
+    scene and the whole extraction reports "could not load scene" --
+    which reads as the extractor being broken rather than a missing
+    prerequisite. Confirmed against a real 201-scene Unity-converted
+    pack: 0 exported before the import pass, all 3 sampled after.
+    """
+    project_root = tmp_path / "Project"
+    project_root.mkdir()
+    scene = project_root / "prop.tscn"
+    scene.write_text("")
+    scene.with_suffix(".glb").write_bytes(b"fake glb bytes")
+
+    with (
+        patch.object(godot_export.subprocess, "Popen", return_value=_fake_export_popen([])),
+        patch.object(godot_export, "_has_real_geometry", return_value=True),
+        patch.object(godot_export, "_run_godot_import_pass", return_value=True) as import_pass,
+    ):
+        godot_export.export_scenes_to_glb(Path("godot.exe"), project_root, [scene])
+
+    import_pass.assert_called_once()
+
+
+def test_a_failed_import_pass_stops_the_export(tmp_path: Path) -> None:
+    """Nothing can load without it, so carrying on would just report
+    every scene failing for a reason that hides the real one.
+    """
+    project_root = tmp_path / "Project"
+    project_root.mkdir()
+    scene = project_root / "prop.tscn"
+    scene.write_text("")
+
+    with (
+        patch.object(godot_export.subprocess, "Popen") as popen,
+        patch.object(godot_export, "_run_godot_import_pass", return_value=False),
+    ):
+        stats = godot_export.export_scenes_to_glb(Path("godot.exe"), project_root, [scene])
+
+    popen.assert_not_called()
+    assert stats.failed == 1
+    assert any("import pass failed" in f for f in stats.failures)

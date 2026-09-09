@@ -239,6 +239,21 @@ def export_scenes_to_glb(
 
     jobs, output_by_scene = _build_export_jobs(project_root, scene_paths)
 
+    # An import pass first, always. This used to assume the project was
+    # already imported "from the user's own prior use of it in the real
+    # Godot editor" -- which is false for exactly the case this feature
+    # exists for: a freshly downloaded pack nobody has opened. .godot/ is
+    # conventionally gitignored, so packs routinely ship without one, and
+    # without it load() fails on every scene with "could not load
+    # resource". That surfaced as every scene failing to export rather
+    # than as a missing prerequisite, which is why it looked like the
+    # extractor was broken on these packs.
+    report("Importing the project into Godot (first run can take a while)...")
+    if not _run_godot_import_pass(godot_exe, project_root):
+        stats.failed = len(jobs)
+        stats.failures.append("Godot's headless import pass failed")
+        return stats
+
     report(
         f"Starting Godot to export {len(jobs)} scene{'s' if len(jobs) != 1 else ''} "
         f"from {project_root.name}..."
