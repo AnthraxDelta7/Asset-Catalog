@@ -86,9 +86,12 @@ def test_refresh_loads_broken_rows(qapp, catalogue_with_broken_material) -> None
     catalogue, _pack_id, asset_id = catalogue_with_broken_material
     dialog = MissingTexturesDialog(catalogue)
 
+    # Columns are Pack | Material | Assets affected: the list groups by
+    # (pack, material), which is the unit every action here works on.
+    # A single affected asset shows its filename rather than "1 assets".
     assert dialog.table.rowCount() == 1
-    assert dialog.table.item(0, 1).text() == "model.fbx"
-    assert dialog.table.item(0, 2).text() == "BrokenMat"
+    assert dialog.table.item(0, 1).text() == "BrokenMat"
+    assert dialog.table.item(0, 2).text() == "model.fbx"
     assert dialog._rows[0]["asset_id"] == asset_id
 
 
@@ -266,3 +269,47 @@ def test_add_supplementary_file_selected_does_not_clear_the_row(
     mock_regenerate.assert_called_once()
     assert broken_textures.list_for_asset(catalogue._conn, asset_id) == ["BrokenMat"]
     assert dialog.table.rowCount() == 1
+
+
+def test_many_assets_sharing_one_material_collapse_to_a_single_row(
+    qapp, catalogue_with_broken_material
+) -> None:
+    """A pack whose hundreds of models all use one material was listing
+    one row per model -- reading as hundreds of problems when a single
+    Browse fixes every one of them, since an override applies pack-wide
+    to the material.
+    """
+    from asset_catalogue import broken_textures
+    from asset_catalogue.ui.main_window import MissingTexturesDialog
+
+    catalogue, _pack_id, _asset_id = catalogue_with_broken_material
+    conn = catalogue._conn
+    for index in range(4):
+        _pack, extra_id = _make_model_asset(
+            conn, catalogue.staging_folder(), "Pack", f"extra{index}.fbx"
+        )
+        broken_textures.replace_for_asset(conn, extra_id, ["BrokenMat"])
+    conn.commit()
+
+    dialog = MissingTexturesDialog(catalogue)
+
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 2).text() == "5 assets"
+    # The representative row still carries what the actions need.
+    assert dialog._rows[0]["material_name"] == "BrokenMat"
+
+
+def test_different_materials_stay_separate_rows(qapp, catalogue_with_broken_material) -> None:
+    from asset_catalogue import broken_textures
+    from asset_catalogue.ui.main_window import MissingTexturesDialog
+
+    catalogue, _pack_id, _asset_id = catalogue_with_broken_material
+    conn = catalogue._conn
+    _pack, other_id = _make_model_asset(conn, catalogue.staging_folder(), "Pack", "other.fbx")
+    broken_textures.replace_for_asset(conn, other_id, ["AnotherMat"])
+    conn.commit()
+
+    dialog = MissingTexturesDialog(catalogue)
+
+    materials = {dialog.table.item(row, 1).text() for row in range(dialog.table.rowCount())}
+    assert materials == {"BrokenMat", "AnotherMat"}

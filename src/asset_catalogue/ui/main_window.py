@@ -3303,7 +3303,7 @@ class MissingTexturesDialog(QDialog):
         layout.addWidget(intro)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Pack", "Asset", "Material"])
+        self.table.setHorizontalHeaderLabels(["Pack", "Material", "Assets affected"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -3341,14 +3341,33 @@ class MissingTexturesDialog(QDialog):
         self._refresh()
 
     def _refresh(self) -> None:
-        self._rows = self._catalogue.list_broken_texture_materials()
+        rows = self._catalogue.list_broken_texture_materials()
         if self._asset_id_filter is not None:
-            self._rows = [row for row in self._rows if row["asset_id"] == self._asset_id_filter]
-        self.table.setRowCount(len(self._rows))
-        for i, row in enumerate(self._rows):
-            self.table.setItem(i, 0, QTableWidgetItem(row["pack_name"]))
-            self.table.setItem(i, 1, QTableWidgetItem(row["filename"]))
-            self.table.setItem(i, 2, QTableWidgetItem(row["material_name"]))
+            rows = [row for row in rows if row["asset_id"] == self._asset_id_filter]
+
+        # Grouped by (pack, material), because that's already the unit
+        # every action here works on -- an override or a "no texture
+        # needed" applies pack-wide to the material, not to one asset. A
+        # pack whose 500 models all share one material was listing 500
+        # near-identical rows, which reads as 500 problems when a single
+        # Browse fixes all of them at once.
+        grouped: dict[tuple[str, str], list] = {}
+        for row in rows:
+            grouped.setdefault((row["pack_name"], row["material_name"]), []).append(row)
+        self._groups = [
+            (pack, material, members) for (pack, material), members in sorted(grouped.items())
+        ]
+        # One representative per group: the actions only need its pack_id
+        # and material_name, both identical across the group.
+        self._rows = [members[0] for _pack, _material, members in self._groups]
+
+        self.table.setRowCount(len(self._groups))
+        for i, (pack, material, members) in enumerate(self._groups):
+            self.table.setItem(i, 0, QTableWidgetItem(pack))
+            self.table.setItem(i, 1, QTableWidgetItem(material))
+            count = len(members)
+            label = members[0]["filename"] if count == 1 else f"{count} assets"
+            self.table.setItem(i, 2, QTableWidgetItem(label))
         self.table.resizeColumnsToContents()
         has_rows = bool(self._rows)
         self.browse_button.setEnabled(has_rows)
