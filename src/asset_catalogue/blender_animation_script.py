@@ -168,6 +168,17 @@ def pick_frames(action, max_frames: int) -> list[int]:
     return [start + int(index * stride) for index in range(max_frames)]
 
 
+# The clip name goes LAST in every reported line, and is the only field
+# allowed to contain the "|" delimiter. Blender's FBX importer names
+# actions "Object|Object|Action" -- the standard FBX convention, and what
+# every Mixamo file looks like -- so a clip name in the middle of the
+# line silently corrupted the parse and reported a successful render as a
+# failure. Anything else interpolated into a line is sanitised, since a
+# free-text exception could otherwise do the same.
+def _safe(value) -> str:
+    return str(value).replace("|", "/")
+
+
 def render_clip(clip_name: str, output_dir: Path, mesh_objects: list, max_frames: int) -> int:
     action = find_action(clip_name)
     if action is None:
@@ -181,7 +192,7 @@ def render_clip(clip_name: str, output_dir: Path, mesh_objects: list, max_frames
         bpy.context.scene.frame_set(frame)
         bpy.context.scene.render.filepath = str(output_dir / f"frame_{index:04d}")
         bpy.ops.render.render(write_still=True)
-        print(f"ASSET_CATALOGUE_ANIM_FRAME|{clip_name}|{index + 1}|{len(frames)}", flush=True)
+        print(f"ASSET_CATALOGUE_ANIM_FRAME|{index + 1}|{len(frames)}|{clip_name}", flush=True)
     return len(frames)
 
 
@@ -211,15 +222,15 @@ def main() -> None:
             raise RuntimeError("no mesh content to render")
     except Exception as exc:  # noqa: BLE001
         for clip_name in job["clips"]:
-            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|fail|{exc}", flush=True)
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|fail|{_safe(exc)}|{clip_name}", flush=True)
         return
 
     for clip_name, output_dir in job["clips"].items():
         try:
             count = render_clip(clip_name, Path(output_dir), mesh_objects, max_frames)
-            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|ok|{count}", flush=True)
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|ok|{count}|{clip_name}", flush=True)
         except Exception as exc:  # noqa: BLE001 - one bad clip mustn't lose the rest
-            print(f"ASSET_CATALOGUE_ANIM_RESULT|{clip_name}|fail|{exc}", flush=True)
+            print(f"ASSET_CATALOGUE_ANIM_RESULT|fail|{_safe(exc)}|{clip_name}", flush=True)
 
 
 main()

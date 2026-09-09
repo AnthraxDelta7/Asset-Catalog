@@ -153,11 +153,14 @@ def render_clips(
 
     failures = []
     for line in (process.stdout + process.stderr).splitlines():
+        # Clip name last, and it takes the whole remainder: it's the one
+        # field that can legitimately contain "|" (Blender names an
+        # FBX-imported action "Object|Object|Action").
         if line.startswith("ASSET_CATALOGUE_ANIM_FRAME|"):
-            _, clip, done, total = line.split("|", 3)
+            _, done, total, clip = line.split("|", 3)
             report(f"Rendering {clip}: frame {done}/{total}")
         elif line.startswith("ASSET_CATALOGUE_ANIM_RESULT|"):
-            _, clip, status, detail = line.split("|", 3)
+            _, status, detail, clip = line.split("|", 3)
             if status == "ok":
                 results[clip] = cached_frames(targets[clip])
             else:

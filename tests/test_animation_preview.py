@@ -100,3 +100,43 @@ def test_playback_interval_preserves_roughly_the_clips_duration() -> None:
     # Floored so a 2-frame clip can't flicker.
     assert animation_preview.frame_interval_ms(2) >= 40
     assert animation_preview.frame_interval_ms(0) > 0
+
+
+def test_a_clip_name_containing_the_delimiter_still_parses(tmp_path: Path, monkeypatch) -> None:
+    """Blender names an FBX-imported action "Object|Object|Action" -- the
+    standard FBX convention, and what every Mixamo file looks like. With
+    the clip name anywhere but last in the reported line, that "|" split
+    the line into nonsense and a successful render was reported as a
+    failure, with its frames already sitting on disk.
+    """
+    import subprocess
+
+    clip = "CharacterRig|CharacterRig|Wave"
+    frames_dir = tmp_path / "frames"
+
+    class _FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self) -> None:
+            # Exactly what blender_animation_script.py prints.
+            self.stdout = (
+                f"ASSET_CATALOGUE_ANIM_FRAME|1|2|{clip}\n"
+                f"ASSET_CATALOGUE_ANIM_FRAME|2|2|{clip}\n"
+                f"ASSET_CATALOGUE_ANIM_RESULT|ok|2|{clip}\n"
+            )
+
+    def fake_run(*_args, **_kwargs):
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(2):
+            (frames_dir / f"frame_{index:04d}.png").write_bytes(b"png")
+        return _FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results, error = animation_preview.render_clips(
+        Path("blender.exe"), tmp_path / "rig.fbx", tmp_path, ".fbx", {}, {clip: frames_dir}
+    )
+
+    assert error is None
+    assert len(results[clip]) == 2
