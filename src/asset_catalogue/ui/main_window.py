@@ -3667,6 +3667,7 @@ class MainWindow(QMainWindow):
         for command_id, handler in {
             "file.settings": self._open_settings_dialog,
             "file.switch_library": self._switch_library,
+            "file.shortcuts": self._open_shortcuts_dialog,
             "file.exit": self.close,
             # self.grid doesn't exist yet at this point in __init__ -- the
             # lambda defers the lookup to trigger-time.
@@ -3715,7 +3716,14 @@ class MainWindow(QMainWindow):
                 else:
                     menu.addAction(self.commands.action(command_id))
 
-        add(menu_bar.addMenu("&File"), "file.settings", "file.switch_library", None, "file.exit")
+        add(
+            menu_bar.addMenu("&File"),
+            "file.settings",
+            "file.shortcuts",
+            "file.switch_library",
+            None,
+            "file.exit",
+        )
         add(
             menu_bar.addMenu("&Edit"),
             "edit.select_all",
@@ -3870,6 +3878,24 @@ class MainWindow(QMainWindow):
         current = rows[0] if rows else -delta
         target = max(0, min(len(self._asset_ids) - 1, current + delta))
         self.table.selectRow(target)
+
+    def _open_shortcuts_dialog(self) -> None:
+        """Applies new bindings to the live registry rather than asking
+        for a restart, and stores only what differs from the defaults so
+        a future change to a default still reaches anyone who never
+        rebound that command.
+        """
+        from asset_catalogue.ui.shortcuts_dialog import ShortcutsDialog
+
+        current = {command_id: self.commands.shortcut_of(command_id) for command_id in self.commands.actions}
+        dialog = ShortcutsDialog(current, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        overrides = self.commands.overrides_from(dialog.sequences)
+        self.commands.apply_shortcuts(overrides)
+        s = settings.load()
+        s.shortcuts = overrides
+        settings.save(s)
 
     def _on_focus_changed(self, _old, new) -> None:
         from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit

@@ -40,6 +40,7 @@ COMMANDS: list[Command] = [
     # -- File ---------------------------------------------------------
     Command("file.settings", "Settings...", "Ctrl+,", "File"),
     Command("file.switch_library", "Switch Library...", "Ctrl+Shift+O", "File"),
+    Command("file.shortcuts", "Keyboard Shortcuts...", "Ctrl+K", "File"),
     Command("file.exit", "Exit", "Ctrl+Q", "File"),
     # -- Edit / filtering ---------------------------------------------
     Command("edit.select_all", "Select All", "Ctrl+A", "Edit"),
@@ -121,15 +122,30 @@ class CommandRegistry:
         (see settings.shortcuts) layered over the declared defaults, so a
         rebinding UI only ever has to write that dict.
         """
-        overrides = overrides or {}
         for command in COMMANDS:
             action = QAction(command.label, self.parent)
             action.setObjectName(command.id)
+            self.actions[command.id] = action
+        self.apply_shortcuts(overrides or {})
+
+    def apply_shortcuts(self, overrides: dict[str, str]) -> None:
+        """Re-binds every command from `overrides` layered over the
+        declared defaults. Deliberately updates the existing actions
+        rather than rebuilding them -- rebuilding would drop every
+        signal connection and every menu's reference to them, so the
+        shortcuts dialog could apply a change only by restarting the app.
+
+        Honours the current typing state, so applying new bindings while
+        a text field happens to be focused doesn't re-arm bare keys
+        underneath the cursor.
+        """
+        for command in COMMANDS:
             sequence = overrides.get(command.id, command.default_shortcut)
             self._shortcuts[command.id] = sequence
-            if sequence:
-                action.setShortcut(QKeySequence(sequence))
-            self.actions[command.id] = action
+            suppressed = self._text_focus and is_bare_key(sequence)
+            self.actions[command.id].setShortcut(
+                QKeySequence() if (suppressed or not sequence) else QKeySequence(sequence)
+            )
 
     def action(self, command_id: str) -> QAction:
         return self.actions[command_id]
@@ -172,6 +188,18 @@ class CommandRegistry:
                 continue
             action = self.actions[command_id]
             action.setShortcut(QKeySequence() if has_text_focus else QKeySequence(sequence))
+
+    def overrides_from(self, sequences: dict[str, str]) -> dict[str, str]:
+        """Reduces a full id -> key mapping to only what actually differs
+        from the declared defaults. Keeps settings.json small and, more
+        importantly, lets a later change to a default reach users who
+        never touched that particular command.
+        """
+        return {
+            command.id: sequences[command.id]
+            for command in COMMANDS
+            if command.id in sequences and sequences[command.id] != command.default_shortcut
+        }
 
     def shortcut_of(self, command_id: str) -> str:
         return self._shortcuts.get(command_id, "")
