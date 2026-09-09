@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import paths
+from asset_catalogue import paths, progress
 
 ProgressCallback = Callable[[str], None]
 
@@ -480,7 +480,9 @@ def generate_meshinstance_wrappers(
             stats.succeeded_sources.append(source_by_res_path[glb_res_path])
             # detail is the res:// path the script actually wrote -- only
             # it knows whether this became a .res or a .tscn.
-            report(f"Generated {Path(detail).name} ({stats.generated}/{len(jobs)})")
+            progress.advance(
+                on_progress, f"Generated {Path(detail).name} ({stats.generated}/{len(jobs)})"
+            )
 
         process.wait()
 

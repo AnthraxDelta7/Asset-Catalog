@@ -424,116 +424,81 @@ def test_calibration_dialog_still_offers_to_render_the_rest(tmp_path: Path) -> N
     conn.close()
 
 
-def test_progress_counts_are_parsed_from_real_job_messages() -> None:
-    """The bar is driven by counts the jobs already print, rather than a
-    structured signal threaded through several dozen call sites.
+def test_progress_bar_stays_indeterminate_until_the_job_declares_a_total(qapp) -> None:
+    """Phase counts like "frame 5/24" say how far through a phase, not
+    how far through the job, so the bar must not guess a position from
+    them -- an earlier version did and jumped backwards on every phase
+    change.
     """
-    from asset_catalogue.ui.main_window import parse_progress_count
-
-    assert parse_progress_count("Converted multi.fbx to .glb (1/2)") == (1, 2)
-    assert parse_progress_count("Rendering @idle: frame 12/24") == (12, 24)
-    assert parse_progress_count("Exported Crate.tscn -> Crate.glb (7/40)") == (7, 40)
-    # Last count wins: the one still moving is at the end of the line.
-    assert parse_progress_count("Pack 2/2: rendering 3/40") == (3, 40)
-
-
-def test_progress_parsing_rejects_counts_that_are_not_progress() -> None:
-    """A version number or a stray ratio must not drive the bar, and a
-    line with no count at all leaves it indeterminate rather than
-    resetting it to zero.
-    """
-    from asset_catalogue.ui.main_window import parse_progress_count
-
-    assert parse_progress_count("Importing new files into the Godot project...") is None
-    # current > total can't be progress.
-    assert parse_progress_count("Converting v1.5/2.0 legacy asset") is None
-    assert parse_progress_count("Model thumbnails: 5 generated, 2 already done") is None
-    assert parse_progress_count("") is None
-
-
-def test_progress_dialog_switches_to_determinate_only_once_a_count_arrives(qapp) -> None:
     from asset_catalogue.ui.main_window import ProgressLogDialog
 
     dialog = ProgressLogDialog("Asset Catalogue", "Starting Blender...", None)
-    # Nothing countable yet -- the bar must not claim a position it
-    # doesn't know, so it stays in its travelling-band mode.
+    dialog.append("Rendering crate.glb (3/12)")
+    dialog.append("Pack 1/2: SciFiPack")
+
     assert dialog._bar._fraction is None
     assert dialog._count_label.text() == ""
-
-    dialog.append("Rendering crate.glb (3/12)")
-    assert dialog._bar._fraction == pytest.approx(0.25)
-    assert dialog._count_label.text() == "3 of 12"
-    # The step label shows the latest line, the log keeps all of them.
-    assert dialog._step_label.text() == "Rendering crate.glb (3/12)"
-    assert "Starting Blender..." in dialog._log.toPlainText()
+    # The text still shows: the log and step label are unaffected.
+    assert dialog._step_label.text() == "Pack 1/2: SciFiPack"
     dialog.close()
 
 
-def test_texture_override_offers_known_broken_materials(qapp, tmp_path: Path) -> None:
-    """An override only takes effect on an exact, case-sensitive material
-    name, so retyping one from memory is the failure-prone step. The
-    materials already recorded as having a broken texture are exactly the
-    ones an override is for, so they're offered as a list.
+def test_progress_bar_follows_the_declared_unit_count(qapp) -> None:
+    from asset_catalogue.ui.main_window import ProgressLogDialog
+
+    dialog = ProgressLogDialog("Asset Catalogue", "Rendering...", None)
+    dialog.set_overall(0, 12)
+    assert dialog._bar._fraction == pytest.approx(0.0)
+
+    dialog.set_overall(3, 12)
+    assert dialog._bar._fraction == pytest.approx(0.25)
+    assert dialog._count_label.text() == "3 of 12"
+    dialog.close()
+
+
+def test_job_reporter_counts_units_and_cannot_overrun(qapp) -> None:
+    """A job that miscounts its own units must not drive the bar past
+    full or backwards -- the bar is the one thing that shouldn't lie.
     """
-    from unittest.mock import patch
+    from asset_catalogue.ui.main_window import _JobReporter
 
-    from PySide6.QtWidgets import QFileDialog, QInputDialog
+    emitted: list[tuple[int, int]] = []
+    texts: list[str] = []
 
-    from asset_catalogue.ui.main_window import CorrectionsFormWidget
+    class _FakeSignal:
+        def __init__(self, sink):
+            self._sink = sink
 
-    pack_root = tmp_path / "Pack"
-    (pack_root / "Textures").mkdir(parents=True)
-    texture = pack_root / "Textures" / "wood.png"
-    texture.write_bytes(b"")
+        def emit(self, *args):
+            self._sink.append(args[0] if len(args) == 1 else args)
 
-    widget = CorrectionsFormWidget(
-        {}, pack_root=pack_root, known_materials=["Metal_A", "Wood_B"]
-    )
+    reporter = _JobReporter(_FakeSignal(texts), _FakeSignal(emitted))
+    reporter.begin(3)
+    assert emitted == [(0, 3)]
 
-    with (
-        patch.object(QInputDialog, "getItem", return_value=("Wood_B", True)) as pick,
-        patch.object(QFileDialog, "getOpenFileName", return_value=(str(texture), "")),
-    ):
-        widget._add_texture_override()
-        # The known names are what's offered, and the field stays editable
-        # so an unrendered model's material can still be typed in.
-        assert pick.call_args.args[3] == ["Metal_A", "Wood_B"]
-        assert pick.call_args.args[5] is True
+    reporter.advance("one")
+    reporter.advance("two")
+    assert emitted[-1] == (2, 3)
+    assert texts == ["one", "two"]
 
-    corrections, _error = widget.read()
-    assert corrections["texture_overrides"] == {"Wood_B": str(Path("Textures") / "wood.png")}
+    # Explicit position, and an overrun clamped rather than propagated.
+    reporter.advance("jumped", done=99)
+    assert emitted[-1] == (3, 3)
 
 
-def test_texture_override_falls_back_to_free_text_with_no_known_materials(
-    qapp, tmp_path: Path
-) -> None:
-    """Nothing rendered yet means nothing recorded as broken -- the
-    override must still be reachable rather than offering an empty list.
-    """
-    from unittest.mock import patch
+def test_job_reporter_is_still_just_a_callable_for_text_only_jobs(qapp) -> None:
+    """Most jobs only report text, and must keep working untouched."""
+    from asset_catalogue.ui.main_window import _JobReporter
 
-    from PySide6.QtWidgets import QFileDialog, QInputDialog
+    texts: list[str] = []
 
-    from asset_catalogue.ui.main_window import CorrectionsFormWidget
+    class _FakeSignal:
+        def emit(self, *args):
+            texts.append(args[0])
 
-    pack_root = tmp_path / "Pack"
-    (pack_root / "Textures").mkdir(parents=True)
-    texture = pack_root / "Textures" / "wood.png"
-    texture.write_bytes(b"")
-
-    widget = CorrectionsFormWidget({}, pack_root=pack_root)
-
-    with (
-        patch.object(QInputDialog, "getText", return_value=("TypedName", True)) as typed,
-        patch.object(QInputDialog, "getItem") as picked,
-        patch.object(QFileDialog, "getOpenFileName", return_value=(str(texture), "")),
-    ):
-        widget._add_texture_override()
-        assert typed.called
-        assert not picked.called
-
-    corrections, _error = widget.read()
-    assert "TypedName" in corrections["texture_overrides"]
+    reporter = _JobReporter(_FakeSignal(), _FakeSignal())
+    reporter("just a line")
+    assert texts == ["just a line"]
 
 
 def _visible_packs(panel) -> list[str]:

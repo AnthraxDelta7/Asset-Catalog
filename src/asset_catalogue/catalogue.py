@@ -17,6 +17,7 @@ from asset_catalogue import (
     db,
     exporting,
     gltf_metadata,
+    progress,
     godot_export,
     ingest,
     library_assets,
@@ -1017,6 +1018,11 @@ class Catalogue:
         conn = db.connect(settings.load().db_path())
         try:
             assets = exporting.select_assets(conn, asset_ids=asset_ids)
+            # Two units per asset: getting it into the project (a copy, or
+            # a Blender conversion) and then turning it into a Godot
+            # asset. Counting one unit each would leave the bar parked at
+            # 100% through the whole Godot pass, which is the slowest half.
+            progress.begin(on_progress, len(assets) * 2)
             project_identifier = str(Path(project_root).resolve())
             items = exporting.plan_godot_export(
                 conn,
