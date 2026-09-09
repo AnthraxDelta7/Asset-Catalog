@@ -117,6 +117,24 @@ def export_preview_glb(mesh_objects: list, output_path: str) -> None:
     bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True, export_format="GLB")
 
 
+def report_rig(asset_id) -> None:
+    """Reports the rig and animation clips of whatever is currently
+    imported. Free to do here -- the model is already in Blender for the
+    thumbnail -- and it's the only practical way to learn this for a
+    binary format like .fbx, whose sole reliable reader is Blender.
+
+    The payload is JSON and goes last on the line: an action name can
+    legitimately contain "|" (Blender names an FBX-imported action
+    "Object|Object|Action"), which would otherwise split the line apart.
+    """
+    joints = max((len(o.data.bones) for o in bpy.data.objects if o.type == "ARMATURE"), default=0)
+    # Blender's own action names, which are exactly what the animation
+    # preview needs back when it re-imports this file to render a clip.
+    names = sorted(action.name for action in bpy.data.actions)
+    payload = json.dumps({"joint_count": joints, "animation_names": names})
+    print(f"ASSET_CATALOGUE_RIG|{asset_id}|{payload}", flush=True)
+
+
 def main() -> None:
     job_list_path = get_job_list_path()
     with open(job_list_path, "r", encoding="utf-8") as f:
@@ -144,6 +162,7 @@ def main() -> None:
                     print(f"ASSET_CATALOGUE_SMART_TEXTURE|{asset_id}|{note}", flush=True)
                 for material_name in broken_materials:
                     print(f"ASSET_CATALOGUE_BROKEN_MATERIAL|{asset_id}|{material_name}", flush=True)
+                report_rig(asset_id)
                 ok = frame_and_render(mesh_objects, job["output_path"])
                 preview_output_path = job.get("preview_output_path")
                 if ok and preview_output_path:

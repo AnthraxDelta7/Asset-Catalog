@@ -10,7 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import audio_thumbnails, broken_textures, model_preview, paths, thumbnails
+from asset_catalogue import (
+    audio_thumbnails,
+    broken_textures,
+    model_metadata,
+    model_preview,
+    paths,
+    thumbnails,
+)
 
 ProgressCallback = Callable[[str], None]
 
@@ -169,6 +176,10 @@ def build_job_list(
             {
                 "asset_id": row["id"],
                 "filename": row["filename"],
+                # Carried through so the rig this render reports can be
+                # cached under the same content-hash identity the
+                # thumbnail and preview already use.
+                "content_hash": row["content_hash"],
                 "source_path": str(staging_folder / row["pack_folder"] / row["relative_path"]),
                 "pack_root": str(staging_folder / row["pack_folder"]),
                 "output_path": str(dest),
@@ -203,6 +214,7 @@ def generate_model_thumbnails(
         return stats
 
     filenames_by_id = {job["asset_id"]: job["filename"] for job in jobs}
+    hashes_by_id = {job["asset_id"]: job["content_hash"] for job in jobs}
     extensions_by_id = {job["asset_id"]: job["extension"].lower() for job in jobs}
     report(
         f"Starting Blender to render {len(jobs)} model thumbnail"
@@ -254,6 +266,27 @@ def generate_model_thumbnails(
                 filename = filenames_by_id.get(broken_asset_id, f"asset {broken_asset_id}")
                 stats.broken_materials.append((broken_asset_id, filename, material_name))
                 report(f"  Missing texture: {filename} ({material_name})")
+                continue
+            if line.startswith("ASSET_CATALOGUE_RIG|"):
+                # Captured during the import the thumbnail already needed,
+                # so a rigged .fbx costs no extra Blender launch to learn
+                # about. JSON, and last on the line, because an action
+                # name can contain the delimiter (see the script's own
+                # note on FBX naming).
+                _, rig_asset_id_str, payload = line.split("|", 2)
+                if preview_dir is not None:
+                    rig_hash = hashes_by_id.get(int(rig_asset_id_str))
+                    try:
+                        rig = json.loads(payload)
+                    except ValueError:
+                        rig = None
+                    if rig_hash and rig is not None:
+                        model_metadata.write_cache(
+                            preview_dir,
+                            rig_hash,
+                            int(rig.get("joint_count") or 0),
+                            list(rig.get("animation_names") or []),
+                        )
                 continue
             if not line.startswith("ASSET_CATALOGUE_RESULT|"):
                 continue

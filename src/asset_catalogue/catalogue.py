@@ -18,6 +18,7 @@ from asset_catalogue import (
     exporting,
     gltf_metadata,
     godot_export,
+    model_metadata,
     ingest,
     library_assets,
     library_health,
@@ -314,22 +315,34 @@ class Catalogue:
         path = library_assets.asset_library_path(self._assets_dir, pack_name, relative_path)
         return path if path.exists() else None
 
-    def list_animation_clips(self, asset_id: int) -> list[str]:
-        """Named animation clips inside this asset, read straight from the
-        glTF header (see gltf_metadata) -- [] for anything that has none,
-        isn't glTF, or hasn't been archived into the library yet.
+    def model_contents(self, asset_id: int):
+        """What this model holds -- rig, animation clips -- or None if
+        that can't be determined.
+
+        Reads a glTF container directly; for anything else (an .fbx being
+        the case that matters) it uses what the thumbnail render recorded,
+        since Blender is the only reliable reader and launching it here
+        would stall the UI. See model_metadata.
         """
         row = self._conn.execute(
-            "SELECT assets.relative_path, packs.name AS pack_name "
+            "SELECT assets.relative_path, assets.content_hash, packs.name AS pack_name "
             "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
             (asset_id,),
         ).fetchone()
         if row is None:
-            return []
+            return None
         path = self.library_asset_path_if_archived(row["pack_name"], row["relative_path"])
         if path is None:
-            return []
-        metadata = gltf_metadata.read(path)
+            return None
+        return model_metadata.read(path, self._preview_dir, row["content_hash"])
+
+    def list_animation_clips(self, asset_id: int) -> list[str]:
+        """Named animation clips inside this asset -- [] for anything with
+        none, or not yet inspected. For a non-glTF model these are
+        Blender's own action names, which is exactly what the animation
+        preview needs back to render one.
+        """
+        metadata = self.model_contents(asset_id)
         return list(metadata.animation_names) if metadata is not None else []
 
     def render_animation_clip_bg(
@@ -383,7 +396,7 @@ class Catalogue:
         # to import the character either way and that import dominates the
         # cost, so rendering the siblings in the same session makes every
         # later Play instant instead of paying the import again per clip.
-        metadata = gltf_metadata.read(source)
+        metadata = model_metadata.read(source, self._preview_dir, row["content_hash"])
         clip_names = list(metadata.animation_names) if metadata is not None else [clip_name]
         if clip_name not in clip_names:
             clip_names.append(clip_name)

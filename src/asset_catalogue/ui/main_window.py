@@ -1035,18 +1035,24 @@ class DetailPanel(QWidget):
         self.play_button.setText("▶ Play")
 
     def _show_rig_summary(self, archived: Path | None) -> None:
-        """Reads the rig/animation facts straight out of the glTF's own
-        JSON header (see gltf_metadata) rather than storing them in the
-        database -- one cheap read of a file already on disk, on a
-        selection that has already touched that file anyway, versus a
-        schema change plus a migration plus a re-scan of every existing
-        library. Worth revisiting only if these ever need to be
-        searchable or filterable, which is a different feature.
+        """What this model contains, from whichever source can answer.
+
+        A glTF container is read directly. An .fbx can't be -- its only
+        reliable reader is Blender -- so it uses what the thumbnail
+        render recorded on the way past, which means a non-glTF model
+        shows nothing here until it has been rendered once (see
+        model_metadata). Deliberately not stored in the database: that
+        would mean a schema change, a migration, and a re-scan of every
+        existing library for something a cache keyed by content hash
+        already answers.
         """
         summary = ""
         clips: list[str] = []
         if archived is not None:
-            metadata = gltf_metadata.read(archived)
+            asset = self._current_asset
+            metadata = (
+                self._catalogue.model_contents(asset.id) if asset is not None else None
+            )
             summary = gltf_metadata.describe(metadata)
             clips = list(metadata.animation_names) if metadata is not None else []
         # Always rewritten, not just when there's something to say: the
