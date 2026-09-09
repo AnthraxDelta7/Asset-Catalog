@@ -3605,6 +3605,23 @@ class MainWindow(QMainWindow):
             self._open_model_preview,
         )
 
+        # A QPushButton has nowhere to render a shortcut the way a menu
+        # item does, so the key goes in its tooltip -- otherwise the only
+        # discoverable place these bindings exist is the menu bar.
+        for button_name, command_id in (
+            ("export_button", "export.quick"),
+            ("view_3d_button", "preview.open_3d"),
+            ("favorite_button", "asset.favorite"),
+            ("generate_thumbnail_button", "asset.regenerate_thumbnail"),
+            ("show_in_library_button", "asset.show_in_library"),
+            ("add_button", "asset.add_tag"),
+        ):
+            button = getattr(self.detail_panel, button_name, None)
+            key = self.commands.shortcut_of(command_id)
+            if button is not None and key:
+                existing = button.toolTip()
+                button.setToolTip(f"{existing} ({key})" if existing else f"Shortcut: {key}")
+
         right_splitter = QSplitter(Qt.Vertical)
         right_splitter.addWidget(self.grid)
         right_splitter.addWidget(self.detail_panel)
@@ -4898,12 +4915,12 @@ class MainWindow(QMainWindow):
             asset_id = selected[0].data(Qt.UserRole)
             asset = next((a for a in self._current_assets if a.id == asset_id), None)
             if asset is not None:
-                fav_label = "★ Remove from Favorites" if asset.favorite else "☆ Add to Favorites"
+                fav_label = ("★ Remove from Favorites" if asset.favorite else "☆ Add to Favorites") + self.commands.hint("asset.favorite")
                 fav_action = menu.addAction(fav_label)
                 fav_action.triggered.connect(
                     lambda: self._set_favorite_for_selection([asset.id], not asset.favorite)
                 )
-                show_action = menu.addAction("Show in Library Folder")
+                show_action = menu.addAction("Show in Library Folder" + self.commands.hint("asset.show_in_library"))
                 show_action.triggered.connect(
                     lambda: self._show_in_library_folder(asset.pack_name, asset.relative_path)
                 )
@@ -4914,19 +4931,19 @@ class MainWindow(QMainWindow):
                     is not None
                 )
                 if asset.asset_type in THUMBNAIL_CAPABLE_TYPES:
-                    regen_action = menu.addAction("Regenerate Thumbnail")
+                    regen_action = menu.addAction("Regenerate Thumbnail" + self.commands.hint("asset.regenerate_thumbnail"))
                     regen_action.triggered.connect(
                         lambda: self._regenerate_thumbnails([asset.id])
                     )
                 if asset.asset_type == "model":
                     has_preview = self._catalogue.model_preview_path_for(asset.content_hash) is not None
                     preview_label = "3D Preview (Orbit/Zoom)..." if has_preview else "3D Preview (renders on open)..."
-                    preview_action = menu.addAction(preview_label)
+                    preview_action = menu.addAction(preview_label + self.commands.hint("preview.open_3d"))
                     preview_action.triggered.connect(
                         lambda: self._open_model_preview(asset.filename, asset.id, asset.content_hash)
                     )
                 if asset.asset_type == "model" and not asset.relative_path.lower().endswith(".glb"):
-                    convert_action = menu.addAction("Convert to glTF (.glb)...")
+                    convert_action = menu.addAction("Convert to glTF (.glb)..." + self.commands.hint("asset.convert_gltf"))
                     convert_action.triggered.connect(
                         lambda: self._convert_asset_to_gltf(asset.id)
                     )
@@ -4985,12 +5002,14 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         export_label = "Export to Project..." if len(selected) == 1 else f"Export {len(selected)} to Project..."
-        export_action = menu.addAction(export_label)
+        # export.dialog, not export.quick: this entry opens the picker,
+        # matching what the key it advertises actually does.
+        export_action = menu.addAction(export_label + self.commands.hint("export.dialog"))
         export_action.triggered.connect(self._export_selected_to_project)
         menu.addSeparator()
 
         remove_label = "Move to Trash" if len(selected) == 1 else f"Move {len(selected)} to Trash"
-        remove_action = menu.addAction(remove_label)
+        remove_action = menu.addAction(remove_label + self.commands.hint("edit.trash"))
         remove_action.triggered.connect(self._remove_selected_assets)
 
         return menu

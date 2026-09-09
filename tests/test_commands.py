@@ -98,3 +98,20 @@ def test_every_shortcut_actually_does_something(qapp, tmp_path: Path, monkeypatc
     assert window.commands.unbound_shortcuts() == []
     window.close()
     conn.close()
+
+
+def test_hint_renders_in_the_menu_shortcut_column(qapp) -> None:
+    """A context-menu entry advertises its key by putting it after a tab,
+    which Qt right-aligns exactly where a real shortcut appears. It must
+    NOT set a real shortcut on that second action -- two actions on one
+    key is the ambiguity this whole design avoids.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    registry = commands.CommandRegistry(QWidget())
+    registry.build()
+
+    assert registry.hint("asset.favorite") == "\tF"
+    assert registry.hint("export.dialog") == "\tCtrl+E"
+    # A command with no key contributes nothing rather than a stray tab.
+    assert registry.hint("tools.credits") == ""

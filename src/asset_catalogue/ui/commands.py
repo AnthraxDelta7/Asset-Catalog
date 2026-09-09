@@ -201,6 +201,18 @@ class CommandRegistry:
             if command.id in sequences and sequences[command.id] != command.default_shortcut
         }
 
+    def hint(self, command_id: str) -> str:
+        """A menu-label suffix that displays this command's key without
+        binding it. Qt right-aligns whatever follows a tab in a menu
+        item, which is exactly how it renders a real shortcut -- so a
+        context-menu entry can show "Ctrl+R" in the usual place while the
+        actual binding stays on the one registry action. Setting a real
+        shortcut on a second action instead would put two actions on one
+        key, which Qt resolves unpredictably.
+        """
+        sequence = self._shortcuts.get(command_id, "")
+        return f"	{QKeySequence(sequence).toString()}" if sequence else ""
+
     def shortcut_of(self, command_id: str) -> str:
         return self._shortcuts.get(command_id, "")
 
