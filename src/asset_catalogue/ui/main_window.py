@@ -165,6 +165,7 @@ class FilterPanel(QWidget):
         on_rename_tag,
         on_delete_tag,
         on_render_pack_previews,
+        on_open_pack_manager=None,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -174,6 +175,10 @@ class FilterPanel(QWidget):
         self._on_rename_tag = on_rename_tag
         self._on_delete_tag = on_delete_tag
         self._on_render_pack_previews = on_render_pack_previews
+        # Optional so the existing tests that build a FilterPanel with
+        # positional callbacks keep working; the link is simply inert
+        # without it.
+        self._on_open_pack_manager = on_open_pack_manager or (lambda: None)
 
         layout = QVBoxLayout(self)
 
@@ -3940,6 +3945,7 @@ class MainWindow(QMainWindow):
             self._rename_tag,
             self._delete_tag,
             self._render_model_previews_for_selection,
+            self._open_pack_manager,
         )
         self.grid = ThumbnailGrid()
         self.grid.itemSelectionChanged.connect(self._on_grid_selection_changed)
@@ -4468,6 +4474,112 @@ class MainWindow(QMainWindow):
             lambda: None,
             on_complete=lambda name: self._open_ingest_dialog(initial_relative_path=name),
         )
+
+    def _open_pack_manager(self) -> None:
+        """Everything about packs in one place. The filter panel's list
+        stays a filter; this is where a library is actually managed, and
+        it's the only place hidden packs can be brought back.
+        """
+        from asset_catalogue.ui.pack_manager_dialog import PackManagerDialog
+
+        dialog = PackManagerDialog(self._catalogue, PRIMARY_ACTION_STYLE, self)
+        dialog._on_edit_pack = self._edit_pack
+        dialog._on_remove_packs = self._remove_packs_from_manager
+        dialog._on_reingest_packs = self._reingest_packs
+        dialog.exec()
+        if dialog.changed:
+            self.filter_panel.refresh_packs(self._catalogue)
+            self._refresh_grid()
+
+    def _remove_packs_from_manager(self, pack_names: list[str]) -> None:
+        """Removes several packs in one background job -- the manager has
+        already confirmed, so this doesn't ask again.
+        """
+        def job(report):
+            for name in pack_names:
+                report(f"Removing {name}...")
+                self._catalogue.remove_pack_bg(name, on_progress=report)
+            return len(pack_names)
+
+        self._run_background_job(
+            job,
+            f"Removing {len(pack_names)} pack(s)...",
+            lambda count: f"Removed {count} pack(s)",
+            self._refresh_grid,
+        )
+
+    def _reingest_packs(self, packs_to_reingest: list) -> None:
+        """Re-walks each pack's staged folder to pick up changed files.
+
+        Existing assets are matched by content hash, so a re-ingest adds
+        what's new and leaves everything else alone -- it isn't a
+        remove-and-re-add, and tags/favourites survive it.
+        """
+        missing = [
+            pack for pack in packs_to_reingest
+            if not self._catalogue.pack_source_exists(pack["pack_folder"])
+        ]
+        if missing and len(packs_to_reingest) == 1:
+            # One pack, and its source is gone: offer to point at a new
+            # one rather than just refusing.
+            if not self._prompt_for_new_source(packs_to_reingest[0]):
+                return
+        elif missing:
+            QMessageBox.warning(
+                self,
+                "Re-ingest",
+                "These packs' original folders are no longer in the staging area:"
+                + chr(10) + chr(10)
+                + chr(10).join(pack["name"] for pack in missing[:8])
+                + chr(10) + chr(10)
+                + "Put them back, or re-ingest them one at a time to pick a new source.",
+            )
+            return
+
+        def job(report):
+            done = 0
+            for pack in packs_to_reingest:
+                report(f"Re-ingesting {pack['name']}...")
+                self._catalogue.ingest_pack_bg(
+                    pack["pack_folder"],
+                    pack["name"],
+                    pack["creator"],
+                    pack["licence"],
+                    pack["source_url"],
+                    on_progress=report,
+                )
+                done += 1
+            return done
+
+        self._run_background_job(
+            job,
+            f"Re-ingesting {len(packs_to_reingest)} pack(s)...",
+            lambda count: f"Re-ingested {count} pack(s)",
+            self._refresh_grid,
+        )
+
+    def _prompt_for_new_source(self, pack) -> bool:
+        staging = self._catalogue.staging_folder()
+        if staging is None:
+            return False
+        answer = QMessageBox.question(
+            self,
+            "Re-ingest",
+            f"'{pack['name']}' was ingested from '{pack['pack_folder']}', which is no "
+            "longer in the staging area." + chr(10) + chr(10)
+            + "Pick a new source folder for it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        browser = StagingBrowserDialog(Path(staging), self)
+        if browser.exec() != QDialog.Accepted or browser.selected_relative_path is None:
+            return False
+        # Repointing the pack is a real edit, not a one-off: a later
+        # re-ingest should use the new source too.
+        self._catalogue.update_pack_source_folder(pack["id"], browser.selected_relative_path)
+        pack["pack_folder"] = browser.selected_relative_path
+        return True
 
     def _open_ingest_dialog(self, initial_relative_path: str | None = None) -> None:
         if self._catalogue.staging_folder() is None:

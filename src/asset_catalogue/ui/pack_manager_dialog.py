@@ -16,6 +16,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -66,6 +67,13 @@ class PackManagerDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        # The name column takes the slack; the count/creator columns only
+        # need their content width, and stretching the last one would
+        # leave a wide empty "Hidden" column.
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         splitter.addWidget(self.table)
 
@@ -142,7 +150,6 @@ class PackManagerDialog(QDialog):
             self.table.setItem(row, 3, QTableWidgetItem(pack["creator"] or ""))
             self.table.setItem(row, 4, QTableWidgetItem(pack["licence"] or ""))
             self.table.setItem(row, 5, QTableWidgetItem("Hidden" if pack["hidden"] else ""))
-        self.table.resizeColumnsToContents()
         self._on_selection_changed()
 
     def selected_packs(self) -> list:
@@ -177,6 +184,10 @@ class PackManagerDialog(QDialog):
                 pixmap = QPixmap(str(path))
                 if not pixmap.isNull():
                     item.setIcon(QIcon(pixmap))
+            else:
+                # Says so rather than showing a bare name in a grid of
+                # pictures, which reads as a missing thumbnail either way.
+                item.setToolTip(f"{asset.filename} -- no thumbnail rendered yet")
             self.contents_list.addItem(item)
 
     def _update_reingest_notice(self, selected: list) -> None:

@@ -147,6 +147,19 @@ class Catalogue:
     def set_packs_hidden(self, pack_ids: list[int], hidden: bool) -> None:
         packs.set_hidden(self._conn, pack_ids, hidden)
 
+    def update_pack_source_folder(self, pack_id: int, pack_folder: str) -> None:
+        """Repoints a pack at a different staged folder.
+
+        A real edit rather than a one-off override: asset paths are all
+        resolved as staging/pack_folder/relative_path, so leaving the old
+        value would break every existing asset the moment the folder is
+        actually gone.
+        """
+        self._conn.execute(
+            "UPDATE packs SET pack_folder = ? WHERE id = ?", (pack_folder, pack_id)
+        )
+        self._conn.commit()
+
     def pack_source_exists(self, pack_folder: str) -> bool:
         """Whether the pack's original staged folder is still on disk --
         what re-ingest needs, and the thing most likely to have been
