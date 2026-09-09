@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import html
+import re
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QUrl, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QSurfaceFormat
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -44,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from asset_catalogue.ui.commands import CommandRegistry
+from asset_catalogue.ui.flowing_progress_bar import FlowingProgressBar
 from asset_catalogue import (
     blender_render,
     crash_log,
@@ -2426,35 +2429,108 @@ class _BackgroundWorker(QThread):
         self.finished_ok.emit(result)
 
 
+# "12/24", "(2 of 6)", "Pack 1/2" -- the shape a job's own progress text
+# already uses. Parsed out rather than threading a structured (current,
+# total) signal through several dozen existing call sites, none of which
+# would otherwise need to change.
+_PROGRESS_COUNT_RE = re.compile(r"\b(\d+)\s*(?:/|of)\s*(\d+)\b")
+
+
+def parse_progress_count(text: str) -> tuple[int, int] | None:
+    """The last plausible "current/total" in a progress line, or None.
+
+    Last rather than first: a message like "Pack 2/2: rendering 3/40"
+    ends with the count that's actually moving. Implausible pairs are
+    rejected (zero total, current past total) so a version number or a
+    filename containing "1/2" can't drive the bar backwards.
+    """
+    best = None
+    for match in _PROGRESS_COUNT_RE.finditer(text):
+        current, total = int(match.group(1)), int(match.group(2))
+        if 0 < total and current <= total:
+            best = (current, total)
+    return best
+
+
 class ProgressLogDialog(QDialog):
-    """Modal dialog shown during a background job: an indeterminate progress
-    bar plus a live-appending text feed of what's happening, file by file --
-    replaces a bare spinner so a long ingest/thumbnail/import/removal run
-    isn't just a frozen-looking window.
+    """Modal dialog shown during a background job.
+
+    Shows three separate things, because during a long run they answer
+    different questions: a bar that moves whenever a job reports a count,
+    a travelling sheen that keeps moving even when it doesn't (so a step
+    that takes a minute doesn't read as a crash), and elapsed time.
+
+    There is deliberately no Cancel button. These jobs are mostly Blender
+    and Godot subprocesses with no cancellation path, so a Cancel that
+    only greyed itself out and let the work continue would be a worse lie
+    than not offering one.
     """
 
     def __init__(self, title: str, initial_text: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.resize(520, 320)
+        self.resize(560, 300)
 
         layout = QVBoxLayout(self)
-        self._bar = QProgressBar(self)
-        self._bar.setRange(0, 0)
+
+        self._step_label = QLabel(initial_text or "Working...")
+        self._step_label.setWordWrap(True)
+        step_font = self._step_label.font()
+        step_font.setPointSize(step_font.pointSize() + 1)
+        self._step_label.setFont(step_font)
+        layout.addWidget(self._step_label)
+
+        self._bar = FlowingProgressBar(self)
         layout.addWidget(self._bar)
+
+        status_row = QHBoxLayout()
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("color: #9a9a9a;")
+        status_row.addWidget(self._count_label)
+        status_row.addStretch(1)
+        self._elapsed_label = QLabel("0:00")
+        self._elapsed_label.setStyleSheet("color: #9a9a9a;")
+        status_row.addWidget(self._elapsed_label)
+        layout.addLayout(status_row)
 
         self._log = QPlainTextEdit(self)
         self._log.setReadOnly(True)
-        layout.addWidget(self._log)
+        log_font = self._log.font()
+        log_font.setFamily("Consolas")
+        self._log.setFont(log_font)
+        layout.addWidget(self._log, stretch=1)
+
+        self._started = time.monotonic()
+        self._clock = QTimer(self)
+        self._clock.timeout.connect(self._tick)
+        self._clock.start(1000)
 
         if initial_text:
             self.append(initial_text)
 
+    def _tick(self) -> None:
+        seconds = int(time.monotonic() - self._started)
+        self._elapsed_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
+
     def append(self, text: str) -> None:
+        self._step_label.setText(text)
         self._log.appendPlainText(text)
         scrollbar = self._log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+        counts = parse_progress_count(text)
+        if counts is not None:
+            current, total = counts
+            self._bar.set_progress(current, total)
+            self._count_label.setText(f"{current} of {total}")
+
+    def done(self, result: int) -> None:
+        # Both timers repaint a widget; leaving them running against a
+        # closed dialog keeps it alive and burns a frame every 33ms.
+        self._bar.stop()
+        self._clock.stop()
+        super().done(result)
 
 
 # One-click download-and-install is switched off here until real code

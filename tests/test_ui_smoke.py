@@ -422,3 +422,48 @@ def test_calibration_dialog_still_offers_to_render_the_rest(tmp_path: Path) -> N
     assert pending == 2
     assert dialog._render_all_button.text() == "Render Remaining 2 Model(s)"
     conn.close()
+
+
+def test_progress_counts_are_parsed_from_real_job_messages() -> None:
+    """The bar is driven by counts the jobs already print, rather than a
+    structured signal threaded through several dozen call sites.
+    """
+    from asset_catalogue.ui.main_window import parse_progress_count
+
+    assert parse_progress_count("Converted multi.fbx to .glb (1/2)") == (1, 2)
+    assert parse_progress_count("Rendering @idle: frame 12/24") == (12, 24)
+    assert parse_progress_count("Exported Crate.tscn -> Crate.glb (7/40)") == (7, 40)
+    # Last count wins: the one still moving is at the end of the line.
+    assert parse_progress_count("Pack 2/2: rendering 3/40") == (3, 40)
+
+
+def test_progress_parsing_rejects_counts_that_are_not_progress() -> None:
+    """A version number or a stray ratio must not drive the bar, and a
+    line with no count at all leaves it indeterminate rather than
+    resetting it to zero.
+    """
+    from asset_catalogue.ui.main_window import parse_progress_count
+
+    assert parse_progress_count("Importing new files into the Godot project...") is None
+    # current > total can't be progress.
+    assert parse_progress_count("Converting v1.5/2.0 legacy asset") is None
+    assert parse_progress_count("Model thumbnails: 5 generated, 2 already done") is None
+    assert parse_progress_count("") is None
+
+
+def test_progress_dialog_switches_to_determinate_only_once_a_count_arrives(qapp) -> None:
+    from asset_catalogue.ui.main_window import ProgressLogDialog
+
+    dialog = ProgressLogDialog("Asset Catalogue", "Starting Blender...", None)
+    # Nothing countable yet -- the bar must not claim a position it
+    # doesn't know, so it stays in its travelling-band mode.
+    assert dialog._bar._fraction is None
+    assert dialog._count_label.text() == ""
+
+    dialog.append("Rendering crate.glb (3/12)")
+    assert dialog._bar._fraction == pytest.approx(0.25)
+    assert dialog._count_label.text() == "3 of 12"
+    # The step label shows the latest line, the log keeps all of them.
+    assert dialog._step_label.text() == "Rendering crate.glb (3/12)"
+    assert "Starting Blender..." in dialog._log.toPlainText()
+    dialog.close()
