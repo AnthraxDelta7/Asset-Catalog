@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +54,7 @@ from asset_catalogue import (
     animation_preview,
     exporting,
     gltf_metadata,
+    ingest,
     godot_export,
     library_health,
     library_stats,
@@ -1616,7 +1618,12 @@ class IngestDialog(QDialog):
     name to match it, unless you've typed your own -- see _pack_name_auto.
     """
 
-    def __init__(self, catalogue: Catalogue, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        catalogue: Catalogue,
+        parent: QWidget | None = None,
+        initial_relative_path: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self._catalogue = catalogue
         self.setWindowTitle("Ingest Pack")
@@ -1633,6 +1640,7 @@ class IngestDialog(QDialog):
         # into the pack field" bug.
         self._pack_name_auto = True
         self.godot_projects: list[str] = []
+        self._initial_relative_path = initial_relative_path
 
         self.pack_folder_name: str = ""
         self.pack_name: str = ""
@@ -1689,6 +1697,25 @@ class IngestDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self._apply_initial_source()
+
+    def _apply_initial_source(self) -> None:
+        """Pre-fills from a drop, so the dialog opens already pointing at
+        what was dropped rather than making the user browse to the thing
+        they just dragged in.
+        """
+        relative_path = self._initial_relative_path
+        if not relative_path:
+            return
+        self._selected_relative_path = relative_path
+        self.source_edit.setText(relative_path)
+        source = Path(relative_path)
+        is_zip = source.suffix.lower() == ".zip"
+        # A single model file names its pack after the file, not the
+        # folder it happens to sit in.
+        self.pack_name_edit.setText(source.stem if is_zip or source.suffix else source.name)
+        self._update_godot_notice(relative_path, is_zip)
+
     def _on_pack_name_edited(self, _text: str) -> None:
         self._pack_name_auto = False
 
@@ -1739,7 +1766,9 @@ class IngestDialog(QDialog):
         pack_name = self.pack_name_edit.text().strip()
         if self._selected_relative_path is None or not pack_name:
             QMessageBox.warning(
-                self, "Ingest Pack", "Pick a pack folder or zip file, and enter a pack name."
+                self,
+                "Ingest Pack",
+                "Pick a pack folder, zip, or single model file, and enter a pack name.",
             )
             return
         self.pack_folder_name = self._selected_relative_path
@@ -4000,6 +4029,8 @@ class MainWindow(QMainWindow):
         # the same action -- see ui/commands.py. That's what makes every
         # function here bindable, and what stops a shortcut and a menu
         # entry drifting apart.
+        # Drop a pack, zip, or single model anywhere on the window.
+        self.setAcceptDrops(True)
         self.commands = CommandRegistry(self)
         self.commands.build(settings.load().shortcuts)
         for command_id, handler in {
@@ -4327,13 +4358,116 @@ class MainWindow(QMainWindow):
         self._selected_asset_id = None
         self._refresh_grid()
 
-    def _open_ingest_dialog(self) -> None:
+    # -- Drag and drop ingest -----------------------------------------
+    #
+    # Only inbound. Dragging an asset *out* to Godot was investigated and
+    # doesn't work: Godot's editor accepts real file paths at drop time,
+    # so there's no hook to run the Blender/Godot conversion afterwards,
+    # and CF_HDROP never tells the source where its files landed.
+
+    def _droppable_paths(self, mime) -> list[Path]:
+        """Dropped items this app can actually ingest: a folder, a .zip,
+        or a single recognised asset file. Anything else is ignored so
+        the drop is refused rather than accepted and then rejected.
+
+        Takes the mime data rather than the event, because that's all it
+        needs and it makes the rule testable without constructing a Qt
+        drop event.
+        """
+        if mime is None or not mime.hasUrls():
+            return []
+        paths = []
+        for url in mime.urls():
+            local = url.toLocalFile()
+            if not local:
+                continue
+            path = Path(local)
+            if path.is_dir() or path.suffix.lower() == ".zip":
+                paths.append(path)
+            elif path.is_file() and ingest.classify(path.suffix) != "other":
+                paths.append(path)
+        return paths
+
+    def dragEnterEvent(self, event) -> None:
+        if self._droppable_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._droppable_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        paths = self._droppable_paths(event.mimeData())
+        if not paths:
+            return
+        event.acceptProposedAction()
+        if len(paths) > 1:
+            QMessageBox.information(
+                self,
+                "Asset Catalogue",
+                "Drop one pack, zip, or model at a time -- each becomes its own pack, "
+                "with its own name and credits.",
+            )
+            return
+        self._ingest_dropped_path(paths[0])
+
+    def _ingest_dropped_path(self, path: Path) -> None:
+        """Ingest something dragged in from outside.
+
+        Everything is addressed relative to the staging folder, so a drop
+        from anywhere else has to be copied in first -- ingesting in
+        place would leave the catalogue pointing at a file on someone's
+        desktop that can be moved or deleted out from under it.
+        """
+        staging = self._catalogue.staging_folder()
+        if staging is None:
+            QMessageBox.warning(
+                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+            )
+            return
+
+        try:
+            relative = path.resolve().relative_to(Path(staging).resolve()).as_posix()
+        except ValueError:
+            relative = None
+
+        if relative is not None:
+            self._open_ingest_dialog(initial_relative_path=relative)
+            return
+
+        destination = Path(staging) / path.name
+        if destination.exists():
+            QMessageBox.warning(
+                self,
+                "Asset Catalogue",
+                f"'{path.name}' is already in the staging folder. Ingest it from there, "
+                "or rename one of them first.",
+            )
+            return
+
+        def job(report):
+            report(f"Copying {path.name} into the staging folder...")
+            if path.is_dir():
+                shutil.copytree(path, destination)
+            else:
+                shutil.copy2(path, destination)
+            return destination.name
+
+        self._run_background_job(
+            job,
+            f"Copying {path.name}...",
+            lambda _name: "",
+            lambda: None,
+            on_complete=lambda name: self._open_ingest_dialog(initial_relative_path=name),
+        )
+
+    def _open_ingest_dialog(self, initial_relative_path: str | None = None) -> None:
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
                 self, "Asset Catalogue", "Configure a staging folder in Settings first."
             )
             return
-        dialog = IngestDialog(self._catalogue, self)
+        dialog = IngestDialog(self._catalogue, self, initial_relative_path=initial_relative_path)
         if dialog.exec() != QDialog.Accepted:
             return
 

@@ -635,3 +635,92 @@ def test_scene_count_excludes_the_godot_reimport_cache(qapp, tmp_path: Path) -> 
 
     assert catalogue.count_godot_scenes(["GodotPack"]) == 4
     conn.close()
+
+
+def _mime(*paths):
+    from PySide6.QtCore import QMimeData, QUrl
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+    return mime
+
+
+def _window(tmp_path: Path):
+    from asset_catalogue import db, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import MainWindow
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    settings.SETTINGS_PATH = tmp_path / "settings.json"
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    return conn, MainWindow(Catalogue(conn, staging, library / "thumbnails", library / "assets"))
+
+
+def test_only_ingestible_drops_are_accepted(qapp, tmp_path: Path, monkeypatch) -> None:
+    """Refusing the drop up front beats accepting it and then explaining
+    that the file isn't something the catalogue can hold.
+    """
+    from asset_catalogue import settings
+    from conftest import write_minimal_glb
+
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    conn, window = _window(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_minimal_glb(outside / "prop.glb", {"meshes": [{}]})
+    (outside / "notes.txt").write_text("not an asset", encoding="utf-8")
+    (outside / "pack.zip").write_bytes(b"PK")
+
+    assert [p.name for p in window._droppable_paths(_mime(outside / "prop.glb"))] == ["prop.glb"]
+    assert [p.name for p in window._droppable_paths(_mime(outside / "pack.zip"))] == ["pack.zip"]
+    assert [p.name for p in window._droppable_paths(_mime(outside))] == ["outside"]
+    # A file the catalogue has no asset type for isn't ingestible.
+    assert window._droppable_paths(_mime(outside / "notes.txt")) == []
+    from PySide6.QtCore import QMimeData
+
+    assert window._droppable_paths(QMimeData()) == []
+    conn.close()
+
+
+def test_a_single_model_file_ingests_as_its_own_pack(tmp_path: Path, monkeypatch) -> None:
+    """Dropping or picking one .glb shouldn't require inventing a folder
+    for it. The stored pack_folder is the file's parent, since every
+    asset path resolves as staging/pack_folder/relative_path.
+    """
+    from asset_catalogue import db, settings
+    from asset_catalogue.catalogue import Catalogue
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    (staging / "sub").mkdir(parents=True)
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    # Distinct content: assets.content_hash is UNIQUE, so identical
+    # bytes would dedupe and the second pack would end up empty.
+    write_minimal_glb(staging / "hero.glb", {"meshes": [{"name": "hero"}]})
+    write_minimal_glb(staging / "sub" / "prop.glb", {"meshes": [{"name": "prop"}]})
+
+    conn = db.connect(library / "catalogue.db")
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    catalogue.ingest_pack_bg("hero.glb", "Hero", None, None, None)
+    catalogue.ingest_pack_bg("sub/prop.glb", "Prop", None, None, None)
+
+    rows = list(
+        conn.execute(
+            "SELECT packs.name, packs.pack_folder, assets.relative_path "
+            "FROM assets JOIN packs ON packs.id = assets.pack_id ORDER BY packs.name"
+        )
+    )
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["Hero"]["pack_folder"] == ""
+    assert by_name["Hero"]["relative_path"] == "hero.glb"
+    assert by_name["Prop"]["pack_folder"] == "sub"
+    assert by_name["Prop"]["relative_path"] == "prop.glb"
+    # Every stored path must resolve back to a real file on disk.
+    for row in rows:
+        assert (staging / row["pack_folder"] / row["relative_path"]).is_file()
+    conn.close()

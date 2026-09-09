@@ -175,6 +175,16 @@ def _walk_ingestible_files(
     a separate step.
     """
     report = on_progress or (lambda _text: None)
+    # A single dropped/selected file is a pack of one. Handled here
+    # rather than by the caller so every entry point -- the UI, the CLI,
+    # a drop -- gets it from the same walk, and so relative_path comes out
+    # as just the filename rather than something anchored above it.
+    if pack_root.is_file():
+        if classify(pack_root.suffix) == "other":
+            stats.skipped_unrecognized_files += 1
+            return []
+        return [pack_root]
+
     work_items: list[tuple[Path, int]] = [(pack_root, 0)]
     found: list[Path] = []
 
@@ -307,7 +317,12 @@ def ingest_pack(
 
     for entry in files:
         stats.total += 1
-        relative_path = entry.relative_to(pack_root).as_posix()
+        # A single-file pack is rooted at the file itself, so its path
+        # relative to that root would be "." -- it's just the filename,
+        # resolved against the pack_folder its parent supplies.
+        relative_path = (
+            entry.name if pack_root.is_file() else entry.relative_to(pack_root).as_posix()
+        )
         report(f"Hashing {entry.name}...")
         content_hash = hash_file(entry)
         extension = entry.suffix.lower()

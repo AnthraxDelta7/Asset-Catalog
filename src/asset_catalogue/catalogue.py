@@ -637,7 +637,16 @@ class Catalogue:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         pack_root, pack_folder_name = self._resolve_pack_root(pack_folder_name)
-        if not pack_root.is_dir():
+        if pack_root.is_file():
+            # A single model dropped or picked on its own is a pack of
+            # one. The stored pack_folder has to be its *parent*, since
+            # every asset path is resolved as staging/pack_folder/
+            # relative_path -- rooting it at the file itself would look
+            # for hero.glb/hero.glb.
+            pack_folder_name = pack_root.parent.relative_to(self._staging_folder).as_posix()
+            if pack_folder_name == ".":
+                pack_folder_name = ""
+        elif not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
 
         conn = db.connect(settings.load().db_path())
