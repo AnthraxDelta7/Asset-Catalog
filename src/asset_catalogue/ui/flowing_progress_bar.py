@@ -1,12 +1,15 @@
-"""A progress bar that always looks alive, whether or not the total is known.
+"""An activity bar: a band that keeps travelling while a job runs.
 
-Two jobs at once, which is why this is painted rather than a styled
-QProgressBar: it has to answer "is this thing still running?" and "how
-far along is it?" independently. A long Blender or Godot pass can sit on
-one step for a minute, so a bar that only moves when the count changes
-reads as frozen -- the sheen keeps travelling regardless. Animating a
-Qt stylesheet gradient would mean re-parsing the sheet every frame,
-which judders; painting is both smoother and less code.
+Deliberately not a percentage. A job moves through phases whose counts
+are unrelated to each other -- "Pack 1/2", then "frame 5/24" -- and
+nothing in that says how much of the whole job a phase is worth, so any
+position derived from it misleads more than it informs. What a long
+Blender or Godot run needs to convey is that it hasn't died, which this
+answers honestly.
+
+Painted rather than a styled QProgressBar because animating a Qt
+stylesheet gradient means re-parsing the sheet every frame, which
+judders; painting is both smoother and less code.
 """
 
 from __future__ import annotations
@@ -29,22 +32,10 @@ class FlowingProgressBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(BAR_HEIGHT)
         self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
-        self._fraction: float | None = None  # None until a real count arrives
         self._phase = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance)
         self._timer.start(FRAME_MS)
-
-    def set_progress(self, current: int, total: int) -> None:
-        """Switches to determinate. Clamped rather than trusted: these
-        counts come from parsing job output, so a malformed pair must
-        never send the fill off the end of the widget.
-        """
-        if total > 0:
-            self._fraction = max(0.0, min(1.0, current / total))
-
-    def set_indeterminate(self) -> None:
-        self._fraction = None
 
     def stop(self) -> None:
         self._timer.stop()
@@ -63,27 +54,21 @@ class FlowingProgressBar(QWidget):
         track.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
         painter.fillPath(track, TRACK_COLOR)
 
-        if self._fraction is None:
-            # Unknown total: a band sweeps the full width so the bar still
-            # says "running" without implying a position it doesn't know.
-            band = width * 0.28
-            travel = (width + band) * self._phase - band
-            fill_rect = QRectF(travel, 0, band, height)
-        else:
-            fill_rect = QRectF(0, 0, width * self._fraction, height)
-        if fill_rect.width() <= 0:
-            return
+        # A band sweeps the full width, so the bar says "running" without
+        # implying a position it has no way to know.
+        band = width * 0.28
+        travel = (width + band) * self._phase - band
+        fill_rect = QRectF(travel, 0, band, height)
 
         painter.save()
         painter.setClipPath(track)
         painter.fillRect(fill_rect, FILL_COLOR)
 
-        # The travelling highlight -- the part that distinguishes "working"
-        # from "stalled on a step that takes a minute".
+        # Softens the band's leading and trailing edges so it reads as a
+        # travelling highlight rather than a sliding block.
         sheen = QLinearGradient(fill_rect.left(), 0, fill_rect.right(), 0)
-        centre = self._phase if self._fraction is not None else 0.5
-        sheen.setColorAt(max(0.0, centre - 0.18), Qt.GlobalColor.transparent)
-        sheen.setColorAt(centre, SHEEN_COLOR)
-        sheen.setColorAt(min(1.0, centre + 0.18), Qt.GlobalColor.transparent)
+        sheen.setColorAt(0.0, Qt.GlobalColor.transparent)
+        sheen.setColorAt(0.5, SHEEN_COLOR)
+        sheen.setColorAt(1.0, Qt.GlobalColor.transparent)
         painter.fillRect(fill_rect, sheen)
         painter.restore()

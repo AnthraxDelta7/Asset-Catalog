@@ -2515,36 +2515,16 @@ class _BackgroundWorker(QThread):
         self.finished_ok.emit(result)
 
 
-# "12/24", "(2 of 6)", "Pack 1/2" -- the shape a job's own progress text
-# already uses. Parsed out rather than threading a structured (current,
-# total) signal through several dozen existing call sites, none of which
-# would otherwise need to change.
-_PROGRESS_COUNT_RE = re.compile(r"\b(\d+)\s*(?:/|of)\s*(\d+)\b")
-
-
-def parse_progress_count(text: str) -> tuple[int, int] | None:
-    """The last plausible "current/total" in a progress line, or None.
-
-    Last rather than first: a message like "Pack 2/2: rendering 3/40"
-    ends with the count that's actually moving. Implausible pairs are
-    rejected (zero total, current past total) so a version number or a
-    filename containing "1/2" can't drive the bar backwards.
-    """
-    best = None
-    for match in _PROGRESS_COUNT_RE.finditer(text):
-        current, total = int(match.group(1)), int(match.group(2))
-        if 0 < total and current <= total:
-            best = (current, total)
-    return best
-
-
 class ProgressLogDialog(QDialog):
     """Modal dialog shown during a background job.
 
-    Shows three separate things, because during a long run they answer
-    different questions: a bar that moves whenever a job reports a count,
-    a travelling sheen that keeps moving even when it doesn't (so a step
-    that takes a minute doesn't read as a crash), and elapsed time.
+    The bar is deliberately not a percentage. A job runs through phases
+    with unrelated counts of their own -- "Pack 1/2", then "frame 5/24"
+    -- and nothing in that text says how much of the whole job a phase
+    represents, so any position derived from it jumps around and misleads.
+    What a long run actually needs to convey is "still working", which the
+    travelling sheen does honestly, alongside the current step and elapsed
+    time.
 
     There is deliberately no Cancel button. These jobs are mostly Blender
     and Godot subprocesses with no cancellation path, so a Cancel that
@@ -2571,9 +2551,6 @@ class ProgressLogDialog(QDialog):
         layout.addWidget(self._bar)
 
         status_row = QHBoxLayout()
-        self._count_label = QLabel("")
-        self._count_label.setStyleSheet("color: #9a9a9a;")
-        status_row.addWidget(self._count_label)
         status_row.addStretch(1)
         self._elapsed_label = QLabel("0:00")
         self._elapsed_label.setStyleSheet("color: #9a9a9a;")
@@ -2604,12 +2581,6 @@ class ProgressLogDialog(QDialog):
         self._log.appendPlainText(text)
         scrollbar = self._log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-
-        counts = parse_progress_count(text)
-        if counts is not None:
-            current, total = counts
-            self._bar.set_progress(current, total)
-            self._count_label.setText(f"{current} of {total}")
 
     def done(self, result: int) -> None:
         # Both timers repaint a widget; leaving them running against a
