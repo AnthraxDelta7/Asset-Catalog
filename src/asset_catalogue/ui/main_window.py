@@ -2636,7 +2636,8 @@ def _render_all_label(models_pending: int) -> str:
     becomes a plain confirmation instead.
     """
     if models_pending:
-        return f"Render Remaining {models_pending} Model(s)"
+        plural = "s" if models_pending != 1 else ""
+        return f"Render Remaining {models_pending} Model{plural}"
     return "Looks Good -- Finish"
 
 
@@ -2702,6 +2703,27 @@ class CalibrationReviewDialog(QDialog):
         layout.addWidget(self._preview_label)
         self._reload_preview()
 
+        preview_row = QHBoxLayout()
+        preview_row.addStretch(1)
+        self._rerender_button = QPushButton("Re-render Preview")
+        self._rerender_button.setToolTip("Apply the corrections below and render this model again")
+        self._rerender_button.clicked.connect(self._on_rerender)
+        preview_row.addWidget(self._rerender_button)
+        # For when the model that happened to get picked as the preview
+        # isn't a good representative of the pack (an outlier shape, a
+        # part with its own texture quirks) -- steps to a different,
+        # still-unrendered model instead of forcing a Cancel-and-restart
+        # to see how the pack looks on a different asset. Uses whatever
+        # corrections are already dialed in so far (self.corrections),
+        # same as Render Remaining does, rather than resetting them.
+        self._skip_and_render_next_button = QPushButton("Try Another Model")
+        self._skip_and_render_next_button.setToolTip(
+            "Preview a different model from this pack instead"
+        )
+        self._skip_and_render_next_button.clicked.connect(self._on_skip_and_render_next)
+        preview_row.addWidget(self._skip_and_render_next_button)
+        layout.addLayout(preview_row)
+
         staging_folder = catalogue.staging_folder()
         detail = catalogue.get_pack_detail(pack_name)
         pack_root = (
@@ -2710,36 +2732,33 @@ class CalibrationReviewDialog(QDialog):
         self.corrections_widget = CorrectionsFormWidget(corrections, pack_root)
         layout.addWidget(self.corrections_widget)
 
-        rerender_row = QHBoxLayout()
-        self._rerender_button = QPushButton("Re-render Preview")
-        self._rerender_button.clicked.connect(self._on_rerender)
-        rerender_row.addWidget(self._rerender_button)
-
-        # For when the model that happened to get picked as the preview
-        # isn't a good representative of the pack (an outlier shape, a
-        # part with its own texture quirks) -- steps to a different,
-        # still-unrendered model instead of forcing a Cancel-and-restart
-        # to see how the pack looks on a different asset. Uses whatever
-        # corrections are already dialed in so far (self.corrections),
-        # same as Render Remaining does, rather than resetting them.
-        self._skip_and_render_next_button = QPushButton("Skip and Render Next")
-        self._skip_and_render_next_button.clicked.connect(self._on_skip_and_render_next)
-        rerender_row.addWidget(self._skip_and_render_next_button)
-        layout.addLayout(rerender_row)
-
+        # The bottom row is only for decisions about the *pack*. Anything
+        # that acts on the preview image lives next to the preview
+        # instead -- previously all five sat in one undifferentiated wall
+        # of grey buttons, so "re-render this one" looked like the same
+        # kind of choice as "remove this pack from the catalogue".
         proceed_row = QHBoxLayout()
-        self._render_all_button = QPushButton(_render_all_label(models_pending))
-        self._render_all_button.clicked.connect(self._on_render_all)
-        proceed_row.addWidget(self._render_all_button)
+        cancel_button = QPushButton("Cancel Import")
+        cancel_button.setToolTip("Remove this pack and everything just ingested")
+        # Destructive, and the rarest thing anyone wants here: kept
+        # visually quiet and far from the button people actually press.
+        cancel_button.setStyleSheet("QPushButton { color: #d98080; }")
+        cancel_button.clicked.connect(self._on_cancel_import)
+        proceed_row.addWidget(cancel_button)
+        proceed_row.addStretch(1)
 
         skip_button = QPushButton("Skip for Now")
+        skip_button.setToolTip("Keep the pack, render the remaining models later")
         skip_button.clicked.connect(self._on_skip)
         proceed_row.addWidget(skip_button)
-        layout.addLayout(proceed_row)
 
-        cancel_button = QPushButton("Cancel Import (Remove This Pack)")
-        cancel_button.clicked.connect(self._on_cancel_import)
-        layout.addWidget(cancel_button)
+        self._render_all_button = QPushButton(_render_all_label(models_pending))
+        self._render_all_button.setStyleSheet(PRIMARY_ACTION_STYLE)
+        self._render_all_button.setCursor(Qt.PointingHandCursor)
+        self._render_all_button.setDefault(True)
+        self._render_all_button.clicked.connect(self._on_render_all)
+        proceed_row.addWidget(self._render_all_button)
+        layout.addLayout(proceed_row)
 
         # Initializes the Skip and Render Next button's enabled state (a
         # pack with only one model total has nothing to step to) -- every

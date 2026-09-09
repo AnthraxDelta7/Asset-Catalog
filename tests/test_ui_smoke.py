@@ -420,7 +420,7 @@ def test_calibration_dialog_still_offers_to_render_the_rest(tmp_path: Path) -> N
     conn, dialog, pending = _calibration_dialog(tmp_path, model_count=3)
 
     assert pending == 2
-    assert dialog._render_all_button.text() == "Render Remaining 2 Model(s)"
+    assert dialog._render_all_button.text() == "Render Remaining 2 Models"
     conn.close()
 
 
