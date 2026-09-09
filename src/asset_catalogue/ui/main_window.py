@@ -116,6 +116,40 @@ def _remember_last_export_mode(mode: str) -> None:
         settings.save(s)
 
 
+# Ingest (assets in) and Export (assets out) are this app's two primary
+# verbs, so they get identical weight -- defined once here rather than
+# styled at each call site, which is how one ended up a prominent blue
+# button and the other a grey afterthought in a corner.
+#
+# The disabled rule matters as much as the enabled one: Export spends
+# most of its life disabled with nothing selected, and a bright blue
+# button that does nothing when clicked is worse than a quiet one.
+PRIMARY_ACTION_STYLE = """
+QPushButton, QToolButton {
+  padding: 6px 18px;
+  font-weight: 600;
+  background-color: #2d6cdf;
+  color: white;
+  border: 1px solid #1f4fb0;
+  border-radius: 4px;
+}
+QPushButton:hover, QToolButton:hover { background-color: #3d7ae8; }
+QPushButton:pressed, QToolButton:pressed { background-color: #1f4fb0; }
+QPushButton:disabled, QToolButton:disabled {
+  background-color: #343434;
+  color: #7a7a7a;
+  border-color: #454545;
+}
+QToolButton::menu-button {
+  border-left: 1px solid #1f4fb0;
+  width: 20px;
+  border-top-right-radius: 4px;
+  border-bottom-right-radius: 4px;
+}
+QToolButton::menu-button:disabled { border-left-color: #454545; }
+"""
+
+
 class FilterPanel(QWidget):
     def __init__(
         self,
@@ -687,6 +721,8 @@ class DetailPanel(QWidget):
         export_row.addStretch(1)
         self.export_button = QToolButton()
         self.export_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.export_button.setCursor(Qt.PointingHandCursor)
+        self.export_button.setStyleSheet(PRIMARY_ACTION_STYLE)
         self.export_button.clicked.connect(self._on_export_button_clicked)
         self.export_menu = QMenu(self.export_button)
         self.export_button.setMenu(self.export_menu)
@@ -3932,18 +3968,7 @@ class MainWindow(QMainWindow):
         # A real QPushButton always shows a proper raised border/background.
         ingest_button = QPushButton("Ingest Pack...")
         ingest_button.setCursor(Qt.PointingHandCursor)
-        ingest_button.setStyleSheet(
-            "QPushButton {"
-            "  padding: 6px 18px;"
-            "  font-weight: 600;"
-            "  background-color: #2d6cdf;"
-            "  color: white;"
-            "  border: 1px solid #1f4fb0;"
-            "  border-radius: 4px;"
-            "}"
-            "QPushButton:hover { background-color: #3d7ae8; }"
-            "QPushButton:pressed { background-color: #1f4fb0; }"
-        )
+        ingest_button.setStyleSheet(PRIMARY_ACTION_STYLE)
         ingest_button.clicked.connect(self._open_ingest_dialog)
         toolbar.addWidget(ingest_button)
 
