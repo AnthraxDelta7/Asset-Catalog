@@ -534,3 +534,47 @@ def test_texture_override_falls_back_to_free_text_with_no_known_materials(
 
     corrections, _error = widget.read()
     assert "TypedName" in corrections["texture_overrides"]
+
+
+def _visible_packs(panel) -> list[str]:
+    return [
+        panel.pack_list.item(row).text()
+        for row in range(panel.pack_list.count())
+        if not panel.pack_list.item(row).isHidden()
+    ]
+
+
+def test_pack_search_filters_the_list_and_clears_when_collapsed(qapp, tmp_path: Path) -> None:
+    from asset_catalogue import db, ingest
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import FilterPanel
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    conn = db.connect(library / "catalogue.db")
+    for name in ("SciFi Interiors", "SciFi Weapons", "Fantasy Village"):
+        pack = staging / name
+        pack.mkdir(parents=True)
+        write_minimal_glb(pack / "a.glb", {"meshes": [{"name": name}]})
+        pack_id, _ = ingest.get_or_create_pack(conn, name, name, None, None, None)
+        ingest.ingest_pack(conn, pack, pack_id)
+
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    noop = lambda *a, **k: None  # noqa: E731
+    panel = FilterPanel(catalogue, noop, noop, noop, noop, noop, noop)
+
+    assert len(_visible_packs(panel)) == 4  # "All packs" plus three
+
+    panel.pack_search_toggle.setChecked(True)
+    panel.pack_search_edit.setText("scifi")
+    # Case-insensitive, and "All packs" survives filtering because it's
+    # the only way back to an unfiltered grid.
+    assert _visible_packs(panel) == ["All packs", "SciFi Interiors", "SciFi Weapons"]
+
+    # Collapsing clears the filter -- otherwise packs stay hidden with no
+    # visible control explaining why.
+    panel.pack_search_toggle.setChecked(False)
+    assert len(_visible_packs(panel)) == 4
+    assert panel.pack_search_edit.text() == ""
+    conn.close()

@@ -208,7 +208,31 @@ class FilterPanel(QWidget):
         self.format_combo.currentIndexChanged.connect(self._on_change)
         layout.addWidget(self.format_combo)
 
-        layout.addWidget(QLabel("Pack"))
+        # Header row: the label, plus a magnifier that expands into a
+        # filter box. Collapsed by default because a library with a
+        # handful of packs doesn't need it, and a permanent second search
+        # field directly under the asset search reads as clutter.
+        pack_header = QHBoxLayout()
+        pack_header.setContentsMargins(0, 0, 0, 0)
+        pack_header.addWidget(QLabel("Pack"))
+        pack_header.addStretch(1)
+        self.pack_search_toggle = QToolButton()
+        self.pack_search_toggle.setText("🔍")
+        self.pack_search_toggle.setCheckable(True)
+        self.pack_search_toggle.setToolTip("Filter this list by name")
+        self.pack_search_toggle.setAutoRaise(True)
+        self.pack_search_toggle.setCursor(Qt.PointingHandCursor)
+        self.pack_search_toggle.toggled.connect(self._toggle_pack_search)
+        pack_header.addWidget(self.pack_search_toggle)
+        layout.addLayout(pack_header)
+
+        self.pack_search_edit = QLineEdit()
+        self.pack_search_edit.setPlaceholderText("Filter packs...")
+        self.pack_search_edit.setClearButtonEnabled(True)
+        self.pack_search_edit.setVisible(False)
+        self.pack_search_edit.textChanged.connect(lambda _text: self._apply_pack_filter())
+        layout.addWidget(self.pack_search_edit)
+
         self.pack_list = QListWidget()
         self.pack_list.addItem("All packs")
         self.pack_list.addItems(catalogue.list_packs())
@@ -267,6 +291,26 @@ class FilterPanel(QWidget):
         row = self.pack_list.currentRow()
         return None if row <= 0 else self.pack_list.item(row).text()
 
+    def _toggle_pack_search(self, expanded: bool) -> None:
+        self.pack_search_edit.setVisible(expanded)
+        if expanded:
+            self.pack_search_edit.setFocus()
+        else:
+            # Collapsing has to clear the filter too, or packs stay hidden
+            # with no visible control explaining why.
+            self.pack_search_edit.clear()
+
+    def _apply_pack_filter(self) -> None:
+        needle = self.pack_search_edit.text().strip().lower()
+        for row in range(self.pack_list.count()):
+            item = self.pack_list.item(row)
+            # Row 0 is "All packs" -- the way back to an unfiltered grid,
+            # so it must never be filtered away. The current selection
+            # stays visible too: hiding it would leave the grid filtered
+            # by a pack the user can no longer see.
+            always = row == 0 or row == self.pack_list.currentRow()
+            item.setHidden(not (always or not needle or needle in item.text().lower()))
+
     def refresh_packs(self, catalogue: Catalogue, select: str | None = None) -> None:
         self._catalogue = catalogue
         target = select if select is not None else self.selected_pack()
@@ -281,6 +325,8 @@ class FilterPanel(QWidget):
                 restore_row = self.pack_list.row(match[0])
         self.pack_list.setCurrentRow(restore_row)
         self.pack_list.blockSignals(False)
+        # Rows were rebuilt, so their hidden state was lost with them.
+        self._apply_pack_filter()
 
     def _show_pack_context_menu(self, pos) -> None:
         menu = self._build_pack_context_menu(pos)
