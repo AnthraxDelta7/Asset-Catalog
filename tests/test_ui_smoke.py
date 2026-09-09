@@ -553,3 +553,26 @@ def test_unrendered_thumbnail_placeholder_says_so(qapp, tmp_path: Path) -> None:
                for x in range(0, image.width(), 3)}
     assert len(colours) > 1
     conn.close()
+
+
+def test_calibration_dialog_has_no_way_to_skip_rendering(tmp_path: Path) -> None:
+    """A model's rig and animation clips are captured during its
+    thumbnail render, so an un-rendered model is a second-class asset the
+    app can't describe -- not merely one missing a picture. Deferring
+    that indefinitely made the difference invisible and permanent, so the
+    only exits are rendering or removing the pack.
+    """
+    conn, dialog, pending = _calibration_dialog(tmp_path, model_count=3)
+
+    assert pending == 2
+    labels = [
+        child.text()
+        for child in dialog.findChildren(type(dialog._render_all_button))
+    ]
+    assert "Skip for Now" not in labels
+    assert "Render Remaining 2 Models" in labels
+    assert "Cancel Import" in labels
+    # Closing without choosing isn't a decision -- the caller renders
+    # whatever is still pending rather than leaving it half-done.
+    assert dialog.result_action == "pending"
+    conn.close()

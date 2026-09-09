@@ -2783,10 +2783,17 @@ class CalibrationReviewDialog(QDialog):
     reporting the situation in a text message and requiring a separate trip
     through Edit Pack Metadata plus a menu action to act on it.
 
-    self.result_action is one of "render_all", "skip", or "cancelled" once
-    the dialog closes -- callers should treat a rejected/closed-via-X dialog
-    the same as "skip" (nothing further needs undoing; the pack was already
-    fully ingested before this dialog ever opened).
+    There is deliberately no "skip" button. A model's rig and animation
+    clips are captured during its thumbnail render (see model_metadata),
+    so an un-rendered model isn't merely missing a picture -- it's a
+    second-class asset whose contents the app can't describe, and whose
+    animations can't be previewed or listed. Leaving packs half-rendered
+    made that difference invisible and permanent.
+
+    self.result_action is "render_all" or "cancelled". Closing via X
+    leaves models pending, which the caller finishes off rather than
+    trapping the user in a modal -- see MainWindow._show_calibration_
+    review.
     """
 
     def __init__(
@@ -2806,7 +2813,9 @@ class CalibrationReviewDialog(QDialog):
         self._preview_asset_id = preview_asset_id
         self._models_pending = models_pending
         self._worker: _BackgroundWorker | None = None
-        self.result_action = "skip"
+        # Closing via X leaves this as "pending": not a decision, just
+        # the dialog going away. The caller finishes the render off.
+        self.result_action = "pending"
         self.corrections = dict(corrections)
 
         self.setWindowTitle(f"Calibration Preview -- {pack_name}")
@@ -2882,11 +2891,6 @@ class CalibrationReviewDialog(QDialog):
         cancel_button.clicked.connect(self._on_cancel_import)
         proceed_row.addWidget(cancel_button)
         proceed_row.addStretch(1)
-
-        skip_button = QPushButton("Skip for Now")
-        skip_button.setToolTip("Keep the pack, render the remaining models later")
-        skip_button.clicked.connect(self._on_skip)
-        proceed_row.addWidget(skip_button)
 
         self._render_all_button = QPushButton(_render_all_label(models_pending))
         self._render_all_button.setStyleSheet(PRIMARY_ACTION_STYLE)
@@ -3043,10 +3047,6 @@ class CalibrationReviewDialog(QDialog):
             self.accept()
 
         self._run_job(job, f"Rendering {self._models_pending} model thumbnail(s)...", on_ok)
-
-    def _on_skip(self) -> None:
-        self.result_action = "skip"
-        self.accept()
 
     def _on_cancel_import(self) -> None:
         confirm = QMessageBox.question(
@@ -4489,6 +4489,35 @@ class MainWindow(QMainWindow):
             self,
         )
         dialog.exec()
+        if dialog.result_action == "cancelled":
+            return
+        # Closing the dialog with X isn't a way to opt out of rendering,
+        # it's just a way to stop configuring corrections: a model's rig
+        # and clips come from its thumbnail render, so a half-rendered
+        # pack leaves assets the app can't describe. Anything still
+        # pending is finished off here rather than trapping the user in a
+        # modal with no exit.
+        if self._catalogue.count_pending_model_assets(detail.id) > 0:
+            self._render_pack_models(pack_name)
+
+    def _render_pack_models(self, pack_name: str) -> None:
+        """Renders every still-pending model in one pack."""
+        def job(report):
+            report("Checking Blender installation...")
+            blender_exe = self._catalogue.resolve_blender()
+            return self._catalogue.generate_model_thumbnails_bg(
+                blender_exe, pack=pack_name, on_progress=report
+            )
+
+        self._run_background_job(
+            job,
+            f"Rendering remaining models in {pack_name}...",
+            lambda stats: (
+                f"Model thumbnails: {stats.generated} generated, "
+                f"{stats.already_done} already done, {stats.failed} failed"
+            ),
+            self._refresh_grid,
+        )
 
     def _generate_2d_thumbnails(self) -> None:
         pack = self.filter_panel.selected_pack()
