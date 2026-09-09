@@ -467,3 +467,70 @@ def test_progress_dialog_switches_to_determinate_only_once_a_count_arrives(qapp)
     assert dialog._step_label.text() == "Rendering crate.glb (3/12)"
     assert "Starting Blender..." in dialog._log.toPlainText()
     dialog.close()
+
+
+def test_texture_override_offers_known_broken_materials(qapp, tmp_path: Path) -> None:
+    """An override only takes effect on an exact, case-sensitive material
+    name, so retyping one from memory is the failure-prone step. The
+    materials already recorded as having a broken texture are exactly the
+    ones an override is for, so they're offered as a list.
+    """
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+
+    from asset_catalogue.ui.main_window import CorrectionsFormWidget
+
+    pack_root = tmp_path / "Pack"
+    (pack_root / "Textures").mkdir(parents=True)
+    texture = pack_root / "Textures" / "wood.png"
+    texture.write_bytes(b"")
+
+    widget = CorrectionsFormWidget(
+        {}, pack_root=pack_root, known_materials=["Metal_A", "Wood_B"]
+    )
+
+    with (
+        patch.object(QInputDialog, "getItem", return_value=("Wood_B", True)) as pick,
+        patch.object(QFileDialog, "getOpenFileName", return_value=(str(texture), "")),
+    ):
+        widget._add_texture_override()
+        # The known names are what's offered, and the field stays editable
+        # so an unrendered model's material can still be typed in.
+        assert pick.call_args.args[3] == ["Metal_A", "Wood_B"]
+        assert pick.call_args.args[5] is True
+
+    corrections, _error = widget.read()
+    assert corrections["texture_overrides"] == {"Wood_B": str(Path("Textures") / "wood.png")}
+
+
+def test_texture_override_falls_back_to_free_text_with_no_known_materials(
+    qapp, tmp_path: Path
+) -> None:
+    """Nothing rendered yet means nothing recorded as broken -- the
+    override must still be reachable rather than offering an empty list.
+    """
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+
+    from asset_catalogue.ui.main_window import CorrectionsFormWidget
+
+    pack_root = tmp_path / "Pack"
+    (pack_root / "Textures").mkdir(parents=True)
+    texture = pack_root / "Textures" / "wood.png"
+    texture.write_bytes(b"")
+
+    widget = CorrectionsFormWidget({}, pack_root=pack_root)
+
+    with (
+        patch.object(QInputDialog, "getText", return_value=("TypedName", True)) as typed,
+        patch.object(QInputDialog, "getItem") as picked,
+        patch.object(QFileDialog, "getOpenFileName", return_value=(str(texture), "")),
+    ):
+        widget._add_texture_override()
+        assert typed.called
+        assert not picked.called
+
+    corrections, _error = widget.read()
+    assert "TypedName" in corrections["texture_overrides"]

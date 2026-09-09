@@ -1951,9 +1951,20 @@ class CorrectionsFormWidget(QWidget):
     pack," the same assumption the automatic matcher makes.
     """
 
-    def __init__(self, initial: dict, pack_root: Path | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        initial: dict,
+        pack_root: Path | None = None,
+        parent: QWidget | None = None,
+        known_materials: list[str] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._pack_root = pack_root
+        # Material names already known to reference a broken texture (see
+        # broken_textures.py) -- exactly the ones an override is for. An
+        # override only works on an exact, case-sensitive match, so
+        # picking from the real list beats retyping a name from memory.
+        self._known_materials = list(known_materials or [])
         self._texture_overrides: dict[str, str] = dict(initial.get("texture_overrides") or {})
         form = QFormLayout(self)
         form.setContentsMargins(0, 0, 0, 0)
@@ -2017,9 +2028,22 @@ class CorrectionsFormWidget(QWidget):
             self.overrides_list.addItem(f"{material_name} -> {relative_path}")
 
     def _add_texture_override(self) -> None:
-        material_name, ok = QInputDialog.getText(
-            self, "Texture Override", "Material name (exact, case-sensitive):"
-        )
+        if self._known_materials:
+            # Editable, so a material this app hasn't seen fail (or one
+            # from a model that hasn't been rendered yet) can still be
+            # typed in -- the list is a shortcut, not a restriction.
+            material_name, ok = QInputDialog.getItem(
+                self,
+                "Texture Override",
+                "Material (pick one with a missing texture, or type a name):",
+                self._known_materials,
+                0,
+                True,
+            )
+        else:
+            material_name, ok = QInputDialog.getText(
+                self, "Texture Override", "Material name (exact, case-sensitive):"
+            )
         if not ok or not material_name.strip():
             return
         material_name = material_name.strip()
@@ -2144,7 +2168,17 @@ class PackEditDialog(QDialog):
         corrections_label.setWordWrap(True)
         layout.addWidget(corrections_label)
 
-        self.corrections_widget = CorrectionsFormWidget(detail.corrections, pack_root)
+        self.corrections_widget = CorrectionsFormWidget(
+            detail.corrections,
+            pack_root,
+            known_materials=sorted(
+                {
+                    row["material_name"]
+                    for row in catalogue.list_broken_texture_materials()
+                    if row["pack_id"] == detail.id
+                }
+            ),
+        )
         layout.addWidget(self.corrections_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2729,7 +2763,11 @@ class CalibrationReviewDialog(QDialog):
         pack_root = (
             staging_folder / detail.pack_folder if staging_folder is not None and detail is not None else None
         )
-        self.corrections_widget = CorrectionsFormWidget(corrections, pack_root)
+        self.corrections_widget = CorrectionsFormWidget(
+            corrections,
+            pack_root,
+            known_materials=catalogue.list_broken_texture_materials_for_asset(preview_asset_id),
+        )
         layout.addWidget(self.corrections_widget)
 
         # The bottom row is only for decisions about the *pack*. Anything
