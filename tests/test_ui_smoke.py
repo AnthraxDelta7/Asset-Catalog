@@ -724,3 +724,55 @@ def test_a_single_model_file_ingests_as_its_own_pack(tmp_path: Path, monkeypatch
     for row in rows:
         assert (staging / row["pack_folder"] / row["relative_path"]).is_file()
     conn.close()
+
+
+def test_thumbnail_cache_is_dropped_when_a_thumbnail_is_rerendered(
+    qapp, tmp_path: Path
+) -> None:
+    """The grid caches scaled pixmaps under the asset's content hash,
+    which is the identity of the *source file* -- and re-rendering a
+    thumbnail rewrites the PNG without moving that hash. Without explicit
+    invalidation the grid serves the superseded image indefinitely.
+    """
+    from asset_catalogue import db, ingest, thumbnails
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import ThumbnailGrid
+    from conftest import write_minimal_glb
+    from PySide6.QtGui import QColor, QPixmap
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    write_minimal_glb(pack / "prop.glb", {"meshes": [{}]})
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    asset = catalogue.list_assets()[0]
+
+    def write_thumbnail(color: str) -> None:
+        path = thumbnails.thumbnail_path(library / "thumbnails", asset.content_hash)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor(color))
+        assert pixmap.save(str(path))
+
+    def loaded_color(grid) -> int:
+        return grid._load_thumbnail(asset, catalogue).toImage().pixelColor(2, 2).rgb()
+
+    grid = ThumbnailGrid()
+    write_thumbnail("#ff0000")
+    red = loaded_color(grid)
+
+    # The re-render: same asset, same hash, different picture on disk.
+    write_thumbnail("#0000ff")
+    assert loaded_color(grid) == red, "cache should still be serving the old image"
+
+    grid.invalidate_thumbnails([asset.content_hash])
+    assert loaded_color(grid) != red
+
+    # An empty list is a legitimate outcome -- a regeneration job can
+    # report zero re-renders when everything was already done.
+    grid.invalidate_thumbnails([])
+    conn.close()

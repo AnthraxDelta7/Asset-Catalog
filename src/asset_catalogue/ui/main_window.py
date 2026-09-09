@@ -10,7 +10,14 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QSurfaceFormat
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QSurfaceFormat,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -221,15 +228,22 @@ class FilterPanel(QWidget):
         # field directly under the asset search reads as clutter.
         pack_header = QHBoxLayout()
         pack_header.setContentsMargins(0, 0, 0, 0)
-        # A link rather than a plain heading: this list is a filter, and
-        # the full pack view is a different job (bulk edits, contents,
-        # hiding). Making the heading the way in keeps that discoverable
-        # without spending another toolbar button on it.
-        self.packs_link = QLabel('<a href="#packs" style="color:#7aa2f7;">Packs &rsaquo;</a>')
-        self.packs_link.setToolTip("View all packs")
-        self.packs_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.packs_link.linkActivated.connect(lambda _href: self._on_open_pack_manager())
-        pack_header.addWidget(self.packs_link)
+        # A real button, not a hyperlink: this isn't navigation to
+        # somewhere else, it's an action that opens a dialog, and styling
+        # it as a URL made it read like web chrome dropped into a desktop
+        # app. Flat and quiet so it still sits as a heading rather than
+        # competing with Ingest.
+        self.packs_button = QToolButton()
+        self.packs_button.setText("Packs ›")
+        self.packs_button.setToolTip("View all packs")
+        self.packs_button.setAutoRaise(True)
+        self.packs_button.setCursor(Qt.PointingHandCursor)
+        self.packs_button.setStyleSheet(
+            "QToolButton { border: none; padding: 0px; font-weight: 600; }"
+            "QToolButton:hover { color: #7aa2f7; }"
+        )
+        self.packs_button.clicked.connect(lambda: self._on_open_pack_manager())
+        pack_header.addWidget(self.packs_button)
         pack_header.addStretch(1)
         self.pack_search_toggle = QToolButton()
         # Qt's own theme icon set, not an emoji character and not a
@@ -422,9 +436,27 @@ class FilterPanel(QWidget):
         self.tag_list.blockSignals(False)
 
 
+# Small enough that a batch never blocks long enough to feel like a
+# stutter, big enough that a large pack doesn't take hundreds of event
+# loop turns to finish.
+ICON_FILL_BATCH = 24
+
+# Scaled thumbnails kept between refreshes, so switching back to a pack
+# doesn't re-decode every PNG. Deliberately not QPixmapCache: that has
+# its own internal flush timer which drops entries the moment nothing
+# else references them, so at a few hundred assets it measured no better
+# than no cache at all. A plain bounded dict is predictable.
+#
+# ~100KB per entry at 128px on a 1.25x display, so this caps out around
+# 150MB in the worst case and evicts oldest-first beyond that.
+THUMBNAIL_CACHE_ENTRIES = 1500
+
+
 class ThumbnailGrid(QListWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._fill_generation = 0
+        self._thumbnail_cache: dict[str, QPixmap] = {}
         self.setViewMode(QListWidget.IconMode)
         self.setIconSize(THUMBNAIL_ICON_SIZE)
         self.setResizeMode(QListWidget.Adjust)
@@ -438,6 +470,15 @@ class ThumbnailGrid(QListWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def set_assets(self, assets: list[AssetSummary], catalogue: Catalogue) -> None:
+        """Fills the grid, then streams the thumbnails in afterwards.
+
+        Decoding and scaling a 512px PNG costs around 4ms, so a 400-asset
+        pack spent about 1.7 seconds loading pictures before the window
+        would respond -- felt like a freeze on every pack switch, search
+        and filter change. The items go in immediately with their names,
+        and icons arrive in batches from the event loop, so the grid is
+        usable while it fills.
+        """
         # Rebuilding the item list can make Qt pick its own new "current"
         # item as items are cleared/added; block signals so that transient
         # churn doesn't reach the selection handler, and restore the real
@@ -453,17 +494,71 @@ class ThumbnailGrid(QListWidget):
             label = f"{badges} {asset.filename}" if badges else asset.filename
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, asset.id)
-            item.setIcon(QIcon(self._load_thumbnail(asset, catalogue)))
-            tooltip = f"{asset.pack_name} / {asset.filename}\n{asset.asset_type}"
+            tooltip = (
+                f"{asset.pack_name} / {asset.filename}" + chr(10) + asset.asset_type
+            )
             if asset.needs_glb_conversion:
                 tooltip += (
-                    "\n⚠ Needs conversion to .glb -- a texture fix on this asset only "
-                    "lives in the render, not the file itself, until converted"
+                    chr(10)
+                    + "⚠ Needs conversion to .glb -- a texture fix on this asset "
+                    "only lives in the render, not the file itself, until converted"
                 )
             item.setToolTip(tooltip)
             item.setSizeHint(GRID_CELL_SIZE)
             self.addItem(item)
         self.blockSignals(False)
+        self._start_icon_fill(assets, catalogue)
+
+    def invalidate_thumbnails(self, content_hashes: list[str]) -> None:
+        """Drop cached pixmaps for assets whose thumbnail was just re-rendered.
+
+        The cache key is the content hash, which is the identity of the
+        *source file* -- and a re-render doesn't change that, so without
+        this the grid keeps showing the stale image indefinitely.
+
+        Called after any job that rewrites thumbnail PNGs on disk.
+        """
+        if not content_hashes:
+            return
+        # A hash can hold entries at more than one width, so match on the
+        # key's prefix rather than popping the hash itself. Collected
+        # before deleting: mutating a dict mid-iteration raises.
+        doomed = set(content_hashes)
+        stale = [key for key in self._thumbnail_cache if key.rsplit(":", 1)[0] in doomed]
+        for key in stale:
+            del self._thumbnail_cache[key]
+
+    def _remember_thumbnail(self, key: str, pixmap: QPixmap) -> None:
+        # Oldest-first eviction: a dict preserves insertion order, and
+        # the access pattern here is "sweep a pack", so recency barely
+        # differs from insertion order in practice.
+        if len(self._thumbnail_cache) >= THUMBNAIL_CACHE_ENTRIES:
+            for oldest in list(self._thumbnail_cache)[: THUMBNAIL_CACHE_ENTRIES // 4]:
+                del self._thumbnail_cache[oldest]
+        self._thumbnail_cache[key] = pixmap
+
+    def _start_icon_fill(self, assets: list[AssetSummary], catalogue: Catalogue) -> None:
+        # A refresh landing mid-fill (typing in the search box does this
+        # on every keystroke) must abandon the previous one, or icons from
+        # the old result set get written onto the new rows.
+        self._fill_generation += 1
+        generation = self._fill_generation
+        pending = list(enumerate(assets))
+
+        def fill_batch() -> None:
+            if generation != self._fill_generation:
+                return
+            batch = pending[:ICON_FILL_BATCH]
+            del pending[:ICON_FILL_BATCH]
+            for row, asset in batch:
+                item = self.item(row)
+                if item is not None:
+                    item.setIcon(QIcon(self._load_thumbnail(asset, catalogue)))
+            if pending:
+                QTimer.singleShot(0, fill_batch)
+
+        if pending:
+            QTimer.singleShot(0, fill_batch)
 
     def select_asset_id(self, asset_id: int | None) -> None:
         if asset_id is not None:
@@ -487,6 +582,13 @@ class ThumbnailGrid(QListWidget):
         physical_size = QSize(
             round(THUMBNAIL_ICON_SIZE.width() * dpr), round(THUMBNAIL_ICON_SIZE.height() * dpr)
         )
+        # Keyed by content hash, already this app's identity for a
+        # thumbnail -- two assets with identical bytes share one entry.
+        cache_key = f"{asset.content_hash}:{physical_size.width()}"
+        cached = self._thumbnail_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         path = catalogue.thumbnail_path_for(asset.content_hash)
         if path is not None:
             pixmap = QPixmap(str(path))
@@ -497,6 +599,7 @@ class ThumbnailGrid(QListWidget):
                     Qt.SmoothTransformation,
                 )
                 scaled.setDevicePixelRatio(dpr)
+                self._remember_thumbnail(cache_key, scaled)
                 return scaled
         # No thumbnail yet. A flat grey square says nothing -- it reads as
         # a broken asset rather than one that simply hasn't been rendered,
@@ -5166,6 +5269,11 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_generate_thumbnail(self, asset_id: int, asset_type: str) -> None:
+        # Same staleness problem as _regenerate_thumbnails: this path is
+        # reachable for an asset that already has a thumbnail, and a
+        # re-render doesn't move the content hash the cache keys on.
+        existing = next((a for a in self._current_assets if a.id == asset_id), None)
+        touched = [existing.content_hash] if existing is not None else []
         if asset_type == "texture":
             job = lambda report: self._catalogue.generate_2d_thumbnails_bg(asset_id=asset_id, on_progress=report)
         elif asset_type == "audio":
@@ -5182,7 +5290,7 @@ class MainWindow(QMainWindow):
                 f"Thumbnail: {stats.generated} generated, "
                 f"{stats.already_done} already done, {stats.failed} failed"
             ),
-            self._refresh_grid,
+            lambda: (self.grid.invalidate_thumbnails(touched), self._refresh_grid()),
         )
 
     def _regenerate_thumbnails(self, asset_ids: list[int]) -> None:
@@ -5194,9 +5302,14 @@ class MainWindow(QMainWindow):
         out by the caller (see _build_grid_context_menu).
         """
         by_type: dict[str, list[int]] = {"texture": [], "audio": [], "model": []}
+        # Captured now, while the assets are still in hand: the re-render
+        # rewrites these PNGs without changing the hash that identifies
+        # them, so the grid's pixmap cache has to be told to let them go.
+        touched_hashes: list[str] = []
         for asset in self._current_assets:
             if asset.id in asset_ids and asset.asset_type in by_type:
                 by_type[asset.asset_type].append(asset.id)
+                touched_hashes.append(asset.content_hash)
 
         def job(report):
             generated = already_done = failed = 0
@@ -5229,7 +5342,7 @@ class MainWindow(QMainWindow):
             lambda result: (
                 f"Thumbnails: {result[0]} generated, {result[1]} already done, {result[2]} failed"
             ),
-            self._refresh_grid,
+            lambda: (self.grid.invalidate_thumbnails(touched_hashes), self._refresh_grid()),
         )
 
     def _handle_toggle_favorite(self, asset_id: int, favorite: bool) -> None:
