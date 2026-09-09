@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import progress
-
 ProgressCallback = Callable[[str], None]
 
 
@@ -296,7 +294,7 @@ def plan_godot_export(
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not item.needs_conversion:
-            progress.advance(on_progress, f"Exporting {relative_path}...")
+            report(f"Exporting {relative_path}...")
             shutil.copy2(item.source, destination)
             record_export(conn, item.asset_id, project_identifier, destination)
         items.append(item)

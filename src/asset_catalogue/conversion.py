@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
-from asset_catalogue import ingest, library_assets, paths, progress
+from asset_catalogue import ingest, library_assets, paths
 
 ProgressCallback = Callable[[str], None]
 
@@ -310,7 +310,6 @@ def convert_assets_to_gltf(
     report(
         f"Starting Blender to convert {len(jobs)} model{'s' if len(jobs) != 1 else ''} to .glb..."
     )
-    progress.begin(on_progress, len(jobs))
 
     def display_name_for(asset_id: int) -> str:
         row = job_context.get(asset_id, (None,))[0]
@@ -329,11 +328,7 @@ def convert_assets_to_gltf(
             row, new_relative_path, output_path = job_context[asset_id]
             if payload != "ok":
                 result.failed += 1
-                progress.advance(
-                    on_progress,
-                    f"Failed to convert {row['filename']} ({len(seen_ids)}/{len(jobs)})",
-                    len(seen_ids),
-                )
+                report(f"Failed to convert {row['filename']} ({len(seen_ids)}/{len(jobs)})")
                 if output_path.exists():
                     output_path.unlink()
                 continue
@@ -342,11 +337,7 @@ def convert_assets_to_gltf(
             )
             result.converted += 1
             result.converted_asset_ids.append(asset_id)
-            progress.advance(
-                on_progress,
-                f"Converted {row['filename']} to .glb ({len(seen_ids)}/{len(jobs)})",
-                len(seen_ids),
-            )
+            report(f"Converted {row['filename']} to .glb ({len(seen_ids)}/{len(jobs)})")
 
     missing = [job for job in jobs if job["asset_id"] not in seen_ids]
     for job in missing:
@@ -432,10 +423,9 @@ def convert_for_export(
             seen_ids.add(asset_id)
             if payload == "ok":
                 result.converted_asset_ids.append(asset_id)
-                progress.advance(
-                    on_progress,
+                report(
                     f"Converted {display_name_for(asset_id)} to .glb "
-                    f"({len(result.converted_asset_ids)}/{len(jobs)})",
+                    f"({len(result.converted_asset_ids)}/{len(jobs)})"
                 )
                 continue
             if asset_id not in explained:

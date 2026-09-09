@@ -2492,44 +2492,10 @@ class LibraryStatsDialog(QDialog):
         self.report_view.setPlainText(library_stats.format_report(catalogue.get_library_stats()))
 
 
-class _JobReporter:
-    """What a job receives as its `on_progress`.
-
-    Callable, so every job that only reports text keeps working
-    unchanged. Jobs that additionally declare a total (see
-    progress.begin/advance) drive the real bar through these signals --
-    emitted rather than touched directly because this lives on the
-    worker thread and the dialog does not.
-    """
-
-    def __init__(self, text_signal, overall_signal) -> None:
-        self._text = text_signal
-        self._overall = overall_signal
-        self._total = 0
-        self._done = 0
-
-    def __call__(self, text: str) -> None:
-        self._text.emit(text)
-
-    def begin(self, total: int) -> None:
-        self._total = max(0, total)
-        self._done = 0
-        self._overall.emit(0, self._total)
-
-    def advance(self, text: str, done: int | None = None) -> None:
-        self._done = done if done is not None else self._done + 1
-        self._text.emit(text)
-        if self._total:
-            # Clamped: a job that miscounts its own units must not push
-            # the bar past full or backwards.
-            self._overall.emit(max(0, min(self._done, self._total)), self._total)
-
-
 class _BackgroundWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
     progress = Signal(str)
-    progress_overall = Signal(int, int)
 
     def __init__(self, fn) -> None:
         super().__init__()
@@ -2537,7 +2503,7 @@ class _BackgroundWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = self._fn(_JobReporter(self.progress, self.progress_overall))
+            result = self._fn(self.progress.emit)
         except Exception as exc:  # noqa: BLE001 -- reported to the UI, not swallowed
             # The QMessageBox this feeds only ever shows str(exc) -- often
             # far less informative than the real traceback, which is why
@@ -2547,6 +2513,29 @@ class _BackgroundWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result)
+
+
+# "12/24", "(2 of 6)", "Pack 1/2" -- the shape a job's own progress text
+# already uses. Parsed out rather than threading a structured (current,
+# total) signal through several dozen existing call sites, none of which
+# would otherwise need to change.
+_PROGRESS_COUNT_RE = re.compile(r"\b(\d+)\s*(?:/|of)\s*(\d+)\b")
+
+
+def parse_progress_count(text: str) -> tuple[int, int] | None:
+    """The last plausible "current/total" in a progress line, or None.
+
+    Last rather than first: a message like "Pack 2/2: rendering 3/40"
+    ends with the count that's actually moving. Implausible pairs are
+    rejected (zero total, current past total) so a version number or a
+    filename containing "1/2" can't drive the bar backwards.
+    """
+    best = None
+    for match in _PROGRESS_COUNT_RE.finditer(text):
+        current, total = int(match.group(1)), int(match.group(2))
+        if 0 < total and current <= total:
+            best = (current, total)
+    return best
 
 
 class ProgressLogDialog(QDialog):
@@ -2616,18 +2605,11 @@ class ProgressLogDialog(QDialog):
         scrollbar = self._log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def set_overall(self, done: int, total: int) -> None:
-        """Real position, from the job's own declared unit count.
-
-        Only a job knows how much of itself a phase represents, so the
-        bar moves only when told. Until then it stays in its travelling
-        band, which says "running" without claiming a position -- an
-        earlier version read percentages out of phase counts like "frame
-        5/24" and jumped backwards every time a new phase started.
-        """
-        if total > 0:
-            self._bar.set_progress(done, total)
-            self._count_label.setText(f"{done} of {total}")
+        counts = parse_progress_count(text)
+        if counts is not None:
+            current, total = counts
+            self._bar.set_progress(current, total)
+            self._count_label.setText(f"{current} of {total}")
 
     def done(self, result: int) -> None:
         # Both timers repaint a widget; leaving them running against a
@@ -5027,8 +5009,6 @@ class MainWindow(QMainWindow):
 
         def on_progress(text: str) -> None:
             progress.append(text)
-
-        worker.progress_overall.connect(progress.set_overall)
 
         def on_ok(result) -> None:
             progress.close()

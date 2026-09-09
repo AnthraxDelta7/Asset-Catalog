@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-
-from asset_catalogue import progress
 from pathlib import Path
 from typing import Callable
 
@@ -73,12 +71,7 @@ def generate_texture_thumbnails(
 
     rows = conn.execute(query, params).fetchall()
     stats = ThumbnailStats()
-    # Counted including the already-done ones, so the bar reflects the
-    # work the user asked for rather than only the subset that turned out
-    # to need rendering -- otherwise re-running on a mostly-cached pack
-    # would show a total that shrinks as it goes.
-    progress.begin(on_progress, len(rows))
-    for index, row in enumerate(rows, start=1):
+    for row in rows:
         dest = thumbnail_path(thumbnail_dir, row["content_hash"])
 
         # Thumbnail identity is the hash, not the file -- if it's already on
@@ -89,10 +82,9 @@ def generate_texture_thumbnails(
                 (row["id"],),
             )
             stats.already_done += 1
-            progress.advance(on_progress, f"Already rendered: {row['filename']}", index)
             continue
 
-        progress.advance(on_progress, f"Rendering thumbnail for {row['filename']}...", index)
+        report(f"Rendering thumbnail for {row['filename']}...")
         source = staging_folder / row["pack_folder"] / row["relative_path"]
         try:
             render_2d_thumbnail(source, dest)

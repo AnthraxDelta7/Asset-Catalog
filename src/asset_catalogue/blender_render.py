@@ -10,14 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import (
-    audio_thumbnails,
-    broken_textures,
-    model_preview,
-    paths,
-    progress,
-    thumbnails,
-)
+from asset_catalogue import audio_thumbnails, broken_textures, model_preview, paths, thumbnails
 
 ProgressCallback = Callable[[str], None]
 
@@ -215,7 +208,6 @@ def generate_model_thumbnails(
         f"Starting Blender to render {len(jobs)} model thumbnail"
         f"{'s' if len(jobs) != 1 else ''}..."
     )
-    progress.begin(on_progress, len(jobs))
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
     if preview_dir is not None:
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -292,18 +284,10 @@ def generate_model_thumbnails(
             filename = filenames_by_id.get(asset_id, f"asset {asset_id}")
             if status == "ok":
                 stats.generated += 1
-                progress.advance(
-                    on_progress,
-                    f"Rendered thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})",
-                    len(seen_ids),
-                )
+                report(f"Rendered thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})")
             else:
                 stats.failed += 1
-                progress.advance(
-                    on_progress,
-                    f"Failed to render thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})",
-                    len(seen_ids),
-                )
+                report(f"Failed to render thumbnail for {filename} ({len(seen_ids)}/{len(jobs)})")
             if broken_texture:
                 stats.broken_texture_filenames.append(filename)
                 report(f"  Note: {filename} references a texture that failed to load")
