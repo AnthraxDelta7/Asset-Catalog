@@ -9,7 +9,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QSurfaceFormat
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from asset_catalogue.ui.commands import CommandRegistry
 from asset_catalogue.ui.flowing_progress_bar import FlowingProgressBar
+from asset_catalogue.ui.icons import magnifier_icon
 from asset_catalogue import (
     blender_render,
     crash_log,
@@ -217,7 +218,13 @@ class FilterPanel(QWidget):
         pack_header.addWidget(QLabel("Pack"))
         pack_header.addStretch(1)
         self.pack_search_toggle = QToolButton()
-        self.pack_search_toggle.setText("🔍")
+        # Drawn in the palette's own text colour so it sits in the UI
+        # rather than on top of it -- see ui/icons.py for why this isn't
+        # the emoji character.
+        self.pack_search_toggle.setIcon(
+            magnifier_icon(self.palette().color(QPalette.ColorRole.WindowText))
+        )
+        self.pack_search_toggle.setIconSize(QSize(15, 15))
         self.pack_search_toggle.setCheckable(True)
         self.pack_search_toggle.setToolTip("Filter this list by name")
         self.pack_search_toggle.setAutoRaise(True)
