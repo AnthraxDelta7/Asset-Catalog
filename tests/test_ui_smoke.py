@@ -576,3 +576,62 @@ def test_calibration_dialog_has_no_way_to_skip_rendering(tmp_path: Path) -> None
     # whatever is still pending rather than leaving it half-done.
     assert dialog.result_action == "pending"
     conn.close()
+
+
+def _staged_godot_project(staging: Path, name: str, scenes: int = 3) -> None:
+    project = staging / name
+    (project / "Assets").mkdir(parents=True)
+    (project / "project.godot").write_text('config_version=5\n', encoding="utf-8")
+    for index in range(scenes):
+        (project / "Assets" / f"prop_{index}.tscn").write_text("[gd_scene]", encoding="utf-8")
+    # The editor's own re-import cache mirrors every scene; it must not
+    # be counted or the number shown is several times the real one.
+    cache = project / ".godot" / "imported"
+    cache.mkdir(parents=True)
+    (cache / "prop_0.tscn-abc.scn").write_bytes(b"RSCC")
+
+
+def test_ingest_dialog_warns_that_a_godot_project_will_be_converted(qapp, tmp_path: Path) -> None:
+    """A Godot pack's models reference textures that only resolve at the
+    scene level, so ingesting them raw gives untextured assets. Nothing
+    previously said so before ingesting.
+    """
+    from asset_catalogue import db, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import IngestDialog
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    _staged_godot_project(staging, "GodotPack", scenes=3)
+    (staging / "PlainPack").mkdir()
+
+    conn = db.connect(library / "catalogue.db")
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    dialog = IngestDialog(catalogue, None)
+
+    dialog._update_godot_notice("GodotPack", is_zip=False)
+    assert dialog.godot_projects == ["GodotPack"]
+    assert "3 scenes" in dialog.godot_notice.text()
+    assert not dialog.godot_notice.isHidden()
+
+    dialog._update_godot_notice("PlainPack", is_zip=False)
+    assert dialog.godot_projects == []
+    assert dialog.godot_notice.isHidden()
+    conn.close()
+
+
+def test_scene_count_excludes_the_godot_reimport_cache(qapp, tmp_path: Path) -> None:
+    from asset_catalogue import db
+    from asset_catalogue.catalogue import Catalogue
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    _staged_godot_project(staging, "GodotPack", scenes=4)
+
+    conn = db.connect(library / "catalogue.db")
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+    assert catalogue.count_godot_scenes(["GodotPack"]) == 4
+    conn.close()

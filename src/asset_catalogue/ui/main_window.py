@@ -1632,6 +1632,7 @@ class IngestDialog(QDialog):
         # left the old name in place -- the reported "doesn't copy the name
         # into the pack field" bug.
         self._pack_name_auto = True
+        self.godot_projects: list[str] = []
 
         self.pack_folder_name: str = ""
         self.pack_name: str = ""
@@ -1662,6 +1663,18 @@ class IngestDialog(QDialog):
         form.addRow("Source URL:", self.source_url_edit)
 
         layout.addLayout(form)
+
+        # Only appears for a staged Godot project. These packs ship their
+        # models referencing a texture atlas the pack itself doesn't
+        # contain -- the material linkage lives in the scenes, which only
+        # Godot can resolve -- so ingesting the raw models gives
+        # untextured assets. Extraction is what makes them usable, and
+        # nothing previously told anyone that before they ingested.
+        self.godot_notice = QLabel("")
+        self.godot_notice.setWordWrap(True)
+        self.godot_notice.setStyleSheet("color: #e0b070;")
+        self.godot_notice.setVisible(False)
+        layout.addWidget(self.godot_notice)
 
         hint = QLabel(
             "Pick a folder or a .zip from inside the staging folder -- either one, "
@@ -1699,6 +1712,28 @@ class IngestDialog(QDialog):
         if self._pack_name_auto:
             name = Path(relative_path)
             self.pack_name_edit.setText(name.stem if browser.selected_is_zip else name.name)
+        self._update_godot_notice(relative_path, browser.selected_is_zip)
+
+    def _update_godot_notice(self, relative_path: str, is_zip: bool) -> None:
+        """A .zip can't be inspected without extracting it, which happens
+        during ingest -- so a zipped Godot project gets no notice here.
+        The extraction still runs; this is the heads-up, not the
+        mechanism.
+        """
+        self.godot_projects = []
+        if not is_zip:
+            self.godot_projects = self._catalogue.find_godot_projects(relative_path)
+        if not self.godot_projects:
+            self.godot_notice.setVisible(False)
+            return
+        scenes = self._catalogue.count_godot_scenes(self.godot_projects)
+        self.godot_notice.setText(
+            f"Godot project detected ({scenes} scene{'s' if scenes != 1 else ''}). "
+            "These will be converted to .glb before ingesting, so their materials and "
+            "textures come through -- the raw model files in a pack like this reference "
+            "textures that only resolve at the scene level."
+        )
+        self.godot_notice.setVisible(True)
 
     def _on_accept(self) -> None:
         pack_name = self.pack_name_edit.text().strip()
@@ -4310,15 +4345,31 @@ class MainWindow(QMainWindow):
                 return
             format_selection = format_dialog.format_selection
 
-        job = lambda report: self._catalogue.ingest_pack_bg(
-            dialog.pack_folder_name,
-            dialog.pack_name,
-            dialog.creator,
-            dialog.licence,
-            dialog.source_url,
-            on_progress=report,
-            format_selection=format_selection,
-        )
+        def job(report):
+            # A Godot project's models reference textures that only
+            # resolve at the scene level, so ingesting them raw gives
+            # untextured assets. Converting the scenes first writes real
+            # .glb files into the staged folder, which ingest then picks
+            # up as ordinary models -- so this has to happen before the
+            # walk, not after. Detected again here rather than trusting
+            # the dialog's list, since a .zip source can't be inspected
+            # until ingest has extracted it.
+            projects = self._catalogue.find_godot_projects_for_pack(dialog.pack_folder_name)
+            if projects:
+                report(
+                    f"Godot project detected -- converting {self._catalogue.count_godot_scenes(projects)} "
+                    "scene(s) to .glb so their textures come through..."
+                )
+                self._catalogue.extract_godot_scenes_batch_bg(projects, on_progress=report)
+            return self._catalogue.ingest_pack_bg(
+                dialog.pack_folder_name,
+                dialog.pack_name,
+                dialog.creator,
+                dialog.licence,
+                dialog.source_url,
+                on_progress=report,
+                format_selection=format_selection,
+            )
 
         def format_result(result: tuple) -> str:
             stats, updated_fields = result

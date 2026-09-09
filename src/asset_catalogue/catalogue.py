@@ -530,6 +530,31 @@ class Catalogue:
         roots = godot_export.find_godot_project_roots(search_root)
         return [str(root.relative_to(self._staging_folder)) for root in roots]
 
+    def find_godot_projects_for_pack(self, pack_folder_name: str) -> list[str]:
+        """Godot projects inside a pack source, resolving a .zip to its
+        extracted folder first -- the same resolution ingest itself does
+        (and idempotent, see _resolve_pack_root), so a zipped Godot
+        project is detected rather than silently ingested raw.
+        """
+        if self._staging_folder is None:
+            return []
+        _pack_root, resolved_name = self._resolve_pack_root(pack_folder_name)
+        return self.find_godot_projects(resolved_name)
+
+    def count_godot_scenes(self, project_folder_names: list[str]) -> int:
+        """How many real scenes the given staged Godot projects hold --
+        what the ingest dialog reports before converting them. Excludes
+        the editor's own .godot/ re-import cache, which mirrors every
+        scene and would inflate this several times over (see
+        godot_export.find_scenes).
+        """
+        if self._staging_folder is None:
+            return 0
+        return sum(
+            len(godot_export.find_scenes(self._staging_folder / name))
+            for name in project_folder_names
+        )
+
     def extract_godot_scenes_batch_bg(
         self,
         project_folder_names: list[str],
