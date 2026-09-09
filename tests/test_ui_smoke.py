@@ -484,3 +484,72 @@ def test_pack_search_filters_the_list_and_clears_when_collapsed(qapp, tmp_path: 
     assert len(_visible_packs(panel)) == 4
     assert panel.pack_search_edit.text() == ""
     conn.close()
+
+
+def test_detail_panel_hides_asset_controls_when_nothing_is_selected(qapp, tmp_path: Path) -> None:
+    """Disabled controls still take their full space and invite clicks
+    that do nothing, so with no selection they're hidden entirely and a
+    hint takes their place.
+    """
+    from asset_catalogue import db, ingest, library_assets
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import DetailPanel
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    write_minimal_glb(pack / "prop.glb", {"meshes": [{}]})
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    library_assets.archive_pack(conn, staging, library / "assets", pack_id)
+
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    noop = lambda *a, **k: None  # noqa: E731
+    panel = DetailPanel(catalogue, *([noop] * 14))
+    panel.clear_selection()
+
+    for widget in (panel.tags_label, panel.tag_list, panel.add_button, panel.export_button):
+        assert widget.isHidden()
+    assert not panel._empty_hint.isHidden()
+
+    panel.show_asset(catalogue.list_assets()[0])
+    for widget in (panel.tags_label, panel.tag_list, panel.add_button, panel.export_button):
+        assert not widget.isHidden()
+    assert panel._empty_hint.isHidden()
+    conn.close()
+
+
+def test_unrendered_thumbnail_placeholder_says_so(qapp, tmp_path: Path) -> None:
+    """A flat grey square reads as a broken asset rather than one that
+    simply hasn't been rendered yet, and gives no hint that rendering is
+    a keypress away.
+    """
+    from asset_catalogue import db, ingest
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import ThumbnailGrid
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    write_minimal_glb(pack / "prop.glb", {"meshes": [{}]})
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    asset = catalogue.list_assets()[0]
+
+    grid = ThumbnailGrid()
+    pixmap = grid._load_thumbnail(asset, catalogue)
+    image = pixmap.toImage()
+
+    # More than one colour means something was drawn on the fill -- the
+    # icon and the text, rather than a bare grey square.
+    colours = {image.pixelColor(x, y).rgb() for y in range(0, image.height(), 3)
+               for x in range(0, image.width(), 3)}
+    assert len(colours) > 1
+    conn.close()

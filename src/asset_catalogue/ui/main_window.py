@@ -483,9 +483,42 @@ class ThumbnailGrid(QListWidget):
                 )
                 scaled.setDevicePixelRatio(dpr)
                 return scaled
+        # No thumbnail yet. A flat grey square says nothing -- it reads as
+        # a broken asset rather than one that simply hasn't been rendered,
+        # and gives no hint that rendering is a keypress away. Qt's own
+        # ViewRefresh icon plus a line of text carries both without
+        # inventing artwork (ThemeIcon.ImageMissing isn't shipped).
         placeholder = QPixmap(physical_size)
         placeholder.setDevicePixelRatio(dpr)
-        placeholder.fill(Qt.darkGray)
+        placeholder.fill(QColor("#3a3a3a"))
+        if asset.asset_type not in THUMBNAIL_CAPABLE_TYPES:
+            return placeholder
+
+        painter = QPainter(placeholder)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(dpr, dpr)
+        width = THUMBNAIL_ICON_SIZE.width()
+        height = THUMBNAIL_ICON_SIZE.height()
+
+        icon_size = max(16, int(min(width, height) * 0.28))
+        icon = QIcon.fromTheme(QIcon.ThemeIcon.ViewRefresh)
+        icon_pixmap = icon.pixmap(QSize(icon_size, icon_size))
+        painter.setOpacity(0.55)
+        painter.drawPixmap(
+            int((width - icon_size) / 2), int(height / 2 - icon_size), icon_pixmap
+        )
+        painter.setOpacity(1.0)
+
+        painter.setPen(QColor("#9a9a9a"))
+        font = painter.font()
+        font.setPointSize(max(7, font.pointSize() - 1))
+        painter.setFont(font)
+        painter.drawText(
+            QRectF(0, height / 2, width, height / 2 - 4),
+            int(Qt.AlignHCenter | Qt.AlignTop),
+            "Not rendered" + chr(10) + "Press R",
+        )
+        painter.end()
         return placeholder
 
 
@@ -644,6 +677,20 @@ class DetailPanel(QWidget):
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
 
+        # Shown in place of the asset controls rather than alongside a
+        # column of disabled ones: an empty tag box and five greyed-out
+        # buttons take the same room as real content while saying less
+        # than one sentence would.
+        self._empty_hint = QLabel(
+            "Select an asset in the grid to tag it, preview it, or export it. "
+            "Arrow keys move between assets; F favourites, Space opens the 3D "
+            "preview, E exports to your last project."
+        )
+        self._empty_hint.setWordWrap(True)
+        self._empty_hint.setStyleSheet("color: #9a9a9a;")
+        self._empty_hint.setAlignment(Qt.AlignTop)
+        layout.addWidget(self._empty_hint, stretch=1)
+
         # A quick personal flag independent of tags -- only shown for a
         # single-selected asset (multi-select favoriting goes through the
         # grid's right-click menu, see MainWindow._build_grid_context_menu).
@@ -737,7 +784,8 @@ class DetailPanel(QWidget):
         self.fix_texture_button.setVisible(False)
         layout.addWidget(self.fix_texture_button)
 
-        layout.addWidget(QLabel("Tags"))
+        self.tags_label = QLabel("Tags")
+        layout.addWidget(self.tags_label)
         self.tag_list = QListWidget()
         layout.addWidget(self.tag_list, stretch=1)
 
@@ -853,7 +901,26 @@ class DetailPanel(QWidget):
             _remember_last_export_mode(effective_mode)
         self._on_quick_export(recent_projects[0], effective_mode)
 
+    def _set_asset_controls_visible(self, visible: bool) -> None:
+        """Everything that only means something with a selection. Hidden
+        rather than disabled when there's nothing selected -- a disabled
+        control still occupies its full space and invites a click that
+        does nothing.
+        """
+        for widget in (
+            self.tags_label,
+            self.tag_list,
+            self.remove_button,
+            self.new_tag_input,
+            self.add_button,
+            self.show_in_library_button,
+            self.export_button,
+        ):
+            widget.setVisible(visible)
+        self._empty_hint.setVisible(not visible)
+
     def _set_idle_state(self) -> None:
+        self._set_asset_controls_visible(False)
         self.tag_list.setEnabled(False)
         self.remove_button.setEnabled(False)
         self.new_tag_input.setEnabled(False)
@@ -924,6 +991,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(False)
         self.cleanup_conversion_button.setVisible(False)
         self.fix_texture_button.setVisible(False)
+        self._set_asset_controls_visible(True)
         self._godot_eligible = _is_godot_export_eligible(assets)
         self._update_export_button(True)
         self._stop_playback_and_hide()
@@ -957,6 +1025,7 @@ class DetailPanel(QWidget):
         self.revert_conversion_button.setVisible(pending)
         self.cleanup_conversion_button.setVisible(pending)
         self.fix_texture_button.setVisible(bool(self._catalogue.list_broken_texture_materials_for_asset(asset.id)))
+        self._set_asset_controls_visible(True)
         self._godot_eligible = _is_godot_export_eligible([asset])
         self._update_export_button(True)
 
