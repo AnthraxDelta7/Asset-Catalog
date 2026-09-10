@@ -115,3 +115,84 @@ def test_hint_renders_in_the_menu_shortcut_column(qapp) -> None:
     assert registry.hint("export.dialog") == "\tCtrl+E"
     # A command with no key contributes nothing rather than a stray tab.
     assert registry.hint("tools.credits") == ""
+
+
+def test_every_action_is_armed_on_its_parent_widget(qapp) -> None:
+    """Parenting a QAction does not activate its shortcut.
+
+    Qt matches a WindowShortcut against the widgets an action has been
+    *added* to; the constructor's parent argument is ownership only. A
+    command that appeared in a menu got added there and worked, so for a
+    long time exactly the menu-bar commands responded to their key and
+    every command reachable only from a context menu or a panel button
+    silently did nothing -- 12 of the 23 with a default binding.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    parent = QWidget()
+    registry = commands.CommandRegistry(parent)
+    registry.build()
+
+    armed = set(parent.actions())
+    unarmed = [
+        command.id
+        for command in commands.COMMANDS
+        if registry.action(command.id) not in armed
+    ]
+    assert unarmed == []
+
+
+def test_every_default_shortcut_actually_fires_in_a_real_window(qapp, tmp_path, monkeypatch) -> None:
+    """The structural check above can't see a shortcut Qt refuses to
+    deliver, so this presses the keys.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtTest import QTest
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+
+    from asset_catalogue.ui.main_window import MainWindow
+
+    window = MainWindow(Catalogue(conn, staging, library / "thumbnails", library / "assets"))
+    window.show()
+    window.activateWindow()
+    if not window.isActiveWindow():
+        conn.close()
+        pytest.skip("window never became active; shortcuts cannot be delivered")
+
+    fired: list[str] = []
+    for command_id, action in window.commands.actions.items():
+        # Several handlers open modal dialogs, which would block the test
+        # rather than tell it anything.
+        try:
+            action.triggered.disconnect()
+        except RuntimeError:
+            pass
+        action.triggered.connect(lambda _checked=False, c=command_id: fired.append(c))
+
+    silent = []
+    for command_id in window.commands.actions:
+        sequence = window.commands.shortcut_of(command_id)
+        if not sequence:
+            continue
+        combination = QKeySequence(sequence)[0]
+        fired.clear()
+        window.grid.setFocus()
+        qapp.processEvents()
+        QTest.keyClick(
+            window,
+            Qt.Key(combination.key().value),
+            Qt.KeyboardModifier(combination.keyboardModifiers().value),
+        )
+        qapp.processEvents()
+        if command_id not in fired:
+            silent.append((command_id, sequence))
+
+    conn.close()
+    assert silent == []

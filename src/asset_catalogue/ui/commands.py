@@ -125,6 +125,17 @@ class CommandRegistry:
         for command in COMMANDS:
             action = QAction(command.label, self.parent)
             action.setObjectName(command.id)
+            # Parenting an action is not enough to arm its shortcut: Qt
+            # matches a WindowShortcut against the widgets the action has
+            # been *added* to, and the constructor's parent is only
+            # ownership. Menu entries get this for free via addAction, so
+            # for a long time exactly the commands that also appeared in
+            # the menu bar worked and every command reachable only from a
+            # context menu or a panel button silently did nothing.
+            #
+            # Adding it here rather than at each call site means a command
+            # is armed by existing, not by being displayed somewhere.
+            self.parent.addAction(action)
             self.actions[command.id] = action
         self.apply_shortcuts(overrides or {})
 
