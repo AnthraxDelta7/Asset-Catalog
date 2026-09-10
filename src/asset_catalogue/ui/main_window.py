@@ -442,6 +442,15 @@ class FilterPanel(QWidget):
 # loop turns to finish.
 ICON_FILL_BATCH = 24
 
+# How long a background job has to run before its progress dialog is
+# worth putting on screen. Below this a window appears and disappears
+# before it can even be read, and on Windows it never gets past the blank
+# white client area painted before Qt's first frame -- so the only thing
+# a short job's dialog communicates is a flash. Long enough to cover the
+# many sub-second jobs here, short enough that anything genuinely slow
+# still feels acknowledged rather than frozen.
+PROGRESS_DIALOG_DELAY_MS = 400
+
 # Scaled thumbnails kept between refreshes, so switching back to a pack
 # doesn't re-decode every PNG. Deliberately not QPixmapCache: that has
 # its own internal flush timer which drops entries the moment nothing
@@ -2786,6 +2795,12 @@ class ProgressLogDialog(QDialog):
     and Godot subprocesses with no cancellation path, so a Cancel that
     only greyed itself out and let the work continue would be a worse lie
     than not offering one.
+
+    Shown on a delay rather than immediately -- see show_after. Most jobs
+    here finish in well under a second, and a window that exists that
+    briefly never gets past the blank white client area Windows paints
+    before Qt's first frame. The dialog is dark once it renders; the flash
+    was the window itself, not its styling.
     """
 
     def __init__(self, title: str, initial_text: str, parent=None) -> None:
@@ -2793,6 +2808,10 @@ class ProgressLogDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.resize(560, 300)
+        self._finished = False
+        self._reveal = QTimer(self)
+        self._reveal.setSingleShot(True)
+        self._reveal.timeout.connect(self._reveal_now)
 
         layout = QVBoxLayout(self)
 
@@ -2828,6 +2847,22 @@ class ProgressLogDialog(QDialog):
         if initial_text:
             self.append(initial_text)
 
+    def show_after(self, delay_ms: int = PROGRESS_DIALOG_DELAY_MS) -> None:
+        """Appear only if the job is still running `delay_ms` from now.
+
+        A job that beats the delay never puts a window on screen at all,
+        which is the right answer for the many that finish in a few
+        hundred milliseconds: there is nothing to read, and the window is
+        pure interruption. Progress text still accumulates in the
+        meantime, so a job that does cross the threshold opens with its
+        history already in place rather than an empty box.
+        """
+        self._reveal.start(delay_ms)
+
+    def _reveal_now(self) -> None:
+        if not self._finished and not self.isVisible():
+            self.show()
+
     def _tick(self) -> None:
         seconds = int(time.monotonic() - self._started)
         self._elapsed_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
@@ -2838,11 +2873,31 @@ class ProgressLogDialog(QDialog):
         scrollbar = self._log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def done(self, result: int) -> None:
-        # Both timers repaint a widget; leaving them running against a
-        # closed dialog keeps it alive and burns a frame every 33ms.
+    def _stop_timers(self) -> None:
+        """Every timer this dialog owns, and the flag that keeps a
+        late-firing one from reopening it.
+
+        Called from both done() and close(), because a dialog that was
+        never shown gets neither. QWidget.close() delivers a close event
+        only to a visible widget, and QDialog reaches done() through that
+        event -- so for the short jobs this class now stays hidden for,
+        close() would return having stopped nothing, and the reveal timer
+        would open the window several hundred milliseconds after the job
+        it was reporting on had already finished.
+        """
+        self._finished = True
         self._bar.stop()
         self._clock.stop()
+        self._reveal.stop()
+
+    def close(self) -> bool:
+        self._stop_timers()
+        return super().close()
+
+    def done(self, result: int) -> None:
+        # The two repaint timers keep a closed dialog alive and burn a
+        # frame every 33ms if left running.
+        self._stop_timers()
         super().done(result)
 
 
@@ -3120,7 +3175,7 @@ class CalibrationReviewDialog(QDialog):
         progress = ProgressLogDialog(
             "Asset Catalogue", progress_text, QApplication.activeModalWidget() or self
         )
-        progress.show()
+        progress.show_after()
 
         worker = _BackgroundWorker(fn)
 
@@ -3335,7 +3390,7 @@ class PendingConversionsDialog(QDialog):
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
         progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show()
+        progress.show_after()
         worker = _BackgroundWorker(fn)
 
         def handle_ok(result) -> None:
@@ -3564,7 +3619,7 @@ class MissingTexturesDialog(QDialog):
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
         progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show()
+        progress.show_after()
         worker = _BackgroundWorker(fn)
 
         def handle_ok(result) -> None:
@@ -3807,7 +3862,7 @@ class TrashDialog(QDialog):
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
         progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show()
+        progress.show_after()
         worker = _BackgroundWorker(fn)
 
         def handle_ok(result) -> None:
@@ -4004,7 +4059,7 @@ class LibraryHealthDialog(QDialog):
             return
 
         progress = ProgressLogDialog("Asset Catalogue", f"Re-archiving {len(asset_ids)} asset(s)...", self)
-        progress.show()
+        progress.show_after()
         worker = _BackgroundWorker(lambda report: self._catalogue.rearchive_assets_bg(asset_ids))
 
         def handle_ok(count) -> None:
@@ -5552,7 +5607,7 @@ class MainWindow(QMainWindow):
             return
 
         progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show()
+        progress.show_after()
 
         worker = _BackgroundWorker(fn)
 

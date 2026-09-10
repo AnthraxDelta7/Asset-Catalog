@@ -776,3 +776,50 @@ def test_thumbnail_cache_is_dropped_when_a_thumbnail_is_rerendered(
     # report zero re-renders when everything was already done.
     grid.invalidate_thumbnails([])
     conn.close()
+
+
+def _spin(ms: int) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()
+
+
+def test_a_quick_job_never_puts_a_progress_window_on_screen(qapp) -> None:
+    """Most jobs here finish in a few hundred milliseconds. A window that
+    exists that briefly never gets past the blank client area Windows
+    paints before Qt's first frame, so the only thing it communicates is
+    a flash.
+    """
+    from asset_catalogue.ui.main_window import ProgressLogDialog
+
+    dialog = ProgressLogDialog("Asset Catalogue", "Removing tag...", None)
+    dialog.show_after()
+    _spin(120)
+    assert not dialog.isVisible()
+    dialog.close()
+
+    # The trap: QWidget.close() delivers a close event only to a *visible*
+    # widget, and QDialog reaches done() through that event. Closing a
+    # dialog that was never shown therefore stopped nothing, and the
+    # reveal timer opened the window well after the job had finished.
+    _spin(700)
+    assert not dialog.isVisible(), "a finished job's dialog opened after the fact"
+
+
+def test_a_slow_job_still_gets_its_window_with_the_history_so_far(qapp) -> None:
+    from asset_catalogue.ui.main_window import ProgressLogDialog
+
+    dialog = ProgressLogDialog("Asset Catalogue", "Ingesting 'Pack'...", None)
+    dialog.show_after()
+    dialog.append("Hashing one.glb...")
+    dialog.append("Hashing two.glb...")
+    _spin(120)
+    assert not dialog.isVisible()
+
+    _spin(500)
+    assert dialog.isVisible()
+    # Opens with what already happened rather than an empty box.
+    assert "Hashing two.glb..." in dialog._log.toPlainText()
+    dialog.close()

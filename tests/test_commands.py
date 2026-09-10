@@ -169,11 +169,12 @@ def test_every_default_shortcut_actually_fires_in_a_real_window(qapp, tmp_path, 
     fired: list[str] = []
     for command_id, action in window.commands.actions.items():
         # Several handlers open modal dialogs, which would block the test
-        # rather than tell it anything.
-        try:
+        # rather than tell it anything. Only the bound ones have a handler
+        # to drop -- disconnecting the rest warns about a signal with no
+        # receivers rather than raising, so asking the registry which it
+        # bound is both quieter and more honest than a blanket try.
+        if command_id in window.commands.bound:
             action.triggered.disconnect()
-        except RuntimeError:
-            pass
         action.triggered.connect(lambda _checked=False, c=command_id: fired.append(c))
 
     silent = []
