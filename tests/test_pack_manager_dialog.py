@@ -120,3 +120,48 @@ def test_repointing_a_pack_updates_where_it_reads_from(catalogue_with_packs: Cat
     catalogue_with_packs.update_pack_source_folder(pack["id"], "Beta")
     refreshed = {p["name"]: p for p in catalogue_with_packs.list_pack_summaries()}
     assert refreshed["Alpha"]["pack_folder"] == "Beta"
+
+
+def test_remove_hands_over_something_the_catalogue_can_actually_remove(
+    qapp, catalogue_with_packs: Catalogue, monkeypatch
+) -> None:
+    """Removal is by pack id. An earlier version handed the callback pack
+    *names*, which went straight into remove_pack_bg's pack_id parameter,
+    matched no row, and returned "nothing removed" -- so deleting a pack
+    silently did nothing, with no error raised and none logged.
+
+    Asserting on the pack actually being gone rather than on the callback
+    arguments: the bug was that the two ends disagreed about the type, so
+    a test that mirrored either end's assumption would have passed.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    dialog = PackManagerDialog(catalogue_with_packs)
+
+    removed_ids: list[int] = []
+
+    def on_remove(packs) -> None:
+        for pack in packs:
+            stats = catalogue_with_packs.remove_pack_bg(pack["id"])
+            assert stats.pack_removed, f"remove_pack_bg could not resolve {pack!r}"
+            removed_ids.append(pack["id"])
+
+    dialog._on_remove_packs = on_remove
+    dialog.table.selectRow(0)
+    dialog._remove_selected()
+
+    assert len(removed_ids) == 1
+    assert [pack["name"] for pack in catalogue_with_packs.list_pack_summaries()] == ["Beta"]
+
+
+def test_remove_reports_packs_it_could_not_find(qapp, catalogue_with_packs: Catalogue) -> None:
+    """The silent no-op is the failure mode worth guarding: removing a
+    pack that isn't there returns empty stats rather than raising, so the
+    only way anyone finds out is if the caller checks and says so.
+    """
+    stats = catalogue_with_packs.remove_pack_bg(999999)
+    assert not stats.pack_removed
+    assert stats.removed_assets == 0

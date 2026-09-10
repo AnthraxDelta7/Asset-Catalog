@@ -246,7 +246,10 @@ class PackManagerDialog(QDialog):
         if confirm != QMessageBox.StandardButton.Yes:
             return
         if self._on_remove_packs is not None:
-            self._on_remove_packs([pack["name"] for pack in selected])
+            # The whole summary, not just the name: removal is by pack id,
+            # and handing over names meant the id lookup silently matched
+            # nothing and removed nothing, with no error anywhere.
+            self._on_remove_packs(selected)
             self.changed = True
             self.refresh()
 

@@ -4595,21 +4595,39 @@ class MainWindow(QMainWindow):
             self.filter_panel.refresh_packs(self._catalogue)
             self._refresh_grid()
 
-    def _remove_packs_from_manager(self, pack_names: list[str]) -> None:
+    def _remove_packs_from_manager(self, packs: list) -> None:
         """Removes several packs in one background job -- the manager has
         already confirmed, so this doesn't ask again.
+
+        Takes the pack summaries rather than their names: removal is by
+        id, and an earlier version passed names straight into the id
+        parameter, so every removal matched no pack and quietly did
+        nothing. Reporting what was *not* removed is what would have made
+        that visible, hence the miss count below.
         """
         def job(report):
-            for name in pack_names:
-                report(f"Removing {name}...")
-                self._catalogue.remove_pack_bg(name, on_progress=report)
-            return len(pack_names)
+            removed, missed = 0, []
+            for pack in packs:
+                report(f"Removing {pack['name']}...")
+                stats = self._catalogue.remove_pack_bg(pack["id"], on_progress=report)
+                if stats.pack_removed:
+                    removed += 1
+                else:
+                    missed.append(pack["name"])
+            return removed, missed
+
+        def summary(result) -> str:
+            removed, missed = result
+            message = f"Removed {removed} pack(s)"
+            if missed:
+                message += f"; could not find {', '.join(missed[:5])}"
+            return message
 
         self._run_background_job(
             job,
-            f"Removing {len(pack_names)} pack(s)...",
-            lambda count: f"Removed {count} pack(s)",
-            self._refresh_grid,
+            f"Removing {len(packs)} pack(s)...",
+            summary,
+            self._on_pack_changed,
         )
 
     def _reingest_packs(self, packs_to_reingest: list) -> None:
