@@ -65,6 +65,7 @@ from asset_catalogue import (
     godot_export,
     library_health,
     library_stats,
+    pack_overrides,
     paths,
     self_update,
     settings,
@@ -4759,6 +4760,15 @@ class MainWindow(QMainWindow):
                     f"\nSkipped {stats.skipped_duplicate_formats} duplicate-format "
                     "file(s) per your format selection"
                 )
+            if stats.skipped_superseded_models:
+                message += (
+                    f"\nSkipped {stats.skipped_superseded_models} source model(s) already "
+                    "covered by an extracted scene of the same name"
+                )
+            if stats.override_file_applied:
+                message += f"\nApplied this pack's {pack_overrides.OVERRIDE_FILENAME}"
+            for problem in stats.override_file_problems:
+                message += f"\n{pack_overrides.OVERRIDE_FILENAME}: {problem}"
             if updated_fields:
                 message += f"\nUpdated pack metadata: {', '.join(updated_fields)}"
             message += f"\nArchived {stats.archived} asset(s) to the library"

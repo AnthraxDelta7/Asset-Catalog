@@ -195,6 +195,32 @@ asset-catalogue thumbnail generate-models --pack "Pack Name" --force   # re-rend
 
 **Note:** `scale` won't visibly change the thumbnail — the camera always reframes to fit the asset's bounding box, so a uniformly-scaled object still fills the same portion of frame. It's stored and applied to the imported object regardless (for correctness ahead of the eventual import step, where absolute scale will matter), just not something you can visually calibrate by eye the way `up_axis` and `material_fallback` are.
 
+### A pack can ship its own corrections
+
+Corrections set through the CLI or the UI live in this install's database. Dropping an `asset-catalogue.json` in the pack's own folder makes them part of the pack instead: it's read at ingest, before any thumbnail is rendered, so a pack with a known fix comes in correct the first time rather than coming in broken and being repaired afterwards. It survives re-ingest, and it travels if you move the pack to another machine.
+
+```json
+{
+  "_comment": "Any key starting with _ is ignored, so you can record why.",
+  "texture_overrides": {
+    "main": "Assets/Polygon-ForestVillage/Textures/Polygon_Texture_vol3.png"
+  },
+  "acknowledged_materials": ["Glass"]
+}
+```
+
+It accepts the same vocabulary as `pack set-corrections` (`texture_overrides`, `texture_extras`, `acknowledged_materials`, `up_axis`, `scale`, `material_fallback`, `broken_texture_fallback`, `disable_smart_texture_matching`), plus `prefer_source_models` — see below. Texture paths are relative to the pack folder; absolute paths and anything climbing out with `..` are rejected, since a pack folder is wherever a downloaded archive was unpacked. A missing file, a bad type or a misspelled key is reported in the ingest summary rather than aborting the ingest.
+
+This exists for vendor packaging errors, which no amount of inference can fix safely. A Unity-converted Synty pack ships `.gltf` stubs whose baked-in texture URI names an atlas from a *different product* — `Polygon_Camping_Texture_vol2.0.jpg` in a pack that ships only `Polygon_Texture_vol3.png`. Guessing which of several atlases a material wanted is exactly the kind of plausible-but-wrong answer that looks fine until someone notices the colours are off, so it's stated once by a person instead. Materials repeat across a whole pack, so stating it usually takes two or three lines.
+
+### Source models superseded by an extracted scene
+
+Once a Godot project's scenes have been extracted, a prop exists twice: as the `.glb` that came out of the scene, and as the raw `.gltf`/`.fbx` the scene was built from. Ingest catalogues only the `.glb`, matching on the first dot-component of the filename (`SM_Wheat_01_A.prefab.glb` came from `SM_Wheat_01_A.prefab.scn`, which came from `SM_Wheat_01_A`), and counts the rest in the ingest summary.
+
+A `.glb` only counts as extraction output if a `.scn`/`.tscn` of the same name sits beside it — without that check, a pack genuinely shipping `Prop.glb` next to `Prop.fbx` as alternate formats would lose the `.fbx` here rather than through the format-selection prompt, where you actually get a say.
+
+Set `"prefer_source_models": true` in the pack's `asset-catalogue.json` to keep both. Worth it when the source models are the better copy — their textures are the vendor's originals rather than Godot's recompressed ones — at the cost of two entries per prop.
+
 ## Editing, renaming, and removing a pack
 
 Creator/licence/source URL can be edited after ingest, not just set once at ingest time. Only fields you pass are touched — omit one to leave it as-is, or clear it explicitly:

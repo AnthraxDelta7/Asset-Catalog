@@ -110,6 +110,13 @@ class IngestStats:
     preview_asset_id: int | None = None
     broken_texture_filenames: list[str] = field(default_factory=list)
     smart_texture_notes: list[str] = field(default_factory=list)
+    # Whether the pack shipped its own asset-catalogue.json, and anything
+    # wrong with it. Reported rather than raised: a typo in a hand-edited
+    # file shouldn't abort an ingest that otherwise worked, but silently
+    # ignoring it leaves someone staring at a correction that never
+    # applied.
+    override_file_applied: bool = False
+    override_file_problems: list[str] = field(default_factory=list)
 
 
 def get_or_create_pack(
@@ -256,6 +263,66 @@ def find_format_duplicate_groups(files: list[Path]) -> dict[tuple[Path, str], se
     return {key: extensions for key, extensions in groups.items() if len(extensions) > 1}
 
 
+# A scene file sitting next to an exported .glb of the same name is what
+# proves that .glb is this app's own extraction output rather than
+# something the vendor shipped -- godot_export writes
+# scene_path.with_suffix(".glb"), so the pairing is exact. Godot writes
+# text scenes as .tscn and binary ones as .scn; Unity-converted packs are
+# full of the latter.
+GODOT_SCENE_EXTENSIONS = {".tscn", ".scn"}
+
+# Formats that carry their textures in separate files, so a copy of the
+# same asset that embeds them is strictly more portable.
+_DEPENDENT_MODEL_EXTENSIONS = {".gltf", ".fbx", ".obj", ".dae", ".stl", ".blend"}
+
+
+def find_superseded_source_models(pack_root: Path, files: list[Path]) -> set[Path]:
+    """Source models made redundant by an extracted scene of the same name.
+
+    When a Godot project's scenes have been exported, a prop exists twice:
+    once as the `.glb` that came out of the scene, and once as the raw
+    `.gltf`/`.fbx` the scene was originally built from. They are the same
+    prop, so cataloguing both gives two grid entries for one asset -- and
+    in a Unity-converted pack the raw half is usually the broken one,
+    since its baked-in texture URI names an atlas the pack doesn't ship.
+
+    Matching is on the *first* dot-component of the filename, because the
+    export inherits the scene's whole name: SM_Wheat_01_A.prefab.glb came
+    from SM_Wheat_01_A.prefab.scn, which came from SM_Wheat_01_A. An
+    earlier version of this rejected stem matching as unworkable on the
+    grounds that the names don't line up; measured against a real
+    Unity-converted pack they line up for 384 of 386 source models.
+
+    A `.glb` only counts as extraction output if a scene file of the same
+    name sits beside it. Without that check a pack that genuinely ships
+    `Prop.glb` and `Prop.fbx` as alternate formats would lose the `.fbx`
+    here rather than through format_selection, which is where the user
+    actually gets a say.
+    """
+    if pack_root.is_file():
+        return set()
+    scene_names = {
+        path.with_suffix("").name.lower()
+        for path in pack_root.rglob("*")
+        if path.suffix.lower() in GODOT_SCENE_EXTENSIONS
+    }
+    if not scene_names:
+        return set()
+    extracted_stems = {
+        path.name.split(".")[0].lower()
+        for path in files
+        if path.suffix.lower() == ".glb" and path.with_suffix("").name.lower() in scene_names
+    }
+    if not extracted_stems:
+        return set()
+    return {
+        path
+        for path in files
+        if path.suffix.lower() in _DEPENDENT_MODEL_EXTENSIONS
+        and path.name.split(".")[0].lower() in extracted_stems
+    }
+
+
 def duplicate_format_extensions(files: list[Path]) -> set[str]:
     """Every distinct extension that appears in at least one format-
     duplicate group -- what a "which format(s) do you want to keep"
@@ -289,6 +356,7 @@ def ingest_pack(
     on_progress: ProgressCallback | None = None,
     format_selection: set[str] | None = None,
     models_allowlist: set[Path] | None = None,
+    prefer_source_models: bool = False,
 ) -> IngestStats:
     """Walks pack_root and catalogues every file as an asset.
 
@@ -298,10 +366,18 @@ def ingest_pack(
     .fbx under Models/ are inputs those scenes were built from, not
     separate assets, and in a Unity-converted pack they reference a
     texture atlas the pack doesn't even ship -- so cataloguing both gives
-    two copies of every prop, one of them untextured. Deliberately an
-    explicit set of paths rather than an extension rule: the names don't
-    line up (SM_Bg_01.prefab.glb vs SM_Bg_01.gltf), so there's nothing to
-    match on. Non-model assets are untouched.
+    two copies of every prop, one of them untextured. An explicit set of
+    paths, for when the caller already knows exactly what it extracted.
+    Non-model assets are untouched. When no allowlist is given the same
+    redundancy is detected from the filenames instead -- see
+    find_superseded_source_models, which handles the common case of
+    re-ingesting a pack whose scenes were extracted on an earlier run.
+
+    prefer_source_models turns that filename-based rule off, keeping the
+    raw .gltf/.fbx and the extracted .glb both. Worth it when the source
+    models are the better copy -- their textures are the vendor's
+    originals rather than Godot's re-compressed ones -- but it costs two
+    entries per prop, so it's opt-in per pack.
 
     format_selection, when given, restricts which format a same-named
     asset is actually catalogued in when the pack ships more than one
@@ -330,12 +406,16 @@ def ingest_pack(
             kept_files.append(entry)
         files = kept_files
 
+    superseded: set[Path] = set()
+    if models_allowlist is None and not prefer_source_models:
+        superseded = find_superseded_source_models(pack_root, files)
+
     for entry in files:
         if (
             models_allowlist is not None
             and classify(entry.suffix) == "model"
             and entry not in models_allowlist
-        ):
+        ) or entry in superseded:
             stats.skipped_superseded_models += 1
             continue
         stats.total += 1

@@ -24,6 +24,7 @@ from asset_catalogue import (
     library_health,
     library_stats,
     model_preview,
+    pack_overrides,
     packs,
     removal,
     settings,
@@ -717,6 +718,17 @@ class Catalogue:
             pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
+            # Before the walk, so prefer_source_models is in hand, and
+            # well before _auto_generate_thumbnails -- the whole point of
+            # a pack shipping its own corrections is that it renders
+            # right the first time rather than being repaired after.
+            file_corrections, override_problems = pack_overrides.read(pack_root)
+            if file_corrections:
+                packs.set_corrections(
+                    conn,
+                    pack_id,
+                    pack_overrides.merge(packs.get_corrections(conn, pack_id), file_corrections),
+                )
             stats = ingest.ingest_pack(
                 conn,
                 pack_root,
@@ -724,7 +736,10 @@ class Catalogue:
                 on_progress=on_progress,
                 format_selection=format_selection,
                 models_allowlist=models_allowlist,
+                prefer_source_models=bool(file_corrections.get("prefer_source_models")),
             )
+            stats.override_file_applied = bool(file_corrections)
+            stats.override_file_problems = override_problems
             stats.archived = library_assets.archive_pack(
                 conn, self._staging_folder, self._assets_dir, pack_id, on_progress=on_progress
             )
