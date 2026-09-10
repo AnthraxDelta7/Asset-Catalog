@@ -55,13 +55,24 @@ def find_blender(blender_path_setting: str | None) -> Path | None:
 
 
 def get_blender_version(blender_exe: Path) -> tuple[int, int, int] | None:
-    result = subprocess.run(
-        [str(blender_exe), "--version"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    """None if the version can't be determined, for any reason.
+
+    Including "the file exists but won't launch": a path pointing at
+    something that isn't Blender, a partially-extracted install, a
+    permissions problem, or a hang. resolve_blender's whole contract is
+    to return an error string rather than raise, and an OSError escaping
+    from here broke that promise several call sites deep.
+    """
+    try:
+        result = subprocess.run(
+            [str(blender_exe), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     match = re.search(r"Blender (\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match:
         return None

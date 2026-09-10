@@ -14,6 +14,7 @@ import logging.handlers
 import sys
 import traceback
 from types import TracebackType
+from typing import Callable
 
 from asset_catalogue import settings
 
@@ -53,6 +54,12 @@ def _version() -> str:
         return "unknown"
 
 
+#: Called with a one-line summary whenever the main thread swallows an
+#: exception, so the UI can say something happened. Set by the window;
+#: left None for the CLI, which has a console and its own error handling.
+on_uncaught: "Callable[[str], None] | None" = None
+
+
 def _log_uncaught_exception(
     exc_type: type[BaseException], exc_value: BaseException, exc_tb: TracebackType | None
 ) -> None:
@@ -60,6 +67,17 @@ def _log_uncaught_exception(
         "Uncaught exception on the main thread:\n%s",
         "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
     )
+    # PySide6 routes an exception raised inside a slot through here and
+    # then carries on, which is the right call -- one broken handler
+    # shouldn't take the app down. The cost is that the failure is
+    # completely invisible: the half-finished handler leaves the UI in a
+    # state the user reads as "the button is broken" (a real report), with
+    # nothing pointing at the log. So it gets announced.
+    if on_uncaught is not None:
+        try:
+            on_uncaught(f"{exc_type.__name__}: {exc_value}".strip().rstrip(":"))
+        except Exception:  # noqa: BLE001 -- reporting a failure must never raise a second one
+            pass
     # Still hands off to Python's own default hook afterward -- when a
     # console is actually attached (running from source), the traceback
     # still shows up there too, same as before this existed.

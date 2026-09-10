@@ -55,6 +55,15 @@ from PySide6.QtWidgets import (
 
 from asset_catalogue.ui.commands import CommandRegistry
 from asset_catalogue.ui.flowing_progress_bar import FlowingProgressBar
+from asset_catalogue.ui import jobs
+from asset_catalogue.ui.jobs import (
+    PROGRESS_DIALOG_DELAY_MS,
+    BackgroundWorker as _BackgroundWorker,
+    ProgressLogDialog,
+    describe_exception,
+    run_background_job,
+    wait_for_job,
+)
 from asset_catalogue import (
     blender_render,
     crash_log,
@@ -442,14 +451,11 @@ class FilterPanel(QWidget):
 # loop turns to finish.
 ICON_FILL_BATCH = 24
 
-# How long a background job has to run before its progress dialog is
-# worth putting on screen. Below this a window appears and disappears
-# before it can even be read, and on Windows it never gets past the blank
-# white client area painted before Qt's first frame -- so the only thing
-# a short job's dialog communicates is a flash. Long enough to cover the
-# many sub-second jobs here, short enough that anything genuinely slow
-# still feels acknowledged rather than frozen.
-PROGRESS_DIALOG_DELAY_MS = 400
+# How long closing the window waits for background work to finish. Long
+# because the alternative is the abort that waiting exists to prevent,
+# and a Blender render of a large pack genuinely takes minutes.
+SHUTDOWN_WAIT_MS = 120_000
+
 
 # Scaled thumbnails kept between refreshes, so switching back to a pack
 # doesn't re-decode every PNG. Deliberately not QPixmapCache: that has
@@ -2757,150 +2763,6 @@ class LibraryStatsDialog(QDialog):
         self.report_view.setPlainText(library_stats.format_report(catalogue.get_library_stats()))
 
 
-class _BackgroundWorker(QThread):
-    finished_ok = Signal(object)
-    failed = Signal(str)
-    progress = Signal(str)
-
-    def __init__(self, fn) -> None:
-        super().__init__()
-        self._fn = fn
-
-    def run(self) -> None:
-        try:
-            result = self._fn(self.progress.emit)
-        except Exception as exc:  # noqa: BLE001 -- reported to the UI, not swallowed
-            # The QMessageBox this feeds only ever shows str(exc) -- often
-            # far less informative than the real traceback, which is why
-            # this is logged in full even though the failure itself is
-            # already being handled gracefully, not just re-raised.
-            crash_log.log_exception("Background job failed", exc)
-            self.failed.emit(str(exc))
-            return
-        self.finished_ok.emit(result)
-
-
-class ProgressLogDialog(QDialog):
-    """Modal dialog shown during a background job.
-
-    The bar is deliberately not a percentage. A job runs through phases
-    with unrelated counts of their own -- "Pack 1/2", then "frame 5/24"
-    -- and nothing in that text says how much of the whole job a phase
-    represents, so any position derived from it jumps around and misleads.
-    What a long run actually needs to convey is "still working", which the
-    travelling sheen does honestly, alongside the current step and elapsed
-    time.
-
-    There is deliberately no Cancel button. These jobs are mostly Blender
-    and Godot subprocesses with no cancellation path, so a Cancel that
-    only greyed itself out and let the work continue would be a worse lie
-    than not offering one.
-
-    Shown on a delay rather than immediately -- see show_after. Most jobs
-    here finish in well under a second, and a window that exists that
-    briefly never gets past the blank white client area Windows paints
-    before Qt's first frame. The dialog is dark once it renders; the flash
-    was the window itself, not its styling.
-    """
-
-    def __init__(self, title: str, initial_text: str, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.resize(560, 300)
-        self._finished = False
-        self._reveal = QTimer(self)
-        self._reveal.setSingleShot(True)
-        self._reveal.timeout.connect(self._reveal_now)
-
-        layout = QVBoxLayout(self)
-
-        self._step_label = QLabel(initial_text or "Working...")
-        self._step_label.setWordWrap(True)
-        step_font = self._step_label.font()
-        step_font.setPointSize(step_font.pointSize() + 1)
-        self._step_label.setFont(step_font)
-        layout.addWidget(self._step_label)
-
-        self._bar = FlowingProgressBar(self)
-        layout.addWidget(self._bar)
-
-        status_row = QHBoxLayout()
-        status_row.addStretch(1)
-        self._elapsed_label = QLabel("0:00")
-        self._elapsed_label.setStyleSheet("color: #9a9a9a;")
-        status_row.addWidget(self._elapsed_label)
-        layout.addLayout(status_row)
-
-        self._log = QPlainTextEdit(self)
-        self._log.setReadOnly(True)
-        log_font = self._log.font()
-        log_font.setFamily("Consolas")
-        self._log.setFont(log_font)
-        layout.addWidget(self._log, stretch=1)
-
-        self._started = time.monotonic()
-        self._clock = QTimer(self)
-        self._clock.timeout.connect(self._tick)
-        self._clock.start(1000)
-
-        if initial_text:
-            self.append(initial_text)
-
-    def show_after(self, delay_ms: int = PROGRESS_DIALOG_DELAY_MS) -> None:
-        """Appear only if the job is still running `delay_ms` from now.
-
-        A job that beats the delay never puts a window on screen at all,
-        which is the right answer for the many that finish in a few
-        hundred milliseconds: there is nothing to read, and the window is
-        pure interruption. Progress text still accumulates in the
-        meantime, so a job that does cross the threshold opens with its
-        history already in place rather than an empty box.
-        """
-        self._reveal.start(delay_ms)
-
-    def _reveal_now(self) -> None:
-        if not self._finished and not self.isVisible():
-            self.show()
-
-    def _tick(self) -> None:
-        seconds = int(time.monotonic() - self._started)
-        self._elapsed_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
-
-    def append(self, text: str) -> None:
-        self._step_label.setText(text)
-        self._log.appendPlainText(text)
-        scrollbar = self._log.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-
-    def _stop_timers(self) -> None:
-        """Every timer this dialog owns, and the flag that keeps a
-        late-firing one from reopening it.
-
-        Called from both done() and close(), because a dialog that was
-        never shown gets neither. QWidget.close() delivers a close event
-        only to a visible widget, and QDialog reaches done() through that
-        event -- so for the short jobs this class now stays hidden for,
-        close() would return having stopped nothing, and the reveal timer
-        would open the window several hundred milliseconds after the job
-        it was reporting on had already finished.
-        """
-        self._finished = True
-        self._bar.stop()
-        self._clock.stop()
-        self._reveal.stop()
-
-    def close(self) -> bool:
-        self._stop_timers()
-        return super().close()
-
-    def done(self, result: int) -> None:
-        # The two repaint timers keep a closed dialog alive and burn a
-        # frame every 33ms if left running.
-        self._stop_timers()
-        super().done(result)
-
-
 # One-click download-and-install is switched off here until real code
 # signing is in place -- _show_update_available below never offers the
 # button while this is False, regardless of is_frozen()/download_url,
@@ -3168,33 +3030,7 @@ class CalibrationReviewDialog(QDialog):
         )
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
-        self._set_buttons_enabled(False)
-        # Parented to the modal dialog on top, when there is one: a
-        # progress dialog parented to the main window would be blocked by
-        # an open modal (the 3D preview) and never become visible.
-        progress = ProgressLogDialog(
-            "Asset Catalogue", progress_text, QApplication.activeModalWidget() or self
-        )
-        progress.show_after()
-
-        worker = _BackgroundWorker(fn)
-
-        def handle_ok(result) -> None:
-            progress.close()
-            self._set_buttons_enabled(True)
-            on_ok(result)
-
-        def handle_fail(message: str) -> None:
-            progress.close()
-            self._set_buttons_enabled(True)
-            QMessageBox.critical(self, "Asset Catalogue", message)
-
-        worker.progress.connect(progress.append, Qt.QueuedConnection)
-        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
-        worker.failed.connect(handle_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        run_background_job(self, fn, progress_text, on_ok, set_busy=self._set_buttons_enabled)
 
     def _on_rerender(self) -> None:
         corrections, error = self.corrections_widget.read()
@@ -3389,24 +3225,7 @@ class PendingConversionsDialog(QDialog):
         return [self._asset_ids[row] for row in selected_rows]
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
-        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show_after()
-        worker = _BackgroundWorker(fn)
-
-        def handle_ok(result) -> None:
-            progress.close()
-            on_ok(result)
-
-        def handle_fail(message: str) -> None:
-            progress.close()
-            QMessageBox.critical(self, "Asset Catalogue", message)
-
-        worker.progress.connect(progress.append, Qt.QueuedConnection)
-        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
-        worker.failed.connect(handle_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        run_background_job(self, fn, progress_text, on_ok)
 
     def _revert_selected(self) -> None:
         asset_ids = self._selected_asset_ids()
@@ -3618,24 +3437,7 @@ class MissingTexturesDialog(QDialog):
         return [self._rows[i] for i in selected_indices]
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
-        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show_after()
-        worker = _BackgroundWorker(fn)
-
-        def handle_ok(result) -> None:
-            progress.close()
-            on_ok(result)
-
-        def handle_fail(message: str) -> None:
-            progress.close()
-            QMessageBox.critical(self, "Asset Catalogue", message)
-
-        worker.progress.connect(progress.append, Qt.QueuedConnection)
-        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
-        worker.failed.connect(handle_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        run_background_job(self, fn, progress_text, on_ok)
 
     def _browse_selected(self) -> None:
         selected = self._selected_rows()
@@ -3861,24 +3663,7 @@ class TrashDialog(QDialog):
         return [self._asset_ids[row] for row in selected_rows]
 
     def _run_job(self, fn, progress_text: str, on_ok) -> None:
-        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show_after()
-        worker = _BackgroundWorker(fn)
-
-        def handle_ok(result) -> None:
-            progress.close()
-            on_ok(result)
-
-        def handle_fail(message: str) -> None:
-            progress.close()
-            QMessageBox.critical(self, "Asset Catalogue", message)
-
-        worker.progress.connect(progress.append, Qt.QueuedConnection)
-        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
-        worker.failed.connect(handle_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        run_background_job(self, fn, progress_text, on_ok)
 
     def _restore_selected(self) -> None:
         asset_ids = self._selected_asset_ids()
@@ -4058,12 +3843,7 @@ class LibraryHealthDialog(QDialog):
             )
             return
 
-        progress = ProgressLogDialog("Asset Catalogue", f"Re-archiving {len(asset_ids)} asset(s)...", self)
-        progress.show_after()
-        worker = _BackgroundWorker(lambda report: self._catalogue.rearchive_assets_bg(asset_ids))
-
         def handle_ok(count) -> None:
-            progress.close()
             QMessageBox.information(
                 self, "Asset Catalogue",
                 f"Re-archived {count} of {len(asset_ids)} asset(s) "
@@ -4071,15 +3851,12 @@ class LibraryHealthDialog(QDialog):
             )
             self._refresh()
 
-        def handle_fail(message: str) -> None:
-            progress.close()
-            QMessageBox.critical(self, "Asset Catalogue", message)
-
-        worker.finished_ok.connect(handle_ok, Qt.QueuedConnection)
-        worker.failed.connect(handle_fail, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        run_background_job(
+            self,
+            lambda report: self._catalogue.rearchive_assets_bg(asset_ids),
+            f"Re-archiving {len(asset_ids)} asset(s)...",
+            handle_ok,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -4088,10 +3865,12 @@ class MainWindow(QMainWindow):
         self._catalogue = catalogue
         self._current_assets: list[AssetSummary] = []
         self._selected_asset_id: int | None = None
-        self._active_worker: _BackgroundWorker | None = None
+        # Held by ui/jobs.run_background_job; see its concurrency guard.
+        self._job_worker: _BackgroundWorker | None = None
         self._update_check_worker: _BackgroundWorker | None = None
         self.resize(1100, 700)
         self._update_window_title()
+        self._build_status_bar()
 
         self._build_menu()
         self._build_toolbar()
@@ -5592,58 +5371,111 @@ class MainWindow(QMainWindow):
         refresh" (see the ingest call site's calibration-preview handling)
         -- or the default: show format_result(result) in a message box,
         then call on_success_refresh().
+
+        The thread handling, the concurrency guard and the delayed
+        progress dialog all live in ui/jobs.py, shared with every dialog
+        that runs work of its own.
         """
-        # self._active_worker is a single shared slot -- starting a second
-        # job while one is still running would drop the only Python
-        # reference to its QThread while the underlying thread is still
-        # alive natively, a real crash risk ("QThread: Destroyed while
-        # thread is still running"). ProgressLogDialog is modal, so real
-        # mouse/keyboard input can't normally trigger this, but guard it
-        # directly rather than relying on that alone.
-        if self._active_worker is not None and self._active_worker.isRunning():
-            QMessageBox.information(
-                self, "Asset Catalogue", "Another background job is already running -- please wait for it to finish."
-            )
-            return
-
-        progress = ProgressLogDialog("Asset Catalogue", progress_text, self)
-        progress.show_after()
-
-        worker = _BackgroundWorker(fn)
-
-        def on_progress(text: str) -> None:
-            progress.append(text)
-
         def on_ok(result) -> None:
-            progress.close()
             if on_complete is not None:
                 on_complete(result)
             else:
                 QMessageBox.information(self, "Asset Catalogue", format_result(result))
                 on_success_refresh()
 
-        def on_fail(message: str) -> None:
-            progress.close()
-            QMessageBox.critical(self, "Asset Catalogue", message)
+        run_background_job(self, fn, progress_text, on_ok, dialog_parent=self)
 
-        def on_thread_finished() -> None:
-            # Runs after deleteLater() is scheduled but before the C++
-            # object is actually destroyed -- clearing the reference here
-            # (rather than leaving self._active_worker pointing at a
-            # worker that's about to become invalid) is what makes the
-            # "already running" guard above safe to check at any time,
-            # instead of risking a shiboken "already deleted" error on a
-            # stale reference.
-            if self._active_worker is worker:
-                self._active_worker = None
-            worker.deleteLater()
+    def _build_status_bar(self) -> None:
+        """Somewhere for failures to show up that isn't a log file.
 
-        worker.progress.connect(on_progress, Qt.QueuedConnection)
-        worker.finished_ok.connect(on_ok, Qt.QueuedConnection)
-        worker.failed.connect(on_fail, Qt.QueuedConnection)
-        worker.finished.connect(on_thread_finished)
-        self._active_worker = worker
-        worker.start()
+        PySide6 routes an exception raised inside a slot through
+        sys.excepthook and then carries on. That's the right behaviour --
+        one broken handler shouldn't close the app -- but it means a
+        half-finished handler leaves the UI in a state that reads as "the
+        button is broken" with nothing to suggest otherwise. That exact
+        report has already happened once here, from an AttributeError that
+        aborted a selection handler partway and took out a button and two
+        menus with it.
+
+        Deliberately not a dialog. These can repeat (a paint handler
+        failing once tends to fail every frame), and a modal storm is
+        worse than the silence it replaces.
+        """
+        self._error_count = 0
+        self._error_label = QLabel("")
+        self._error_label.setStyleSheet("color: #d98080;")
+        self._error_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self._error_label)
+        crash_log.on_uncaught = self._note_uncaught_error
+
+        # A settings file that couldn't be read is reported the same way.
+        # Falling back to defaults silently is indistinguishable from the
+        # app having forgotten every preference for no reason.
+        if settings.last_load_error:
+            self.statusBar().showMessage(settings.last_load_error, 15000)
+
+    def _note_uncaught_error(self, summary: str) -> None:
+        self._error_count += 1
+        plural = "s" if self._error_count != 1 else ""
+        self._error_label.setText(f"{self._error_count} error{plural} -- see log")
+        self._error_label.setToolTip(f"Most recent: {summary}\n\n{crash_log.LOG_PATH}")
+        self._error_label.setVisible(True)
+        self.statusBar().showMessage(f"Something went wrong: {summary}", 10000)
+
+    def closeEvent(self, event) -> None:
+        """Don't let the process exit while a job thread is still alive.
+
+        Qt handles a QThread destroyed while running by aborting the
+        process, so closing the window mid-ingest, mid-render or
+        mid-export took the app down rather than shutting it down -- three
+        occurrences of "QThread: Destroyed while thread is still running"
+        in the log, each the last line before a restart.
+
+        Nothing here can cancel a Blender or Godot subprocess, so the
+        options are to wait or to refuse. It asks: waiting silently on a
+        render that takes minutes looks exactly like a hang, and quitting
+        anyway is what was already happening.
+        """
+        running = jobs.running_jobs()
+        if not running:
+            super().closeEvent(event)
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Asset Catalogue",
+            f"{len(running)} background job(s) still running.\n\n"
+            "Closing now would end them mid-way and can leave a pack "
+            "half-ingested. Wait for them to finish?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.No:
+            event.ignore()
+            return
+
+        # A generous budget: a Blender render of a large pack genuinely
+        # takes minutes, and the alternative to waiting is the abort this
+        # exists to prevent.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            finished = jobs.wait_for_all_jobs(SHUTDOWN_WAIT_MS)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not finished:
+            # Said out loud rather than exiting anyway: this is the exact
+            # path that used to abort, and an unexplained disappearance is
+            # indistinguishable from a crash.
+            QMessageBox.warning(
+                self,
+                "Asset Catalogue",
+                "A background job is still running after waiting "
+                f"{SHUTDOWN_WAIT_MS // 1000}s. Leaving the window open so it "
+                "can finish -- close again to retry.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _refresh_grid(self) -> None:
         self._current_assets = self._catalogue.list_assets(

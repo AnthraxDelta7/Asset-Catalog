@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -99,6 +100,23 @@ class Catalogue:
         # models. Initialised here so reading it never depends on an
         # extraction having happened first.
         self.last_extracted_glbs: set[Path] = set()
+
+    @contextmanager
+    def _own_connection(self):
+        """A private connection, always closed.
+
+        Every *_bg method needs one: they run on a worker thread, and a
+        sqlite3.Connection may not be shared across threads. This used to
+        be an open/try/finally/close block written out at each of the
+        twenty-five call sites -- identical every time, and twenty-five
+        chances to leave the close off, which leaks a file handle and on
+        Windows keeps a lock on the database.
+        """
+        conn = db.connect(settings.load().db_path())
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     @classmethod
     def open(cls) -> Catalogue:
@@ -415,16 +433,13 @@ class Catalogue:
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             row = conn.execute(
                 "SELECT assets.relative_path, assets.extension, assets.content_hash, "
                 "packs.pack_folder, packs.corrections "
                 "FROM assets JOIN packs ON packs.id = assets.pack_id WHERE assets.id = ?",
                 (asset_id,),
             ).fetchone()
-        finally:
-            conn.close()
         if row is None:
             return [], "Asset not found"
 
@@ -501,13 +516,10 @@ class Catalogue:
     def rearchive_assets_bg(self, asset_ids: list[int]) -> int:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return library_health.rearchive_assets(
                 conn, self._staging_folder, self._assets_dir, asset_ids
             )
-        finally:
-            conn.close()
 
     def tag_asset(self, asset_id: int, tag_name: str, category: str | None = None) -> None:
         tag_id = tagging.get_or_create_tag(self._conn, tag_name, category)
@@ -713,8 +725,7 @@ class Catalogue:
         elif not pack_root.is_dir():
             raise RuntimeError(f"Pack folder not found: {pack_root}")
 
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             pack_id, updated_fields = ingest.get_or_create_pack(
                 conn, pack_name, pack_folder_name, creator, licence, source_url
             )
@@ -745,8 +756,6 @@ class Catalogue:
             )
             self._auto_generate_thumbnails(conn, stats, pack_id, pack_name, on_progress)
             return stats, updated_fields
-        finally:
-            conn.close()
 
     def ingest_packs_batch_bg(
         self,
@@ -815,24 +824,18 @@ class Catalogue:
     def remove_assets_bg(
         self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
     ) -> removal.RemoveStats:
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return removal.remove_assets(
                 conn, self._thumbnail_dir, self._assets_dir, asset_ids, on_progress=on_progress
             )
-        finally:
-            conn.close()
 
     def remove_pack_bg(
         self, pack_id: int, on_progress: Callable[[str], None] | None = None
     ) -> removal.RemovePackStats:
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return removal.remove_pack(
                 conn, self._thumbnail_dir, self._assets_dir, pack_id, on_progress=on_progress
             )
-        finally:
-            conn.close()
 
     def update_pack_bg(
         self,
@@ -850,21 +853,15 @@ class Catalogue:
         corrections, and updates notes/rating -- one call for the whole
         "Edit Pack" dialog's fields.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             packs.rename_pack(conn, self._assets_dir, pack_id, name)
             packs.set_metadata(conn, pack_id, creator, licence, source_url)
             packs.set_corrections(conn, pack_id, corrections)
             packs.set_notes_and_rating(conn, pack_id, notes, rating)
-        finally:
-            conn.close()
 
     def set_pack_corrections_bg(self, pack_id: int, corrections: dict) -> None:
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             packs.set_corrections(conn, pack_id, corrections)
-        finally:
-            conn.close()
 
     def pack_id_for_asset(self, asset_id: int) -> int | None:
         row = self._conn.execute("SELECT pack_id FROM assets WHERE id = ?", (asset_id,)).fetchone()
@@ -880,8 +877,7 @@ class Catalogue:
         storage either way, just reachable right where a broken material
         was actually found.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             corrections = packs.get_corrections(conn, pack_id)
             overrides = dict(corrections.get("texture_overrides") or {})
             overrides[material_name] = relative_path
@@ -894,8 +890,6 @@ class Catalogue:
             # be misleading (the fix already applies, the row just hasn't
             # caught up yet).
             broken_textures.delete_for_pack_material(conn, pack_id, material_name)
-        finally:
-            conn.close()
 
     def add_texture_extra_bg(self, pack_id: int, material_name: str, relative_path: str) -> None:
         """Merges one material_name -> relative_path entry into a pack's
@@ -906,15 +900,12 @@ class Catalogue:
         travelling with the asset for later hand-wiring (the vendor's own
         recolor shader, say), not one this app can correctly auto-apply.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             corrections = packs.get_corrections(conn, pack_id)
             extras = dict(corrections.get("texture_extras") or {})
             extras[material_name] = relative_path
             corrections["texture_extras"] = extras
             packs.set_corrections(conn, pack_id, corrections)
-        finally:
-            conn.close()
 
     def list_broken_texture_materials(self) -> list[sqlite3.Row]:
         """Every (asset, material) pair currently known to reference a
@@ -937,16 +928,13 @@ class Catalogue:
         broken on every future render, the same way a texture override
         would, just without actually assigning a file.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             corrections = packs.get_corrections(conn, pack_id)
             acknowledged = set(corrections.get("acknowledged_materials") or [])
             acknowledged.add(material_name)
             corrections["acknowledged_materials"] = sorted(acknowledged)
             packs.set_corrections(conn, pack_id, corrections)
             broken_textures.delete_for_pack_material(conn, pack_id, material_name)
-        finally:
-            conn.close()
 
     def regenerate_model_thumbnail_bg(
         self,
@@ -965,8 +953,7 @@ class Catalogue:
         report = on_progress or (lambda _text: None)
         report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return blender_render.generate_model_thumbnails(
                 conn,
                 self._staging_folder,
@@ -976,8 +963,6 @@ class Catalogue:
                 asset_ids=asset_ids,
                 on_progress=on_progress,
             )
-        finally:
-            conn.close()
 
     @staticmethod
     def _model_asset_ids_missing_preview(
@@ -1022,8 +1007,7 @@ class Catalogue:
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             missing_ids = self._model_asset_ids_missing_preview(conn, self._preview_dir, asset_ids)
             already_done = len(asset_ids) - len(missing_ids)
             if not missing_ids:
@@ -1042,8 +1026,6 @@ class Catalogue:
             )
             stats.already_done += already_done
             return stats
-        finally:
-            conn.close()
 
     def bulk_tag_assets_bg(
         self, asset_ids: list[int], tag_name: str, category: str | None = None
@@ -1052,14 +1034,11 @@ class Catalogue:
         tagged. Assets are archived to the library at ingest time, not here
         -- see ingest_pack_bg.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             tag_id = tagging.get_or_create_tag(conn, tag_name, category)
             for asset_id in asset_ids:
                 tagging.tag_asset(conn, asset_id, tag_id)
             return len(asset_ids)
-        finally:
-            conn.close()
 
     def bulk_untag_assets_bg(self, asset_ids: list[int], tag_name: str) -> int:
         """Removes the same tag from every given asset. Returns how many
@@ -1067,16 +1046,13 @@ class Catalogue:
         not counted) -- mirrors bulk_tag_assets_bg's shape for the reverse
         operation.
         """
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             row = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,)).fetchone()
             if row is None:
                 return 0
             return sum(
                 1 for asset_id in asset_ids if tagging.untag_asset(conn, asset_id, row["id"])
             )
-        finally:
-            conn.close()
 
     def export_assets_bg(
         self,
@@ -1093,8 +1069,7 @@ class Catalogue:
         """
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             assets = exporting.select_assets(conn, asset_ids=asset_ids)
             project_identifier = str(Path(project_root).resolve())
             return exporting.export_assets(
@@ -1106,8 +1081,6 @@ class Catalogue:
                 assets,
                 on_progress=on_progress,
             )
-        finally:
-            conn.close()
 
     def export_assets_to_godot_bg(
         self,
@@ -1144,8 +1117,7 @@ class Catalogue:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
         godot_exe = self.resolve_godot()
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             assets = exporting.select_assets(conn, asset_ids=asset_ids)
             project_identifier = str(Path(project_root).resolve())
             items = exporting.plan_godot_export(
@@ -1205,8 +1177,6 @@ class Catalogue:
                                 conn, item.asset_id, project_identifier, item.destination
                             )
                     conn.commit()
-        finally:
-            conn.close()
 
         report = on_progress or (lambda _text: None)
         landed = [
@@ -1253,15 +1223,12 @@ class Catalogue:
         return wrapper_stats
 
     def tag_pack_bg(self, pack_name: str, tag_name: str, category: str | None = None) -> int:
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             pack_row = conn.execute("SELECT id FROM packs WHERE name = ?", (pack_name,)).fetchone()
             if pack_row is None:
                 raise RuntimeError(f"No such pack: {pack_name}")
             tag_id = tagging.get_or_create_tag(conn, tag_name, category)
             return tagging.tag_pack(conn, pack_row["id"], tag_id)
-        finally:
-            conn.close()
 
     def generate_2d_thumbnails_bg(
         self,
@@ -1273,8 +1240,7 @@ class Catalogue:
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return thumbnails.generate_texture_thumbnails(
                 conn,
                 self._staging_folder,
@@ -1285,8 +1251,6 @@ class Catalogue:
                 asset_ids=asset_ids,
                 on_progress=on_progress,
             )
-        finally:
-            conn.close()
 
     def generate_audio_thumbnails_bg(
         self,
@@ -1298,8 +1262,7 @@ class Catalogue:
     ) -> thumbnails.ThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return audio_thumbnails.generate_audio_thumbnails(
                 conn,
                 self._staging_folder,
@@ -1310,8 +1273,6 @@ class Catalogue:
                 asset_ids=asset_ids,
                 on_progress=on_progress,
             )
-        finally:
-            conn.close()
 
     def convert_asset_to_gltf_bg(
         self, asset_id: int, on_progress: Callable[[str], None] | None = None
@@ -1321,8 +1282,7 @@ class Catalogue:
         report = on_progress or (lambda _text: None)
         report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             result = conversion.convert_asset_to_gltf(
                 conn,
                 self._staging_folder,
@@ -1341,8 +1301,6 @@ class Catalogue:
                     on_progress=on_progress,
                 )
             return result
-        finally:
-            conn.close()
 
     def convert_assets_to_gltf_bg(
         self, asset_ids: list[int], on_progress: Callable[[str], None] | None = None
@@ -1356,8 +1314,7 @@ class Catalogue:
         report = on_progress or (lambda _text: None)
         report("Checking Blender installation...")
         blender_exe = self.resolve_blender()
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             result = conversion.convert_assets_to_gltf(
                 conn,
                 self._staging_folder,
@@ -1376,16 +1333,13 @@ class Catalogue:
                     on_progress=on_progress,
                 )
             return result
-        finally:
-            conn.close()
 
     def revert_conversion_bg(
         self, asset_id: int, on_progress: Callable[[str], None] | None = None
     ) -> bool:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             reverted = conversion.revert_conversion(conn, self._staging_folder, self._assets_dir, asset_id)
             if reverted:
                 row = conn.execute("SELECT asset_type FROM assets WHERE id = ?", (asset_id,)).fetchone()
@@ -1403,26 +1357,18 @@ class Catalogue:
                     except RuntimeError:
                         pass  # blender unavailable -- thumbnail just stays 'pending'
             return reverted
-        finally:
-            conn.close()
 
     def cleanup_pending_conversion_bg(self, asset_id: int) -> bool:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return conversion.cleanup_pending_conversion(conn, self._staging_folder, self._assets_dir, asset_id)
-        finally:
-            conn.close()
 
     def cleanup_all_pending_conversions_bg(self) -> int:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return conversion.cleanup_all_pending_conversions(conn, self._staging_folder, self._assets_dir)
-        finally:
-            conn.close()
 
     def generate_model_thumbnails_bg(
         self,
@@ -1433,8 +1379,7 @@ class Catalogue:
     ) -> blender_render.ModelThumbnailStats:
         if self._staging_folder is None:
             raise RuntimeError("No staging folder configured.")
-        conn = db.connect(settings.load().db_path())
-        try:
+        with self._own_connection() as conn:
             return blender_render.generate_model_thumbnails(
                 conn,
                 self._staging_folder,
@@ -1444,5 +1389,3 @@ class Catalogue:
                 force=force,
                 on_progress=on_progress,
             )
-        finally:
-            conn.close()

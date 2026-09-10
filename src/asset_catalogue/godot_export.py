@@ -80,13 +80,20 @@ def find_godot(godot_path_setting: str | None) -> Path | None:
 
 
 def get_godot_version(godot_exe: Path) -> tuple[int, int, int] | None:
-    result = subprocess.run(
-        [str(godot_exe), "--version"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    """None if the version can't be determined, for any reason -- see
+    blender_render.get_blender_version, same contract and same reason:
+    resolve_godot promises an error string, not an exception.
+    """
+    try:
+        result = subprocess.run(
+            [str(godot_exe), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", result.stdout)
     if not match:
         return None
@@ -357,13 +364,20 @@ def _run_godot_import_pass(godot_exe: Path, project_root: Path) -> bool:
     successful run (confirmed directly against a real project) -- only
     the process's own exit code is checked, not its output.
     """
-    result = subprocess.run(
-        [str(godot_exe), "--headless", "--editor", "--path", str(project_root), "--import"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    try:
+        result = subprocess.run(
+            [str(godot_exe), "--headless", "--editor", "--path", str(project_root), "--import"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # A failed import pass is already a normal outcome here (callers
+        # report it and stop), so a Godot that won't launch or an import
+        # that runs past the timeout joins it rather than raising through
+        # an export the user asked for.
+        return False
     return result.returncode == 0
 
 

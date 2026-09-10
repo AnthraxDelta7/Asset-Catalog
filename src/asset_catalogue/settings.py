@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -75,10 +75,49 @@ class Settings:
         return Path(self.library_folder) / "previews"
 
 
+#: Set when the last load() had to fall back to defaults, so the UI can
+#: say so. A silent reset looks exactly like the app forgetting every
+#: setting for no reason, which is the more alarming of the two.
+last_load_error: str | None = None
+
+
+def _is_expected_shape(key: str, value) -> bool:
+    """Whether a loaded value is usable for this field.
+
+    Derived from the field's own default rather than a second list of
+    types kept alongside the dataclass, which would drift the first time
+    a field was added. A field defaulting to None is an optional string --
+    true of every one here, and the reason that assumption is written
+    down rather than inferred at the call site.
+    """
+    field_def = Settings.__dataclass_fields__[key]
+    if field_def.default_factory is not MISSING:
+        return isinstance(value, type(field_def.default_factory()))
+    if field_def.default is None:
+        return value is None or isinstance(value, str)
+    return isinstance(value, type(field_def.default))
+
+
 def load() -> Settings:
+    """Never raises. A settings file that can't be read yields defaults.
+
+    Everything in the app calls this, including startup, so an exception
+    here is not a bad setting -- it's an app that won't launch, with a
+    raw traceback and no way back short of finding and deleting the file
+    by hand. Losing preferences is recoverable; losing the app is not.
+    """
+    global last_load_error
+    last_load_error = None
     if not SETTINGS_PATH.exists():
         return Settings()
-    data = json.loads(SETTINGS_PATH.read_text())
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        last_load_error = f"{SETTINGS_PATH} could not be read ({exc}); using defaults."
+        return Settings()
+    if not isinstance(data, dict):
+        last_load_error = f"{SETTINGS_PATH} is not a JSON object; using defaults."
+        return Settings()
 
     # One-time migration from the retired Godot-specific export toggle: its
     # remembered project path (if any) becomes the first entry in the new
@@ -92,12 +131,42 @@ def load() -> Settings:
     known_fields = set(Settings.__dataclass_fields__)
     data = {key: value for key, value in data.items() if key in known_fields}
 
-    settings = Settings(**data)
+    # A dataclass does not check types, so a file with the right keys and
+    # wrong values (hand-edited, or a list where a string belongs) is
+    # accepted here and fails much later -- Path(library_folder) on a
+    # dict, or .insert() on an int -- somewhere with no clue left about
+    # the cause. Each bad value is dropped back to its default instead.
+    rejected = [key for key, value in data.items() if not _is_expected_shape(key, value)]
+    for key in rejected:
+        del data[key]
+    if rejected:
+        last_load_error = (
+            f"{SETTINGS_PATH}: ignoring unusable value(s) for {', '.join(sorted(rejected))}."
+        )
+
+    try:
+        settings = Settings(**data)
+    except TypeError as exc:
+        # A field present but of the wrong shape -- a hand-edited file, or
+        # one written by a much newer build.
+        last_load_error = f"{SETTINGS_PATH} has unusable values ({exc}); using defaults."
+        return Settings()
     if legacy_project and legacy_project not in settings.recent_export_projects:
         settings.recent_export_projects.insert(0, legacy_project)
     return settings
 
 
 def save(settings: Settings) -> None:
+    """Writes via a temporary file and one atomic replace.
+
+    A plain write truncates the real file first, so a crash or a power
+    loss during it leaves a half-written settings.json -- and this file is
+    read on every launch. Paired with a load() that used to raise, that
+    turned an unlucky moment into an app that would not start again.
+    os.replace is atomic on both Windows and POSIX, so a reader sees
+    either the old file or the new one, never a partial one.
+    """
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps(asdict(settings), indent=2))
+    temp_path = SETTINGS_PATH.with_name(SETTINGS_PATH.name + ".tmp")
+    temp_path.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
+    os.replace(temp_path, SETTINGS_PATH)
