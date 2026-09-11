@@ -246,11 +246,23 @@ class FilterPanel(QWidget):
         self.packs_button = QToolButton()
         self.packs_button.setText("Packs ›")
         self.packs_button.setToolTip("View all packs")
-        self.packs_button.setAutoRaise(True)
+        # autoRaise would hide the frame until hover, which is the whole
+        # problem: this sits in the same slot as the "Type" and "Format"
+        # section headings, so with no chrome of its own it reads as
+        # another heading that happens to have an arrow after it. It
+        # keeps its border all the time so it is visibly a control.
+        self.packs_button.setAutoRaise(False)
         self.packs_button.setCursor(Qt.PointingHandCursor)
         self.packs_button.setStyleSheet(
-            "QToolButton { border: none; padding: 0px; font-weight: 600; }"
-            "QToolButton:hover { color: #7aa2f7; }"
+            "QToolButton {"
+            "  border: 1px solid #4a4d52;"
+            "  border-radius: 4px;"
+            "  padding: 3px 10px;"
+            "  background-color: #33363b;"
+            "  font-weight: 600;"
+            "}"
+            "QToolButton:hover { background-color: #3d4046; border-color: #6b7079; }"
+            "QToolButton:pressed { background-color: #292b2f; }"
         )
         self.packs_button.clicked.connect(lambda: self._on_open_pack_manager())
         pack_header.addWidget(self.packs_button)
