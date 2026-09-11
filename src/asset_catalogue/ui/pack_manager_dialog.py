@@ -58,7 +58,7 @@ class PackManagerDialog(QDialog):
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Pack", "Assets", "Models", "Creator", "Licence", "Hidden"]
+            ["Pack", "Assets", "Models", "Creator", "Licence", "In list"]
         )
         # Multi-select, because the bulk actions (hide, remove) are the
         # reason to open this rather than the per-pack context menu that
@@ -109,10 +109,21 @@ class PackManagerDialog(QDialog):
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
 
-        self.hide_button = QPushButton("Hide")
+        # Named for what they do to the filter panel's list rather than
+        # for the flag they set. That list is a short recents list now, so
+        # "Show in List" both clears the hidden flag and marks the pack as
+        # just-used -- without the second half a pack could be unhidden
+        # and still not appear, because the list only holds the most
+        # recent handful. This is the way back for any pack, hidden or
+        # merely old.
+        self.hide_button = QPushButton("Hide from List")
+        self.hide_button.setToolTip(
+            "Keep the pack catalogued and searchable, but take it out of the pack list"
+        )
         self.hide_button.clicked.connect(lambda: self._set_hidden(True))
         actions.addWidget(self.hide_button)
-        self.unhide_button = QPushButton("Unhide")
+        self.unhide_button = QPushButton("Show in List")
+        self.unhide_button.setToolTip("Put the pack at the top of the filter panel's pack list")
         self.unhide_button.clicked.connect(lambda: self._set_hidden(False))
         actions.addWidget(self.unhide_button)
 
@@ -149,7 +160,7 @@ class PackManagerDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(str(pack["model_count"] or 0)))
             self.table.setItem(row, 3, QTableWidgetItem(pack["creator"] or ""))
             self.table.setItem(row, 4, QTableWidgetItem(pack["licence"] or ""))
-            self.table.setItem(row, 5, QTableWidgetItem("Hidden" if pack["hidden"] else ""))
+            self.table.setItem(row, 5, QTableWidgetItem("" if pack["hidden"] else "yes"))
         self._on_selection_changed()
 
     def selected_packs(self) -> list:

@@ -166,6 +166,24 @@ class Catalogue:
     def set_packs_hidden(self, pack_ids: list[int], hidden: bool) -> None:
         packs.set_hidden(self._conn, pack_ids, hidden)
 
+    def list_recent_packs(self, limit: int) -> list[str]:
+        """The filter panel's short list. Everything else -- the full set,
+        including hidden packs -- is reachable through the pack manager
+        and through this list's own search, which looks past the cap.
+        """
+        return packs.list_recent(self._conn, limit)
+
+    def count_packs(self, include_hidden: bool = False) -> int:
+        where = "" if include_hidden else " WHERE hidden = 0"
+        return self._conn.execute(f"SELECT COUNT(*) FROM packs{where}").fetchone()[0]
+
+    def touch_pack(self, pack_name: str) -> None:
+        """Moves a pack to the front of the recents list. Called when one
+        is selected, so the packs someone is actually working with stay in
+        view and the rest fall off the end.
+        """
+        packs.touch_by_name(self._conn, pack_name)
+
     def update_pack_source_folder(self, pack_id: int, pack_folder: str) -> None:
         """Repoints a pack at a different staged folder.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from asset_catalogue import library_assets
@@ -101,4 +102,46 @@ def set_hidden(conn: sqlite3.Connection, pack_ids: list[int], hidden: bool) -> N
         f"UPDATE packs SET hidden = ? WHERE id IN ({placeholders})",
         [1 if hidden else 0, *pack_ids],
     )
+    if not hidden:
+        # Unhiding is someone saying "I want this one back", and the
+        # filter panel only shows a handful of recents -- so without this
+        # a pack could be unhidden and still not appear, which reads as
+        # the button having done nothing. Touching it puts it at the top.
+        conn.execute(
+            f"UPDATE packs SET last_used_at = ? WHERE id IN ({placeholders})",
+            [_now(), *pack_ids],
+        )
     conn.commit()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def touch(conn: sqlite3.Connection, pack_id: int) -> None:
+    """Marks a pack as just-used, which is what the filter panel's recents
+    list is ordered by. Cheap enough to call on every pack selection.
+    """
+    conn.execute("UPDATE packs SET last_used_at = ? WHERE id = ?", (_now(), pack_id))
+    conn.commit()
+
+
+def touch_by_name(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute("UPDATE packs SET last_used_at = ? WHERE name = ?", (_now(), name))
+    conn.commit()
+
+
+def list_recent(conn: sqlite3.Connection, limit: int) -> list[str]:
+    """The most recently used pack names, newest first, hidden ones left out.
+
+    NULL last_used_at (every pack from before the column existed) sorts
+    last, so a library nobody has clicked through yet still lists
+    sensibly -- newest ingest first -- rather than in arbitrary order.
+    """
+    rows = conn.execute(
+        "SELECT name FROM packs WHERE hidden = 0 "
+        "ORDER BY last_used_at IS NULL, last_used_at DESC, date_added DESC, name "
+        "LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [row["name"] for row in rows]

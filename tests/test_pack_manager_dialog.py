@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 
 from asset_catalogue import db, ingest, library_assets, settings
 from asset_catalogue.catalogue import Catalogue
@@ -67,7 +68,7 @@ def test_hiding_a_pack_drops_it_from_the_filter_list_but_not_from_here(
     assert catalogue_with_packs.list_packs() == ["Beta"]
     assert catalogue_with_packs.list_packs(include_hidden=True) == ["Alpha", "Beta"]
     assert dialog.table.rowCount() == 2
-    assert dialog.table.item(0, 5).text() == "Hidden"
+    assert dialog.table.item(0, 5).text() == ""  # the "In list" column
     assert dialog.changed is True
 
     dialog.table.selectRow(0)
@@ -165,3 +166,108 @@ def test_remove_reports_packs_it_could_not_find(qapp, catalogue_with_packs: Cata
     stats = catalogue_with_packs.remove_pack_bg(999999)
     assert not stats.pack_removed
     assert stats.removed_assets == 0
+
+
+def _catalogue_with_many_packs(tmp_path: Path, monkeypatch, count: int) -> Catalogue:
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    for index in range(count):
+        name = f"Pack{index:02d}"
+        ingest.get_or_create_pack(conn, name, name, None, None, None)
+    return Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+
+def test_the_pack_list_shows_only_the_most_recent_handful(qapp, tmp_path: Path, monkeypatch) -> None:
+    """A library of dozens turned the filter panel's list into a scroll
+    box nobody read. It is a recents list now; everything else stays
+    reachable through the search and the pack manager.
+    """
+    from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
+
+    catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+
+    # Row 0 is "All packs".
+    assert panel.pack_list.count() == RECENT_PACK_LIMIT + 1
+    assert panel.pack_list.item(0).text() == "All packs"
+
+
+def test_selecting_a_pack_brings_it_to_the_front_of_the_recents(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
+
+    catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+
+    stale = catalogue.list_packs()[0]
+    assert stale not in catalogue.list_recent_packs(RECENT_PACK_LIMIT)
+    catalogue.touch_pack(stale)
+    assert catalogue.list_recent_packs(RECENT_PACK_LIMIT)[0] == stale
+
+
+def test_searching_looks_past_the_cap(qapp, tmp_path: Path, monkeypatch) -> None:
+    """The cap must never hide a pack from the tool meant to find it.
+    Hiding rows was fine when the list held everything; with ten rows it
+    would mean search could only find what was already on screen.
+    """
+    from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
+
+    catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+
+    hidden_from_list = "Pack00"
+    assert hidden_from_list not in catalogue.list_recent_packs(RECENT_PACK_LIMIT)
+    assert not panel.pack_list.findItems(hidden_from_list, Qt.MatchExactly)
+
+    panel.pack_search_edit.setText(hidden_from_list)
+    assert panel.pack_list.findItems(hidden_from_list, Qt.MatchExactly)
+
+    # Clearing puts the recents back.
+    panel.pack_search_edit.setText("")
+    assert panel.pack_list.count() == RECENT_PACK_LIMIT + 1
+
+
+def test_the_selected_pack_is_never_dropped_from_the_list(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """A list that dropped the pack currently filtering the grid would
+    leave the user looking at a filtered view with nothing on screen
+    explaining what filtered it.
+    """
+    from asset_catalogue.ui.main_window import FilterPanel
+
+    catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+
+    panel._populate_packs("Pack00")
+    assert panel.selected_pack() == "Pack00"
+    assert panel.pack_list.findItems("Pack00", Qt.MatchExactly)
+
+
+def test_show_in_list_puts_a_pack_back_even_when_it_was_never_hidden(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Unhiding alone was not enough once the list became a recents list:
+    a pack could have its hidden flag cleared and still not appear,
+    because it was simply too old. "Show in List" marks it just-used too.
+    """
+    from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT
+
+    catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
+    stale = "Pack00"
+    assert stale not in catalogue.list_recent_packs(RECENT_PACK_LIMIT)
+
+    dialog = PackManagerDialog(catalogue)
+    row = next(
+        index
+        for index in range(dialog.table.rowCount())
+        if dialog.table.item(index, 0).text() == stale
+    )
+    dialog.table.selectRow(row)
+    dialog._set_hidden(False)
+
+    assert catalogue.list_recent_packs(RECENT_PACK_LIMIT)[0] == stale

@@ -138,6 +138,12 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     # that gets unusable once a library holds dozens of packs. Not a
     # soft-delete: see assets.deleted_at for that.
     _ensure_column(conn, "packs", "hidden", "hidden INTEGER NOT NULL DEFAULT 0")
+    # When this pack was last worked with -- selected as a filter,
+    # ingested, or explicitly surfaced from the pack manager. Drives the
+    # filter panel's short recents list. NULL for every pack that existed
+    # before this column, which sorts below anything touched since, so an
+    # untouched library falls back to newest-ingested-first on date_added.
+    _ensure_column(conn, "packs", "last_used_at", "last_used_at TEXT")
     _ensure_column(conn, "assets", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "assets", "deleted_at", "deleted_at TEXT")
     # Set/cleared by blender_render.generate_model_thumbnails whenever a

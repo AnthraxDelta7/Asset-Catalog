@@ -291,10 +291,10 @@ class FilterPanel(QWidget):
         layout.addWidget(self.pack_search_edit)
 
         self.pack_list = QListWidget()
-        self.pack_list.addItem("All packs")
-        self.pack_list.addItems(catalogue.list_packs())
-        self.pack_list.setCurrentRow(0)
-        self.pack_list.currentRowChanged.connect(self._on_change)
+        self.pack_list.currentRowChanged.connect(self._on_pack_row_changed)
+        # Through the same path a refresh uses, so the cap, the selection
+        # rule and the "N packs" hints are defined in exactly one place.
+        self._populate_packs(None)
         self.pack_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.pack_list.customContextMenuRequested.connect(self._show_pack_context_menu)
         layout.addWidget(self.pack_list, stretch=1)
@@ -358,23 +358,45 @@ class FilterPanel(QWidget):
             self.pack_search_edit.clear()
 
     def _apply_pack_filter(self) -> None:
-        needle = self.pack_search_edit.text().strip().lower()
-        for row in range(self.pack_list.count()):
-            item = self.pack_list.item(row)
-            # Row 0 is "All packs" -- the way back to an unfiltered grid,
-            # so it must never be filtered away. The current selection
-            # stays visible too: hiding it would leave the grid filtered
-            # by a pack the user can no longer see.
-            always = row == 0 or row == self.pack_list.currentRow()
-            item.setHidden(not (always or not needle or needle in item.text().lower()))
+        """Re-sources the list rather than hiding rows in it.
+
+        Hiding was enough when the list held every pack. It is actively
+        wrong now that it holds ten: searching would only ever find what
+        was already on screen, so the cap would hide packs from the one
+        tool meant to find them. With a search term the list is rebuilt
+        from *every* pack instead.
+        """
+        self._populate_packs(self.selected_pack())
 
     def refresh_packs(self, catalogue: Catalogue, select: str | None = None) -> None:
         self._catalogue = catalogue
-        target = select if select is not None else self.selected_pack()
+        self._populate_packs(select if select is not None else self.selected_pack())
+
+    def _populate_packs(self, target: str | None) -> None:
+        """Rebuilds the pack list from whichever source the state calls for.
+
+        No search term: the recents, capped. A search term: every pack
+        that matches, because the cap must never be able to hide a pack
+        from the search meant to find it.
+
+        `target` is kept selected even when it falls outside both -- a
+        list that silently dropped the pack currently filtering the grid
+        would leave the user looking at a filtered view with nothing
+        showing what filtered it.
+        """
+        needle = self.pack_search_edit.text().strip().lower()
+        total = self._catalogue.count_packs()
+        if needle:
+            names = [n for n in self._catalogue.list_packs() if needle in n.lower()]
+        else:
+            names = self._catalogue.list_recent_packs(RECENT_PACK_LIMIT)
+        if target is not None and target not in names:
+            names.append(target)
+
         self.pack_list.blockSignals(True)
         self.pack_list.clear()
         self.pack_list.addItem("All packs")
-        self.pack_list.addItems(catalogue.list_packs())
+        self.pack_list.addItems(names)
         restore_row = 0
         if target is not None:
             match = self.pack_list.findItems(target, Qt.MatchExactly)
@@ -382,8 +404,29 @@ class FilterPanel(QWidget):
                 restore_row = self.pack_list.row(match[0])
         self.pack_list.setCurrentRow(restore_row)
         self.pack_list.blockSignals(False)
-        # Rows were rebuilt, so their hidden state was lost with them.
-        self._apply_pack_filter()
+
+        # Says the cap exists, at the two moments someone would wonder
+        # where a pack went: reaching for search, or for the manager.
+        hidden_count = max(0, total - len(names))
+        self.pack_search_edit.setPlaceholderText(
+            f"Search all {total} packs..." if total else "Search packs..."
+        )
+        self.packs_button.setToolTip(
+            f"View all {total} packs"
+            + (f" -- {hidden_count} not shown in this list" if hidden_count else "")
+        )
+
+    def _on_pack_row_changed(self, _row: int) -> None:
+        """Records the selection as a use, then reports the change.
+
+        Deliberately does not re-sort the list here: a pack jumping to the
+        top under the cursor the moment it is clicked makes the list feel
+        unstable, and the next refresh picks the new order up anyway.
+        """
+        pack = self.selected_pack()
+        if pack is not None:
+            self._catalogue.touch_pack(pack)
+        self._on_change()
 
     def _show_pack_context_menu(self, pos) -> None:
         menu = self._build_pack_context_menu(pos)
@@ -461,6 +504,13 @@ class FilterPanel(QWidget):
 # Small enough that a batch never blocks long enough to feel like a
 # stutter, big enough that a large pack doesn't take hundreds of event
 # loop turns to finish.
+# The filter panel's pack list is a recents list, not a directory. A
+# library of forty packs turned it into a scroll box nobody read, and the
+# packs anyone actually works with are the handful touched most recently.
+# Everything else stays one click away: the list's own search looks past
+# this cap at every pack, and the pack manager shows the lot.
+RECENT_PACK_LIMIT = 10
+
 ICON_FILL_BATCH = 24
 
 # How long closing the window waits for background work to finish. Long
