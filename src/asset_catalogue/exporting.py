@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from asset_catalogue import library_assets
+
 ProgressCallback = Callable[[str], None]
 
 
@@ -198,6 +200,7 @@ def _copy_assets(
     dest_subfolder: str,
     assets: list[sqlite3.Row],
     on_progress: ProgressCallback | None = None,
+    assets_dir: Path | None = None,
 ) -> tuple[ExportStats, list[Path]]:
     """The actual file-copy loop behind export_assets."""
     report = on_progress or (lambda _text: None)
@@ -207,7 +210,12 @@ def _copy_assets(
     )
     for asset, destination in zip(assets, destinations):
         report(f"Exporting {asset['relative_path']}...")
-        source = staging_folder / asset["pack_folder"] / asset["relative_path"]
+        source = library_assets.source_file(
+            assets_dir, staging_folder, asset["pack_name"],
+            asset["pack_folder"], asset["relative_path"],
+        ) if assets_dir is not None else (
+            staging_folder / asset["pack_folder"] / asset["relative_path"]
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         record_export(conn, asset["id"], project_identifier, destination)
@@ -224,9 +232,11 @@ def export_assets(
     dest_subfolder: str,
     assets: list[sqlite3.Row],
     on_progress: ProgressCallback | None = None,
+    assets_dir: Path | None = None,
 ) -> ExportStats:
     stats, _destinations = _copy_assets(
-        conn, staging_folder, project_root, project_identifier, dest_subfolder, assets, on_progress
+        conn, staging_folder, project_root, project_identifier, dest_subfolder, assets,
+        on_progress, assets_dir,
     )
     return stats
 
@@ -261,6 +271,7 @@ def plan_godot_export(
     dest_subfolder: str,
     assets: list[sqlite3.Row],
     on_progress: ProgressCallback | None = None,
+    assets_dir: Path | None = None,
 ) -> list[GodotExportItem]:
     """Works out where every selected model lands as a .glb, and copies
     the ones that already are one straight there. Anything Blender has to
@@ -280,7 +291,9 @@ def plan_godot_export(
     )
     items: list[GodotExportItem] = []
     for asset, destination in zip(assets, destinations):
-        pack_root = staging_folder / asset["pack_folder"]
+        pack_root = library_assets.source_root(
+            assets_dir, staging_folder, asset["pack_name"], asset["pack_folder"]
+        ) if assets_dir is not None else staging_folder / asset["pack_folder"]
         relative_path = asset["relative_path"]
         item = GodotExportItem(
             asset_id=asset["id"],

@@ -977,6 +977,7 @@ class Catalogue:
                 self._staging_folder,
                 self._thumbnail_dir,
                 blender_exe,
+                assets_dir=self._assets_dir,
                 asset_id=asset_id,
                 asset_ids=asset_ids,
                 on_progress=on_progress,
@@ -1038,6 +1039,7 @@ class Catalogue:
                 self._staging_folder,
                 self._thumbnail_dir,
                 blender_exe,
+                assets_dir=self._assets_dir,
                 asset_ids=missing_ids,
                 preview_dir=self._preview_dir,
                 on_progress=on_progress,
@@ -1098,6 +1100,7 @@ class Catalogue:
                 dest_subfolder,
                 assets,
                 on_progress=on_progress,
+                assets_dir=self._assets_dir,
             )
 
     def export_assets_to_godot_bg(
@@ -1146,6 +1149,7 @@ class Catalogue:
                 dest_subfolder,
                 assets,
                 on_progress=on_progress,
+                assets_dir=self._assets_dir,
             )
             to_convert = [item for item in items if item.needs_conversion]
             conversion_failures: list[str] = []
@@ -1315,6 +1319,7 @@ class Catalogue:
                     self._staging_folder,
                     self._thumbnail_dir,
                     blender_exe,
+                    assets_dir=self._assets_dir,
                     asset_id=asset_id,
                     on_progress=on_progress,
                 )
@@ -1347,6 +1352,7 @@ class Catalogue:
                     self._staging_folder,
                     self._thumbnail_dir,
                     blender_exe,
+                    assets_dir=self._assets_dir,
                     asset_ids=result.converted_asset_ids,
                     on_progress=on_progress,
                 )
@@ -1369,6 +1375,7 @@ class Catalogue:
                             self._staging_folder,
                             self._thumbnail_dir,
                             blender_exe,
+                            assets_dir=self._assets_dir,
                             asset_id=asset_id,
                             on_progress=on_progress,
                         )
@@ -1403,6 +1410,7 @@ class Catalogue:
                 self._staging_folder,
                 self._thumbnail_dir,
                 blender_exe,
+                assets_dir=self._assets_dir,
                 pack_name=pack,
                 force=force,
                 on_progress=on_progress,

@@ -22,6 +22,50 @@ def asset_library_path(assets_dir: Path, pack_name: str, relative_path: str) -> 
     return pack_library_folder(assets_dir, pack_name) / relative_path
 
 
+def source_root(
+    assets_dir: Path, ingest_folder: Path | None, pack_name: str, pack_folder: str
+) -> Path:
+    """The folder to read a pack's files from.
+
+    The library's archived copy wins whenever it exists, and the original
+    ingest location is the fallback. That order is the point: the library
+    copy is the durable one, so preferring it means a pack behaves
+    identically whether or not its unpacked source is still on disk --
+    which is what makes deleting that source safe rather than a thing
+    that quietly breaks re-rendering weeks later.
+
+    Falls back rather than failing when the pack was never archived, so a
+    library from before archiving existed still works.
+    """
+    archived = pack_library_folder(assets_dir, pack_name)
+    if archived.is_dir():
+        return archived
+    if ingest_folder is None:
+        return archived
+    return ingest_folder / pack_folder
+
+
+def source_file(
+    assets_dir: Path,
+    ingest_folder: Path | None,
+    pack_name: str,
+    pack_folder: str,
+    relative_path: str,
+) -> Path:
+    """One file, resolved the same way as source_root.
+
+    Checked per file rather than per pack: a pack can be partly archived
+    (an ingest interrupted, an asset added later), and falling back for
+    just the files that are missing beats failing for the whole pack.
+    """
+    archived = asset_library_path(assets_dir, pack_name, relative_path)
+    if archived.is_file():
+        return archived
+    if ingest_folder is None:
+        return archived
+    return ingest_folder / pack_folder / relative_path
+
+
 def archive_asset(
     conn: sqlite3.Connection, staging_folder: Path, assets_dir: Path, asset_id: int
 ) -> Path | None:

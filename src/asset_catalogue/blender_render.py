@@ -13,6 +13,7 @@ from typing import Callable
 from asset_catalogue import (
     audio_thumbnails,
     broken_textures,
+    library_assets,
     model_metadata,
     model_preview,
     paths,
@@ -136,7 +137,13 @@ def build_job_list(
     asset_id: int | None = None,
     asset_ids: list[int] | None = None,
     preview_dir: Path | None = None,
+    assets_dir: Path | None = None,
 ) -> tuple[list[dict], int]:
+    """assets_dir, when given, lets a render read the library's archived
+    copy in preference to the original unpacked folder -- so re-rendering
+    keeps working after that folder is deleted. Omitted, this behaves
+    exactly as it did: original only.
+    """
     if asset_ids is not None and not asset_ids:
         return [], 0
 
@@ -147,7 +154,7 @@ def build_job_list(
 
     query = (
         "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
-        "assets.extension, packs.pack_folder, packs.corrections "
+        "assets.extension, packs.pack_folder, packs.name AS pack_name, packs.corrections "
         "FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'model'"
     )
@@ -191,8 +198,24 @@ def build_job_list(
                 # cached under the same content-hash identity the
                 # thumbnail and preview already use.
                 "content_hash": row["content_hash"],
-                "source_path": str(staging_folder / row["pack_folder"] / row["relative_path"]),
-                "pack_root": str(staging_folder / row["pack_folder"]),
+                "source_path": str(
+                    library_assets.source_file(
+                        assets_dir, staging_folder, row["pack_name"],
+                        row["pack_folder"], row["relative_path"],
+                    )
+                    if assets_dir is not None
+                    else staging_folder / row["pack_folder"] / row["relative_path"]
+                ),
+                # The root matters as much as the file: Blender resolves a
+                # model's textures relative to it, so it has to point at
+                # the same tree the model itself was read from.
+                "pack_root": str(
+                    library_assets.source_root(
+                        assets_dir, staging_folder, row["pack_name"], row["pack_folder"]
+                    )
+                    if assets_dir is not None
+                    else staging_folder / row["pack_folder"]
+                ),
                 "output_path": str(dest),
                 "preview_output_path": preview_output_path,
                 "colors_output_path": colors_output_path,
@@ -215,10 +238,12 @@ def generate_model_thumbnails(
     asset_ids: list[int] | None = None,
     preview_dir: Path | None = None,
     on_progress: ProgressCallback | None = None,
+    assets_dir: Path | None = None,
 ) -> ModelThumbnailStats:
     report = on_progress or (lambda _text: None)
     jobs, already_done = build_job_list(
-        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids, preview_dir
+        conn, staging_folder, thumbnail_dir, pack_name, force, asset_id, asset_ids, preview_dir,
+        assets_dir,
     )
     stats = ModelThumbnailStats(already_done=already_done)
     if not jobs:
