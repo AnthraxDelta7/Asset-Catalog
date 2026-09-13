@@ -85,6 +85,13 @@ def hash_file(path: Path) -> str:
 
 @dataclass
 class IngestStats:
+    # Folders this ingest unpacked for itself (nested .zip files inside a
+    # pack). Reported rather than deleted here: whether a leftover can go
+    # depends on the pack having been archived, which this doesn't do.
+    extracted_dirs: list[Path] = field(default_factory=list)
+    # Filled in after the fact by Catalogue._clean_up_extractions.
+    extractions_removed: int = 0
+    extraction_problems: list[str] = field(default_factory=list)
     new: int = 0
     duplicate: int = 0
     total: int = 0
@@ -235,6 +242,7 @@ def _walk_ingestible_files(
                     report(f"Extracting {entry.name}...")
                     archives.extract_zip(entry, extracted_dir)
                     stats.nested_zips_extracted += 1
+                    stats.extracted_dirs.append(extracted_dir)
                 work_items.append((extracted_dir, zip_depth + 1))
                 continue
 

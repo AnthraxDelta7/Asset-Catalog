@@ -362,6 +362,14 @@ With `project_root`, only packs that have at least one asset actually exported i
 asset-catalogue-ui
 ```
 
+### Ingest folder, and unpacked leftovers
+
+The **ingest folder** in Settings is where the pack browser starts, not a place packs have to live. Browsing is unrestricted — **Up** goes anywhere, **Browse...** jumps to any folder on the machine, and **Ingest Folder** comes back. A pack inside the ingest folder is recorded relative to it, so moving that folder later keeps those packs working; a pack outside it is recorded by absolute path.
+
+**Unpacked leftovers are cleaned up.** When Asset Catalogue extracts a `.zip` — the pack itself, or a nested zip inside it — it records that it created that folder. After the pack is catalogued *and* archived into the library, those recorded folders are removed and the ingest summary says so. Your `.zip` is never touched, and neither is any folder you unpacked yourself: ownership is recorded at extraction time, never guessed from a folder's name or position, because a folder beside a zip looks identical either way.
+
+Nothing is deleted unless the library has its own copy. Archiving now brings a model's **dependencies** along — a `.gltf`'s `.bin`, a `.obj`'s `.mtl` and that `.mtl`'s textures — which the catalogue itself never lists, since they aren't assets. Thumbnail rendering, glTF conversion and Godot export all read the library's archived copy in preference to the original, so a pack behaves the same whether or not its unpacked source still exists. If archiving produced nothing, the unpacked folder is left exactly where it is.
+
 ### The pack list is a recents list
 
 The filter panel's pack list shows the **10 most recently used packs**, newest first — a library of dozens made it a scroll box nobody read, and the packs anyone is actually working with are a handful. A pack counts as used when you select it, ingest it, or explicitly surface it from the pack manager.

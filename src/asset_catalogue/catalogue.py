@@ -17,6 +17,7 @@ from asset_catalogue import (
     credits,
     db,
     exporting,
+    extractions,
     gltf_metadata,
     godot_export,
     model_metadata,
@@ -700,6 +701,12 @@ class Catalogue:
             pack_root = self._staging_folder / pack_folder_name
             if not (pack_root.exists() and any(pack_root.iterdir())):
                 archives.extract_zip(zip_path, pack_root)
+                # Written down as it happens. The pack row does not exist
+                # yet -- the folder has to be unpacked before there is
+                # anything to catalogue -- so it is attributed to the pack
+                # afterwards, by extractions.claim.
+                with self._own_connection() as conn:
+                    extractions.record(conn, pack_root)
         return pack_root, pack_folder_name
 
     def scan_format_duplicates(self, pack_folder_name: str) -> set[str]:
@@ -773,7 +780,39 @@ class Catalogue:
                 conn, self._staging_folder, self._assets_dir, pack_id, on_progress=on_progress
             )
             self._auto_generate_thumbnails(conn, stats, pack_id, pack_name, on_progress)
+            self._clean_up_extractions(conn, pack_id, stats, on_progress)
             return stats, updated_fields
+
+    def _clean_up_extractions(self, conn, pack_id, stats, on_progress) -> None:
+        """Removes the folders this app unpacked, once the pack is safely
+        in the library.
+
+        Ordered deliberately: archiving has already run, so every
+        catalogued file and every dependency it names has a copy in the
+        library, and rendering and export resolve to that copy in
+        preference to the original. Only then is the unpacked source
+        genuinely redundant.
+
+        Nothing is inferred about ownership -- only folders recorded at
+        extraction time are touched, so a folder the user unpacked
+        themselves is never a candidate no matter how much it looks like
+        one of ours.
+        """
+        report = on_progress or (lambda _text: None)
+        for path in stats.extracted_dirs:
+            extractions.record(conn, path, pack_id)
+        extractions.claim(conn, pack_id)
+        if stats.archived <= 0:
+            # Nothing reached the library, so the unpacked copy is still
+            # the only copy. Leaving it is the only safe answer.
+            return
+        removed, problems = extractions.cleanup_pack(conn, pack_id)
+        stats.extractions_removed = removed
+        stats.extraction_problems = problems
+        if removed:
+            report(f"Removed {removed} unpacked folder(s) this import created.")
+        for problem in problems:
+            report(problem)
 
     def ingest_packs_batch_bg(
         self,

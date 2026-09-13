@@ -161,6 +161,18 @@ def remove_pack(
     for asset_id in asset_ids:
         if _remove_one_asset(conn, thumbnail_dir, assets_dir, asset_id, on_progress):
             stats.removed_assets += 1
+    # Same rule as the per-asset child tables above, one level up: any
+    # table with a pack_id REFERENCES packs(id) has to be cleared before
+    # the pack row, or the delete fails with "FOREIGN KEY constraint
+    # failed" for exactly the packs that happen to have a row in it. The
+    # extraction ledger is one; adding another pack-scoped table means
+    # adding it here too.
+    #
+    # The rows are dropped, not acted on: the folders they name were
+    # already removed after ingest, and anything still there is left
+    # where it is, per this app's rule that ingest-folder files are never
+    # touched by a catalogue delete.
+    conn.execute("DELETE FROM extractions WHERE pack_id = ?", (pack_id,))
     conn.execute("DELETE FROM packs WHERE id = ?", (pack_id,))
     conn.commit()
     stats.pack_removed = True

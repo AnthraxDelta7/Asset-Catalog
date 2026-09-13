@@ -4716,6 +4716,17 @@ class MainWindow(QMainWindow):
                     f"\nUnpacked {stats.nested_zips_extracted} nested zip file(s) "
                     "found inside the pack"
                 )
+            # Said out loud: this deletes folders on the user's disk, and a
+            # cleanup nobody is told about is indistinguishable from files
+            # going missing on their own.
+            if getattr(stats, "extractions_removed", 0):
+                message += (
+                    f"\nRemoved {stats.extractions_removed} unpacked folder(s) this "
+                    "import created -- the library has its own copy, and your .zip "
+                    "is untouched"
+                )
+            for problem in getattr(stats, "extraction_problems", None) or []:
+                message += f"\n{problem}"
             if stats.skipped_unrecognized_files or stats.skipped_engine_folders:
                 message += (
                     f"\nSkipped {stats.skipped_unrecognized_files} unrecognized "

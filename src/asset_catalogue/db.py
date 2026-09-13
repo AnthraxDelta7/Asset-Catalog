@@ -144,6 +144,19 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     # before this column, which sorts below anything touched since, so an
     # untouched library falls back to newest-ingested-first on date_added.
     _ensure_column(conn, "packs", "last_used_at", "last_used_at TEXT")
+    # Folders this app unpacked itself, so cleanup can remove its own
+    # leftovers and nothing else. Recording is the only honest way to
+    # know: a folder sitting next to a zip of the same name looks exactly
+    # the same whether the app made it or the user did, and guessing
+    # wrong means deleting someone's work.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS extractions ("
+        "  path TEXT PRIMARY KEY,"
+        "  pack_id INTEGER,"
+        "  created_at TEXT NOT NULL,"
+        "  FOREIGN KEY (pack_id) REFERENCES packs(id)"
+        ")"
+    )
     _ensure_column(conn, "assets", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "assets", "deleted_at", "deleted_at TEXT")
     # Set/cleared by blender_render.generate_model_thumbnails whenever a

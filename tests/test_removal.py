@@ -237,3 +237,46 @@ def test_remove_pack_succeeds_with_rows_in_every_child_table(
         ).fetchone()["n"]
         assert remaining == 0, f"{table} still has rows for the deleted asset"
     assert conn.execute("SELECT 1 FROM packs WHERE id = ?", (pack_id,)).fetchone() is None
+
+
+_PACK_CHILD_TABLES = {"assets", "extractions"}
+
+
+def test_every_table_referencing_packs_is_cleared_before_the_pack(
+    conn: sqlite3.Connection,
+) -> None:
+    """The asset-level version of this guard above missed a whole level.
+
+    foreign_keys is ON and nothing cascades, so a table with a pack_id
+    REFERENCES packs(id) has to be cleared before the pack row or the
+    delete fails -- and only for the packs that happen to have a row in
+    it, which is what made the original version of this bug so easy to
+    miss. Adding a pack-scoped table means adding it to remove_pack.
+    """
+    tables = [
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    ]
+    referencing = {
+        table
+        for table in tables
+        if any(fk["table"] == "packs" for fk in conn.execute(f"PRAGMA foreign_key_list({table})"))
+    }
+    assert referencing == _PACK_CHILD_TABLES
+
+
+def test_remove_pack_succeeds_with_a_recorded_extraction(
+    conn: sqlite3.Connection, staging_folder: Path, thumbnail_dir: Path, assets_dir: Path
+) -> None:
+    """Caught before shipping by running remove_pack against a pack with
+    an extraction recorded: it raised "FOREIGN KEY constraint failed",
+    the exact failure the asset-level fix had already been through once.
+    """
+    from asset_catalogue import extractions
+
+    pack_id, _asset_id = _ingest_and_prepare(conn, staging_folder, thumbnail_dir, assets_dir)
+    extractions.record(conn, staging_folder / "unpacked", pack_id)
+
+    stats = removal.remove_pack(conn, thumbnail_dir, assets_dir, pack_id)
+    assert stats.pack_removed
+    assert conn.execute("SELECT COUNT(*) FROM extractions").fetchone()[0] == 0
