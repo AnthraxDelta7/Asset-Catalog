@@ -1636,10 +1636,10 @@ class StagingBrowserDialog(QDialog):
 
         if multi_select:
             hint = QLabel(
-                "Folders and .zip files are both listed -- either can be a pack. "
-                "Double-click a folder to open it. Ctrl/Shift-click to select several "
-                "folders and/or .zip files at this level, then press Select -- picks "
-                "siblings in the current folder, not a recursive pick across subfolders."
+                "Tick every folder and/or .zip you want to ingest, then press "
+                "Select. Double-click a folder to open it, or a .zip to tick it. "
+                "Ticks apply to the folder you are in -- this picks siblings at one "
+                "level, not a recursive pick across subfolders."
             )
         else:
             hint = QLabel(
@@ -1697,11 +1697,22 @@ class StagingBrowserDialog(QDialog):
             if entry.is_dir():
                 item = QListWidgetItem(style.standardIcon(QStyle.SP_DirIcon), entry.name)
                 item.setData(Qt.UserRole, ("folder", entry))
-                self.list_widget.addItem(item)
             elif entry.is_file() and entry.suffix.lower() == ".zip":
                 item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
                 item.setData(Qt.UserRole, ("zip", entry))
-                self.list_widget.addItem(item)
+            else:
+                continue
+            if self._multi_select:
+                # A checkbox per row rather than Ctrl/Shift-click. Extended
+                # selection is invisible until you already know it is
+                # there, and in this dialog it was worse than invisible:
+                # double-clicking a .zip -- the thing that picks one in
+                # single-select mode -- is deliberately inert here, so the
+                # obvious gesture did nothing at all and the dialog read as
+                # unable to take zips.
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+            self.list_widget.addItem(item)
 
     def _path_for_caller(self, path: Path) -> str:
         """How a picked path is recorded: relative to the default ingest
@@ -1763,18 +1774,30 @@ class StagingBrowserDialog(QDialog):
             self.selected_relative_path = self._path_for_caller(path)
             self.selected_is_zip = True
             self.accept()
-        # multi_select: double-clicking a zip just leaves it selected (Qt's
-        # default double-click behavior already does that) rather than
-        # accepting immediately, since there may be more still to pick.
+        else:
+            # Toggles rather than accepting: there may be more to pick. It
+            # used to do nothing whatsoever, which is indistinguishable
+            # from the dialog refusing zips.
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
 
     def _select_current_folder(self) -> None:
         if self._multi_select:
+            checked = [
+                self.list_widget.item(row)
+                for row in range(self.list_widget.count())
+                if self.list_widget.item(row).checkState() == Qt.Checked
+            ]
+            # Highlighted-but-unchecked still counts, so the Ctrl/Shift
+            # habit keeps working for anyone who already had it.
+            chosen = checked or self.list_widget.selectedItems()
             self.selected_items = [
                 (
                     self._path_for_caller(item.data(Qt.UserRole)[1]),
                     item.data(Qt.UserRole)[0] == "zip",
                 )
-                for item in self.list_widget.selectedItems()
+                for item in chosen
             ]
             if not self.selected_items:
                 QMessageBox.warning(self, "Select Packs", "Select at least one folder or zip file.")

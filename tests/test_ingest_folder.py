@@ -102,3 +102,66 @@ def test_an_out_of_folder_pack_ingests_and_its_files_resolve(tmp_path: Path, mon
     assert resolved == outside / "prop.glb"
     assert resolved.exists(), "the standard join must reach a file outside the ingest folder"
     conn.close()
+
+
+def test_batch_mode_picks_zips_with_checkboxes(qapp, tmp_path: Path) -> None:
+    """Batch ingest could not take zips in practice.
+
+    Selection was Ctrl/Shift-click, which is invisible unless you already
+    know it is there -- and double-clicking a .zip, the gesture that picks
+    one in single-select mode, was deliberately inert here, so the obvious
+    action did nothing at all and the dialog read as refusing zips.
+    """
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "FolderPack").mkdir()
+    (root / "A.zip").write_bytes(b"PK\x03\x04")
+    (root / "B.zip").write_bytes(b"PK\x03\x04")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    rows = {
+        dialog.list_widget.item(i).text(): dialog.list_widget.item(i)
+        for i in range(dialog.list_widget.count())
+    }
+    assert all(item.flags() & Qt.ItemIsUserCheckable for item in rows.values())
+
+    # The gesture that used to do nothing now ticks the row.
+    dialog._on_item_double_clicked(rows["A.zip"])
+    assert rows["A.zip"].checkState() == Qt.Checked
+    rows["B.zip"].setCheckState(Qt.Checked)
+
+    dialog._select_current_folder()
+    assert dialog.selected_items == [("A.zip", True), ("B.zip", True)]
+
+
+def test_batch_mode_still_honours_a_highlighted_row(qapp, tmp_path: Path) -> None:
+    """Ticking is the new way, not the only way -- anyone who already had
+    the Ctrl/Shift habit keeps it.
+    """
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "A.zip").write_bytes(b"PK\x03\x04")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    dialog.list_widget.item(0).setSelected(True)
+    dialog._select_current_folder()
+    assert dialog.selected_items == [("A.zip", True)]
+
+
+def test_single_select_double_click_still_picks_a_zip_outright(qapp, tmp_path: Path) -> None:
+    """The single-pack dialog's behaviour must not have moved."""
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "A.zip").write_bytes(b"PK\x03\x04")
+
+    dialog = StagingBrowserDialog(root)
+    dialog._on_item_double_clicked(dialog.list_widget.item(0))
+    assert (dialog.selected_relative_path, dialog.selected_is_zip) == ("A.zip", True)
