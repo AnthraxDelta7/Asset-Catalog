@@ -1746,24 +1746,49 @@ class StagingBrowserDialog(QDialog):
         self._refresh_listing()
 
     def _browse_elsewhere(self) -> None:
-        """Jumps this browser to any folder. Navigation only.
+        """Jumps this browser to a folder, or straight to a .zip in one.
 
-        Named "Go to Folder" rather than "Browse" because that is all it
-        can be: the native picker is a *folder* picker and hides files
-        outright, so a .zip is invisible inside it. Labelling it "Browse"
-        read as "pick your pack here", which then could not be done.
+        Deliberately not QFileDialog.getExistingDirectory: on Windows that
+        opens the shell's *folder* picker, which shows folders and nothing
+        else. A folder holding a hundred .zip files and no subfolders --
+        exactly what a downloads folder looks like -- renders as
+        completely empty there, so the honest conclusion from looking at
+        it is that the app cannot see zips at all.
 
-        Picking the pack stays in the list below, which is the one place
-        that shows folders and .zip files side by side as equally valid
-        choices -- the reason this dialog exists instead of a native one
-        (see the class docstring).
+        Qt's own dialog in the same directory mode lists files and will
+        return one, so a .zip picked here is taken as "go to its folder,
+        with that zip ready to choose" rather than being refused.
         """
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Go to folder", str(self._current_dir)
-        )
-        if chosen:
-            self._current_dir = Path(chosen)
-            self._refresh_listing()
+        dialog = QFileDialog(self, "Go to folder", str(self._current_dir))
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, False)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        chosen = dialog.selectedFiles()
+        if not chosen:
+            return
+
+        picked = Path(chosen[0])
+        # A file was chosen: show the folder it lives in, and put the
+        # cursor on it, so the next click is Select rather than a hunt
+        # through a long listing for the thing just picked.
+        target_name = picked.name if picked.is_file() else None
+        self._current_dir = picked.parent if picked.is_file() else picked
+        self._refresh_listing()
+        if target_name is not None:
+            self._highlight(target_name)
+
+    def _highlight(self, name: str) -> None:
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if item.text() != name:
+                continue
+            self.list_widget.setCurrentItem(item)
+            self.list_widget.scrollToItem(item)
+            if self._multi_select:
+                item.setCheckState(Qt.Checked)
+            return
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         kind, path = item.data(Qt.UserRole)

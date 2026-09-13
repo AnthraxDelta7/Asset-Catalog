@@ -165,3 +165,80 @@ def test_single_select_double_click_still_picks_a_zip_outright(qapp, tmp_path: P
     dialog = StagingBrowserDialog(root)
     dialog._on_item_double_clicked(dialog.list_widget.item(0))
     assert (dialog.selected_relative_path, dialog.selected_is_zip) == ("A.zip", True)
+
+
+def test_go_to_folder_accepts_a_zip_and_lands_on_it(qapp, tmp_path: Path, monkeypatch) -> None:
+    """Windows' shell folder picker shows folders and nothing else, so a
+    downloads folder holding a hundred .zip files and no subfolders
+    rendered as completely empty -- the honest conclusion from looking at
+    it being that the app could not see zips at all.
+
+    Qt's own dialog lists files and returns one, so a picked .zip means
+    "go to its folder, with that zip ready to choose".
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    downloads = tmp_path / "downloads"
+    root.mkdir()
+    downloads.mkdir()
+    for name in ("alpha.zip", "beta.zip", "gamma.zip"):
+        (downloads / name).write_bytes(b"PK\x03\x04")
+
+    monkeypatch.setattr(QFileDialog, "exec", lambda self: QDialog.Accepted)
+    monkeypatch.setattr(
+        QFileDialog, "selectedFiles", lambda self: [str(downloads / "beta.zip")]
+    )
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    dialog._browse_elsewhere()
+
+    assert dialog._current_dir == downloads
+    listed = [
+        dialog.list_widget.item(i).text() for i in range(dialog.list_widget.count())
+    ]
+    assert listed == ["alpha.zip", "beta.zip", "gamma.zip"]
+    # Landed on the one that was picked, rather than leaving it to be
+    # hunted for in a long listing.
+    assert dialog.list_widget.currentItem().text() == "beta.zip"
+
+    dialog._select_current_folder()
+    assert dialog.selected_items == [(str(downloads / "beta.zip"), True)]
+
+
+def test_go_to_folder_still_just_navigates_when_a_folder_is_picked(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    elsewhere = tmp_path / "elsewhere"
+    root.mkdir()
+    (elsewhere / "Inner").mkdir(parents=True)
+
+    monkeypatch.setattr(QFileDialog, "exec", lambda self: QDialog.Accepted)
+    monkeypatch.setattr(QFileDialog, "selectedFiles", lambda self: [str(elsewhere)])
+
+    dialog = StagingBrowserDialog(root)
+    dialog._browse_elsewhere()
+    assert dialog._current_dir == elsewhere
+    assert dialog.list_widget.currentItem() is None
+
+
+def test_cancelling_go_to_folder_changes_nothing(qapp, tmp_path: Path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    monkeypatch.setattr(QFileDialog, "exec", lambda self: QDialog.Rejected)
+
+    dialog = StagingBrowserDialog(root)
+    dialog._browse_elsewhere()
+    assert dialog._current_dir == root
