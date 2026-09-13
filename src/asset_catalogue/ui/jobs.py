@@ -50,7 +50,27 @@ _live_workers: weakref.WeakSet = weakref.WeakSet()
 
 
 def running_jobs() -> list:
-    return [worker for worker in _live_workers if worker.isRunning()]
+    """Workers still running, skipping any whose C++ side has gone.
+
+    A WeakSet holds the Python wrapper alive, but PySide6 objects are two
+    objects: deleteLater() destroys the C++ QThread while the wrapper is
+    still perfectly reachable, and touching it then raises
+    "Internal C++ object (BackgroundWorker) already deleted". Since the
+    only caller is closeEvent, that turned quitting the app -- right
+    after a job had finished, which is when this happens -- into an
+    uncaught exception.
+
+    A destroyed worker is a finished worker, so dropping it is also the
+    right answer semantically, not just the safe one.
+    """
+    alive = []
+    for worker in list(_live_workers):
+        try:
+            if worker.isRunning():
+                alive.append(worker)
+        except RuntimeError:
+            _live_workers.discard(worker)
+    return alive
 
 
 def wait_for_all_jobs(timeout_ms: int = 5000) -> bool:
@@ -66,8 +86,16 @@ def wait_for_all_jobs(timeout_ms: int = 5000) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
     for worker in running_jobs():
         remaining = int(max(0, deadline - time.monotonic()) * 1000)
-        if remaining <= 0 or not worker.wait(remaining):
+        if remaining <= 0:
             return False
+        try:
+            if not worker.wait(remaining):
+                return False
+        except RuntimeError:
+            # Finished and had its C++ side destroyed between the check
+            # above and this call -- which is exactly the job ending, so
+            # it counts as waited for rather than as a failure.
+            _live_workers.discard(worker)
     return True
 
 

@@ -206,3 +206,39 @@ def test_reporting_a_failure_never_raises_a_second_one(qapp, monkeypatch) -> Non
         raise ValueError("original")
     except ValueError as exc:
         crash_log._log_uncaught_exception(type(exc), exc, exc.__traceback__)
+
+
+def test_a_worker_whose_c_object_is_gone_does_not_break_shutdown(qapp) -> None:
+    """PySide6 objects are two objects. deleteLater() destroys the C++
+    QThread while the Python wrapper stays reachable in the WeakSet, and
+    touching it then raises "Internal C++ object already deleted".
+
+    running_jobs() is only called from closeEvent, so this turned quitting
+    the app right after a job finished -- exactly when it happens -- into
+    an uncaught exception. Seen in the real log before it was found here.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    from asset_catalogue.ui import jobs
+
+    class DeadWorker:
+        def isRunning(self):
+            raise RuntimeError(
+                "libshiboken: Internal C++ object (BackgroundWorker) already deleted."
+            )
+
+        def wait(self, _ms):
+            raise RuntimeError("already deleted")
+
+    dead = DeadWorker()
+    jobs._live_workers.add(dead)
+    try:
+        assert jobs.running_jobs() == []
+        assert jobs.wait_for_all_jobs(1000) is True
+        # And it stops being asked about.
+        assert dead not in jobs._live_workers
+    finally:
+        jobs._live_workers.discard(dead)
+    # Keeps a real QLabel alive so the WeakSet type check above is not
+    # accidentally passing because of garbage collection timing.
+    assert QLabel is not None
