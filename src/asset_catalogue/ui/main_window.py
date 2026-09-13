@@ -1636,12 +1636,14 @@ class StagingBrowserDialog(QDialog):
 
         if multi_select:
             hint = QLabel(
+                "Folders and .zip files are both listed -- either can be a pack. "
                 "Double-click a folder to open it. Ctrl/Shift-click to select several "
                 "folders and/or .zip files at this level, then press Select -- picks "
                 "siblings in the current folder, not a recursive pick across subfolders."
             )
         else:
             hint = QLabel(
+                "Folders and .zip files are both listed -- either can be a pack. "
                 "Double-click a folder to open it, or a .zip to select it directly. "
                 "Single-click an entry and press Select to pick it without entering it "
                 "(a folder this way, not its contents); with nothing highlighted, Select "
@@ -1651,8 +1653,11 @@ class StagingBrowserDialog(QDialog):
         layout.addWidget(hint)
 
         button_row = QHBoxLayout()
-        browse_button = QPushButton("Browse...")
-        browse_button.setToolTip("Jump to any folder on this machine")
+        browse_button = QPushButton("Go to Folder...")
+        browse_button.setToolTip(
+            "Jump this list to any folder on this machine, then pick the folder "
+            "or .zip from the list above"
+        )
         browse_button.clicked.connect(self._browse_elsewhere)
         button_row.addWidget(browse_button)
         button_row.addStretch(1)
@@ -1730,8 +1735,20 @@ class StagingBrowserDialog(QDialog):
         self._refresh_listing()
 
     def _browse_elsewhere(self) -> None:
+        """Jumps this browser to any folder. Navigation only.
+
+        Named "Go to Folder" rather than "Browse" because that is all it
+        can be: the native picker is a *folder* picker and hides files
+        outright, so a .zip is invisible inside it. Labelling it "Browse"
+        read as "pick your pack here", which then could not be done.
+
+        Picking the pack stays in the list below, which is the one place
+        that shows folders and .zip files side by side as equally valid
+        choices -- the reason this dialog exists instead of a native one
+        (see the class docstring).
+        """
         chosen = QFileDialog.getExistingDirectory(
-            self, "Browse to a folder", str(self._current_dir)
+            self, "Go to folder", str(self._current_dir)
         )
         if chosen:
             self._current_dir = Path(chosen)
