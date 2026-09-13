@@ -1452,7 +1452,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
 
         self.staging_edit = QLineEdit(s.staging_folder or "")
-        form.addRow("Staging folder:", _browse_row(self.staging_edit, self._browse_staging))
+        form.addRow("Ingest folder:", _browse_row(self.staging_edit, self._browse_staging))
 
         self.library_edit = QLineEdit(s.library_folder or "")
         form.addRow("Library folder:", _browse_row(self.library_edit, self._browse_library))
@@ -1501,11 +1501,12 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
 
         hint = QLabel(
-            "Staging folder: where unprocessed packs sit before ingest.\n"
+            "Ingest folder: where the pack browser starts. A default, not a "
+            "restriction -- you can browse to and ingest from anywhere.\n"
             "Library folder: portable -- holds catalogue.db and thumbnails/. Point at an "
             "existing one (copied from another machine, a shared drive) to pick it up as-is.\n"
             "Godot path: only needed for Tools > Extract Godot Scenes to GLB... (extracting "
-            "textured meshes from a staged Godot project before ingesting it).\n"
+            "textured meshes from a Godot project before ingesting it).\n"
             "Export to Project remembers your recently used project folders on its own -- "
             "nothing to configure here."
         )
@@ -1519,7 +1520,7 @@ class SettingsDialog(QDialog):
 
     def _browse_staging(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
-            self, "Select staging folder", self.staging_edit.text()
+            self, "Select ingest folder", self.staging_edit.text()
         )
         if chosen:
             self.staging_edit.setText(chosen)
@@ -1561,7 +1562,7 @@ class SettingsDialog(QDialog):
 
     def _on_accept(self) -> None:
         if not self.staging_edit.text().strip() or not self.library_edit.text().strip():
-            QMessageBox.warning(self, "Settings", "Staging folder and library folder are both required.")
+            QMessageBox.warning(self, "Settings", "Ingest folder and library folder are both required.")
             return
         s = settings.load()
         s.staging_folder = self.staging_edit.text().strip()
@@ -1601,7 +1602,10 @@ class StagingBrowserDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select Packs" if multi_select else "Select Pack")
         self.resize(480, 420)
-        self._staging_folder = staging_folder
+        # The default ingest folder: where browsing starts and what paths
+        # are recorded relative to. Not a boundary -- you can navigate out
+        # of it, and anything picked outside is recorded absolutely.
+        self._root = staging_folder
         self._current_dir = staging_folder
         self._multi_select = multi_select
 
@@ -1617,6 +1621,10 @@ class StagingBrowserDialog(QDialog):
         self.location_label = QLabel()
         self.location_label.setWordWrap(True)
         nav_row.addWidget(self.up_button)
+        self.home_button = QPushButton("Ingest Folder")
+        self.home_button.setToolTip("Back to the default ingest folder")
+        self.home_button.clicked.connect(self._go_home)
+        nav_row.addWidget(self.home_button)
         nav_row.addWidget(self.location_label, stretch=1)
         layout.addLayout(nav_row)
 
@@ -1643,6 +1651,11 @@ class StagingBrowserDialog(QDialog):
         layout.addWidget(hint)
 
         button_row = QHBoxLayout()
+        browse_button = QPushButton("Browse...")
+        browse_button.setToolTip("Jump to any folder on this machine")
+        browse_button.clicked.connect(self._browse_elsewhere)
+        button_row.addWidget(browse_button)
+        button_row.addStretch(1)
         select_button = QPushButton("Select")
         select_button.clicked.connect(self._select_current_folder)
         cancel_button = QPushButton("Cancel")
@@ -1655,11 +1668,17 @@ class StagingBrowserDialog(QDialog):
 
     def _refresh_listing(self) -> None:
         self.list_widget.clear()
-        relative = self._current_dir.relative_to(self._staging_folder)
-        self.location_label.setText(
-            "Staging (root)" if str(relative) == "." else f"Staging / {relative}"
-        )
-        self.up_button.setEnabled(self._current_dir != self._staging_folder)
+        # Inside the default folder, show the short relative form -- that
+        # is the common case and the full path is noise. Outside it, the
+        # full path is the only thing that says where you actually are.
+        try:
+            relative = self._current_dir.relative_to(self._root)
+            self.location_label.setText(
+                "Ingest folder (root)" if str(relative) == "." else f"Ingest folder / {relative}"
+            )
+        except ValueError:
+            self.location_label.setText(str(self._current_dir))
+        self.up_button.setEnabled(self._current_dir.parent != self._current_dir)
 
         style = self.style()
         try:
@@ -1679,11 +1698,44 @@ class StagingBrowserDialog(QDialog):
                 item.setData(Qt.UserRole, ("zip", entry))
                 self.list_widget.addItem(item)
 
+    def _path_for_caller(self, path: Path) -> str:
+        """How a picked path is recorded: relative to the default ingest
+        folder when it sits inside it, absolute when it doesn't.
+
+        Absolute is what lets a pack live anywhere at all. Every path in
+        the app is resolved as `ingest_folder / pack_folder`, and pathlib
+        returns the right-hand side unchanged when it is absolute -- so an
+        out-of-folder pack resolves correctly through the same code as
+        every other one, with nothing downstream needing to know.
+
+        Relative is still preferred for anything inside the default
+        folder, so moving that folder later keeps those packs working.
+        """
+        try:
+            return str(path.relative_to(self._root))
+        except ValueError:
+            return str(path)
+
     def _go_up(self) -> None:
-        if self._current_dir == self._staging_folder:
+        parent = self._current_dir.parent
+        # Stops at the filesystem root, not at the ingest folder: the
+        # ingest folder is a starting point now, not a boundary.
+        if parent == self._current_dir:
             return
-        self._current_dir = self._current_dir.parent
+        self._current_dir = parent
         self._refresh_listing()
+
+    def _go_home(self) -> None:
+        self._current_dir = self._root
+        self._refresh_listing()
+
+    def _browse_elsewhere(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Browse to a folder", str(self._current_dir)
+        )
+        if chosen:
+            self._current_dir = Path(chosen)
+            self._refresh_listing()
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         kind, path = item.data(Qt.UserRole)
@@ -1691,7 +1743,7 @@ class StagingBrowserDialog(QDialog):
             self._current_dir = path
             self._refresh_listing()
         elif not self._multi_select:
-            self.selected_relative_path = str(path.relative_to(self._staging_folder))
+            self.selected_relative_path = self._path_for_caller(path)
             self.selected_is_zip = True
             self.accept()
         # multi_select: double-clicking a zip just leaves it selected (Qt's
@@ -1702,7 +1754,7 @@ class StagingBrowserDialog(QDialog):
         if self._multi_select:
             self.selected_items = [
                 (
-                    str(item.data(Qt.UserRole)[1].relative_to(self._staging_folder)),
+                    self._path_for_caller(item.data(Qt.UserRole)[1]),
                     item.data(Qt.UserRole)[0] == "zip",
                 )
                 for item in self.list_widget.selectedItems()
@@ -1723,11 +1775,11 @@ class StagingBrowserDialog(QDialog):
         item = self.list_widget.currentItem()
         if item is not None:
             kind, path = item.data(Qt.UserRole)
-            self.selected_relative_path = str(path.relative_to(self._staging_folder))
+            self.selected_relative_path = self._path_for_caller(path)
             self.selected_is_zip = kind == "zip"
             self.accept()
             return
-        self.selected_relative_path = str(self._current_dir.relative_to(self._staging_folder))
+        self.selected_relative_path = self._path_for_caller(self._current_dir)
         self.selected_is_zip = False
         self.accept()
 
@@ -1879,7 +1931,8 @@ class IngestDialog(QDialog):
         layout.addWidget(self.godot_notice)
 
         hint = QLabel(
-            "Pick a folder or a .zip from inside the staging folder -- either one, "
+            "Pick a folder or a .zip. Browsing starts in the ingest folder, but "
+            "you can browse anywhere -- either one, "
             "side by side. A .zip is extracted automatically at ingest time."
         )
         hint.setWordWrap(True)
@@ -1916,7 +1969,7 @@ class IngestDialog(QDialog):
     def _browse_staging(self) -> None:
         staging_folder = self._catalogue.staging_folder()
         if staging_folder is None:
-            QMessageBox.warning(self, "Ingest Pack", "No staging folder configured.")
+            QMessageBox.warning(self, "Ingest Pack", "No ingest folder configured.")
             return
         browser = StagingBrowserDialog(staging_folder, self)
         if browser.exec() != QDialog.Accepted or browser.selected_relative_path is None:
@@ -2109,7 +2162,7 @@ class BatchIngestDialog(QDialog):
     def _browse_staging(self) -> None:
         staging_folder = self._catalogue.staging_folder()
         if staging_folder is None:
-            QMessageBox.warning(self, "Batch Ingest", "No staging folder configured.")
+            QMessageBox.warning(self, "Batch Ingest", "No ingest folder configured.")
             return
         browser = StagingBrowserDialog(staging_folder, self, multi_select=True)
         if browser.exec() != QDialog.Accepted or not browser.selected_items:
@@ -2190,7 +2243,7 @@ class GodotExtractDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        browse_button = QPushButton("Browse Staging Folder...")
+        browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self._browse_staging)
         layout.addWidget(browse_button)
 
@@ -2202,7 +2255,7 @@ class GodotExtractDialog(QDialog):
         layout.addWidget(self.include_colliders_checkbox)
 
         hint = QLabel(
-            "Pick a folder in staging containing one or more Godot projects. Each "
+            "Pick a folder containing one or more Godot projects. Each "
             "checked project has every .tscn scene exported to a .glb next to it, "
             "using the real Godot editor headlessly so materials/textures assigned "
             "in the scene are preserved -- Ingest Pack / Batch Ingest picks the "
@@ -2225,7 +2278,7 @@ class GodotExtractDialog(QDialog):
     def _browse_staging(self) -> None:
         staging_folder = self._catalogue.staging_folder()
         if staging_folder is None:
-            QMessageBox.warning(self, "Extract Godot Scenes", "No staging folder configured.")
+            QMessageBox.warning(self, "Extract Godot Scenes", "No ingest folder configured.")
             return
         browser = StagingBrowserDialog(staging_folder, self)
         if browser.exec() != QDialog.Accepted or browser.selected_relative_path is None:
@@ -2447,7 +2500,7 @@ class CorrectionsFormWidget(QWidget):
                 QMessageBox.warning(
                     self,
                     "Texture Override",
-                    "That file isn't inside this pack's staging folder -- pick a texture "
+                    "That file isn't inside this pack's source folder -- pick a texture "
                     "that's actually part of the pack.",
                 )
                 return
@@ -3188,7 +3241,7 @@ class CalibrationReviewDialog(QDialog):
             "Cancel Import",
             f"Remove '{self._pack_name}' and everything just ingested? This deletes its "
             "catalogue entries, thumbnails, and archived library copies. Files in the "
-            "staging folder are never touched.",
+            "ingest folder are never touched.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -3526,7 +3579,7 @@ class MissingTexturesDialog(QDialog):
             except ValueError:
                 QMessageBox.warning(
                     self, "Asset Catalogue",
-                    "That file isn't inside this pack's staging folder -- pick a texture "
+                    "That file isn't inside this pack's source folder -- pick a texture "
                     "that's actually part of the pack.",
                 )
                 return
@@ -3582,7 +3635,7 @@ class MissingTexturesDialog(QDialog):
             except ValueError:
                 QMessageBox.warning(
                     self, "Asset Catalogue",
-                    "That file isn't inside this pack's staging folder -- pick a file "
+                    "That file isn't inside this pack's source folder -- pick a file "
                     "that's actually part of the pack.",
                 )
                 return
@@ -3746,7 +3799,7 @@ class TrashDialog(QDialog):
             "Delete Permanently",
             f"Permanently delete {len(asset_ids)} asset(s)? This deletes the catalogue "
             "entries, thumbnails, and any archived library copy -- the original files "
-            "in your staging folder are untouched, but this cannot be undone here.",
+            "in your ingest folder are untouched, but this cannot be undone here.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -3771,7 +3824,7 @@ class TrashDialog(QDialog):
             "Empty Trash",
             f"Permanently delete all {count} trashed asset(s)? This deletes the "
             "catalogue entries, thumbnails, and any archived library copy -- the "
-            "original files in your staging folder are untouched, but this cannot "
+            "original files in your ingest folder are untouched, but this cannot "
             "be undone here.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -3831,9 +3884,9 @@ class LibraryHealthDialog(QDialog):
         )
         self.reset_thumb_button.clicked.connect(self._reset_selected_thumbnails)
         fix_row.addWidget(self.reset_thumb_button)
-        self.rearchive_button = QPushButton("Re-archive Selected from Staging")
+        self.rearchive_button = QPushButton("Re-archive Selected from Source")
         self.rearchive_button.setToolTip(
-            "For 'missing library copy' rows -- re-copies from the staging source, "
+            "For 'missing library copy' rows -- re-copies from the original source, "
             "if it's still there."
         )
         self.rearchive_button.clicked.connect(self._rearchive_selected)
@@ -3909,7 +3962,7 @@ class LibraryHealthDialog(QDialog):
             QMessageBox.information(
                 self, "Asset Catalogue",
                 f"Re-archived {count} of {len(asset_ids)} asset(s) "
-                f"({len(asset_ids) - count} had no staging source left to copy from).",
+                f"({len(asset_ids) - count} had no source left to copy from).",
             )
             self._refresh()
 
@@ -4436,7 +4489,7 @@ class MainWindow(QMainWindow):
         staging = self._catalogue.staging_folder()
         if staging is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
 
@@ -4602,7 +4655,7 @@ class MainWindow(QMainWindow):
     def _open_ingest_dialog(self, initial_relative_path: str | None = None) -> None:
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
         dialog = IngestDialog(self._catalogue, self, initial_relative_path=initial_relative_path)
@@ -4715,7 +4768,7 @@ class MainWindow(QMainWindow):
     def _open_batch_ingest_dialog(self) -> None:
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
         dialog = BatchIngestDialog(self._catalogue, self)
@@ -4802,7 +4855,7 @@ class MainWindow(QMainWindow):
     def _open_godot_extract_dialog(self) -> None:
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
         dialog = GodotExtractDialog(self._catalogue, self)
@@ -5729,7 +5782,7 @@ class MainWindow(QMainWindow):
             return
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
 
@@ -5758,7 +5811,7 @@ class MainWindow(QMainWindow):
             return
         if self._catalogue.staging_folder() is None:
             QMessageBox.warning(
-                self, "Asset Catalogue", "Configure a staging folder in Settings first."
+                self, "Asset Catalogue", "Configure an ingest folder in Settings first."
             )
             return
         self._run_export_job(selected_ids, project_root, "exported_assets", mode)
