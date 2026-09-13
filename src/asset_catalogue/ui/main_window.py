@@ -1621,10 +1621,12 @@ class StagingBrowserDialog(QDialog):
         self.location_label = QLabel()
         self.location_label.setWordWrap(True)
         nav_row.addWidget(self.up_button)
-        self.home_button = QPushButton("Ingest Folder")
-        self.home_button.setToolTip("Back to the default ingest folder")
-        self.home_button.clicked.connect(self._go_home)
-        nav_row.addWidget(self.home_button)
+        # The folder you are in, named. It used to sit beside a button
+        # that jumped back to the ingest folder, which cost a third of the
+        # row to say something the label could say on its own.
+        location_font = self.location_label.font()
+        location_font.setBold(True)
+        self.location_label.setFont(location_font)
         nav_row.addWidget(self.location_label, stretch=1)
         layout.addLayout(nav_row)
 
@@ -1636,10 +1638,9 @@ class StagingBrowserDialog(QDialog):
 
         if multi_select:
             hint = QLabel(
-                "Tick every folder and/or .zip you want to ingest, then press "
-                "Select. Double-click a folder to open it, or a .zip to tick it. "
-                "Ticks apply to the folder you are in -- this picks siblings at one "
-                "level, not a recursive pick across subfolders."
+                "Double-click a folder to open it. Ctrl/Shift-click to pick several "
+                "folders and/or .zip files, then press Select -- siblings in the "
+                "folder you are in, not a recursive pick across subfolders."
             )
         else:
             hint = QLabel(
@@ -1673,16 +1674,12 @@ class StagingBrowserDialog(QDialog):
 
     def _refresh_listing(self) -> None:
         self.list_widget.clear()
-        # Inside the default folder, show the short relative form -- that
-        # is the common case and the full path is noise. Outside it, the
-        # full path is the only thing that says where you actually are.
-        try:
-            relative = self._current_dir.relative_to(self._root)
-            self.location_label.setText(
-                "Ingest folder (root)" if str(relative) == "." else f"Ingest folder / {relative}"
-            )
-        except ValueError:
-            self.location_label.setText(str(self._current_dir))
+        # Just the folder's own name: it is what tells you where you are
+        # at a glance, and the full path is one hover away rather than
+        # taking up the whole row. A drive root has no name, so it falls
+        # back to the path itself.
+        self.location_label.setText(self._current_dir.name or str(self._current_dir))
+        self.location_label.setToolTip(str(self._current_dir))
         self.up_button.setEnabled(self._current_dir.parent != self._current_dir)
 
         style = self.style()
@@ -1702,16 +1699,6 @@ class StagingBrowserDialog(QDialog):
                 item.setData(Qt.UserRole, ("zip", entry))
             else:
                 continue
-            if self._multi_select:
-                # A checkbox per row rather than Ctrl/Shift-click. Extended
-                # selection is invisible until you already know it is
-                # there, and in this dialog it was worse than invisible:
-                # double-clicking a .zip -- the thing that picks one in
-                # single-select mode -- is deliberately inert here, so the
-                # obvious gesture did nothing at all and the dialog read as
-                # unable to take zips.
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
             self.list_widget.addItem(item)
 
     def _path_for_caller(self, path: Path) -> str:
@@ -1739,10 +1726,6 @@ class StagingBrowserDialog(QDialog):
         if parent == self._current_dir:
             return
         self._current_dir = parent
-        self._refresh_listing()
-
-    def _go_home(self) -> None:
-        self._current_dir = self._root
         self._refresh_listing()
 
     def _browse_elsewhere(self) -> None:
@@ -1786,8 +1769,6 @@ class StagingBrowserDialog(QDialog):
                 continue
             self.list_widget.setCurrentItem(item)
             self.list_widget.scrollToItem(item)
-            if self._multi_select:
-                item.setCheckState(Qt.Checked)
             return
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
@@ -1799,24 +1780,19 @@ class StagingBrowserDialog(QDialog):
             self.selected_relative_path = self._path_for_caller(path)
             self.selected_is_zip = True
             self.accept()
-        else:
-            # Toggles rather than accepting: there may be more to pick. It
-            # used to do nothing whatsoever, which is indistinguishable
-            # from the dialog refusing zips.
-            item.setCheckState(
-                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-            )
+        # multi_select: a double-click leaves the .zip selected (Qt's own
+        # click handling already did that) rather than accepting, since
+        # there may be more still to pick.
 
     def _select_current_folder(self) -> None:
         if self._multi_select:
-            checked = [
+            # Row order rather than click order, so the result reads the
+            # same way the list does.
+            chosen = [
                 self.list_widget.item(row)
                 for row in range(self.list_widget.count())
-                if self.list_widget.item(row).checkState() == Qt.Checked
+                if self.list_widget.item(row).isSelected()
             ]
-            # Highlighted-but-unchecked still counts, so the Ctrl/Shift
-            # habit keeps working for anyone who already had it.
-            chosen = checked or self.list_widget.selectedItems()
             self.selected_items = [
                 (
                     self._path_for_caller(item.data(Qt.UserRole)[1]),
