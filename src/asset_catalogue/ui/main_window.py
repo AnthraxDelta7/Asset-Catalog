@@ -182,7 +182,7 @@ class FilterPanel(QWidget):
         on_rename_tag,
         on_delete_tag,
         on_render_pack_previews,
-        on_open_pack_manager=None,
+        on_open_pack_manager,
     ) -> None:
         super().__init__()
         self._catalogue = catalogue
@@ -192,10 +192,14 @@ class FilterPanel(QWidget):
         self._on_rename_tag = on_rename_tag
         self._on_delete_tag = on_delete_tag
         self._on_render_pack_previews = on_render_pack_previews
-        # Optional so the existing tests that build a FilterPanel with
-        # positional callbacks keep working; the link is simply inert
-        # without it.
-        self._on_open_pack_manager = on_open_pack_manager or (lambda: None)
+        # Required, deliberately. It used to default to None and fall back
+        # to a do-nothing lambda "so existing tests keep working", and that
+        # default hid a real bug for weeks: _rebuild_filter_panel -- which
+        # runs after Switch Library and after any Settings change -- did
+        # not pass it, so from the first visit to Settings the Packs button
+        # was silently inert, with no error anywhere. A missing callback is
+        # now a TypeError at the call site instead.
+        self._on_open_pack_manager = on_open_pack_manager
 
         layout = QVBoxLayout(self)
 
@@ -4307,6 +4311,7 @@ class MainWindow(QMainWindow):
             self._rename_tag,
             self._delete_tag,
             self._render_model_previews_for_selection,
+            self._open_pack_manager,
         )
         main_splitter = self.centralWidget()
         main_splitter.replaceWidget(0, self.filter_panel)

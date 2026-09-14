@@ -468,7 +468,7 @@ def test_pack_search_filters_the_list_and_clears_when_collapsed(qapp, tmp_path: 
 
     catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
     noop = lambda *a, **k: None  # noqa: E731
-    panel = FilterPanel(catalogue, noop, noop, noop, noop, noop, noop)
+    panel = FilterPanel(catalogue, noop, noop, noop, noop, noop, noop, noop)
 
     assert len(_visible_packs(panel)) == 4  # "All packs" plus three
 
@@ -823,3 +823,43 @@ def test_a_slow_job_still_gets_its_window_with_the_history_so_far(qapp) -> None:
     # Opens with what already happened rather than an empty box.
     assert "Hashing two.glb..." in dialog._log.toPlainText()
     dialog.close()
+
+
+def test_the_packs_button_still_works_after_the_filter_panel_is_rebuilt(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Switching library, or changing anything in Settings, rebuilds the
+    filter panel -- and that rebuild did not pass on_open_pack_manager.
+    The parameter defaulted to None and fell back to a do-nothing lambda,
+    so from the first visit to Settings the Packs button was silently
+    inert: no window, no error, nothing in the log, until a restart.
+
+    Clicked rather than called, and clicked after a rebuild rather than
+    before, because before the rebuild it worked perfectly -- which is
+    exactly why this survived so long.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import MainWindow
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    ingest.get_or_create_pack(conn, "Alpha", "Alpha", None, None, None)
+
+    window = MainWindow(Catalogue(conn, staging, library / "thumbnails", library / "assets"))
+    opened: list[int] = []
+    monkeypatch.setattr(window, "_open_pack_manager", lambda: opened.append(1))
+
+    window._rebuild_filter_panel()
+    QTest.mouseClick(window.filter_panel.packs_button, Qt.LeftButton)
+    qapp.processEvents()
+
+    assert opened == [1], "the Packs button went dead when the panel was rebuilt"
+    conn.close()

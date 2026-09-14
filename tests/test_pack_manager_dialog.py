@@ -188,7 +188,7 @@ def test_the_pack_list_shows_only_the_most_recent_handful(qapp, tmp_path: Path, 
     from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
 
     catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
-    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 6)
 
     # Row 0 is "All packs".
     assert panel.pack_list.count() == RECENT_PACK_LIMIT + 1
@@ -201,7 +201,7 @@ def test_selecting_a_pack_brings_it_to_the_front_of_the_recents(
     from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
 
     catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
-    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 6)
 
     stale = catalogue.list_packs()[0]
     assert stale not in catalogue.list_recent_packs(RECENT_PACK_LIMIT)
@@ -217,7 +217,7 @@ def test_searching_looks_past_the_cap(qapp, tmp_path: Path, monkeypatch) -> None
     from asset_catalogue.ui.main_window import RECENT_PACK_LIMIT, FilterPanel
 
     catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
-    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 6)
 
     hidden_from_list = "Pack00"
     assert hidden_from_list not in catalogue.list_recent_packs(RECENT_PACK_LIMIT)
@@ -241,7 +241,7 @@ def test_the_selected_pack_is_never_dropped_from_the_list(
     from asset_catalogue.ui.main_window import FilterPanel
 
     catalogue = _catalogue_with_many_packs(tmp_path, monkeypatch, 30)
-    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 5)
+    panel = FilterPanel(catalogue, lambda: None, *[lambda *a: None] * 6)
 
     panel._populate_packs("Pack00")
     assert panel.selected_pack() == "Pack00"
