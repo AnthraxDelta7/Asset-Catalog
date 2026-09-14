@@ -5554,6 +5554,20 @@ class MainWindow(QMainWindow):
         asset = next((a for a in self._current_assets if a.id == asset_id), None)
         if asset is None:
             return
+        if asset.asset_type == "audio":
+            # Plays it, rather than opening a bigger still image of a
+            # waveform -- for a sound the obvious thing a double-click
+            # should do is the thing the detail panel's Play button does,
+            # so it calls exactly that. Toggling, not starting, so a
+            # second double-click stops it the way the button does.
+            #
+            # Selected first because the panel plays whatever it is
+            # currently showing, and a double-click that arrived without
+            # a preceding selection change would otherwise play the
+            # previous asset.
+            self.grid.setCurrentItem(item)
+            self.detail_panel.toggle_playback()
+            return
         dialog = ThumbnailPreviewDialog(asset, self._catalogue, self._open_model_preview, self)
         dialog.exec()
 

@@ -362,6 +362,10 @@ With `project_root`, only packs that have at least one asset actually exported i
 asset-catalogue-ui
 ```
 
+### Double-click in the grid
+
+Double-clicking a **sound** plays it, exactly as the detail panel's Play button does — double-click again to stop. Everything else opens the larger preview. A waveform image is not what anyone wants from a sound.
+
 ### Picking what to ingest
 
 **Browse...** opens a standard file dialog, anywhere on the machine. It lists **folders, `.zip` files and single asset files** side by side — any of them can be a pack. A lone `.glb`, `.fbx` or `.wav` becomes a pack of one, named after the file without its extension; a `.zip` after the archive name; a folder after itself. Only extensions the catalogue actually handles are listed, so the picker can never offer a file that ingest would then skip.

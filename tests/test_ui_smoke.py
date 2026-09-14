@@ -863,3 +863,103 @@ def test_the_packs_button_still_works_after_the_filter_panel_is_rebuilt(
 
     assert opened == [1], "the Packs button went dead when the panel was rebuilt"
     conn.close()
+
+
+def _library_with_one_audio_asset(tmp_path: Path, monkeypatch):
+    from asset_catalogue import db, ingest, library_assets, settings
+    from asset_catalogue.catalogue import Catalogue
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Sounds"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    # A tiny but structurally real WAV, so the detail panel treats it as
+    # playable rather than skipping it as unreadable.
+    import struct
+    import wave
+
+    with wave.open(str(pack / "hit.wav"), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(struct.pack("<h", 0) * 800)
+
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Sounds", "Sounds", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    library_assets.archive_pack(conn, staging, library / "assets", pack_id)
+    catalogue = Catalogue(
+        conn, staging, library / "thumbnails", library / "assets", library / "previews"
+    )
+    return conn, catalogue
+
+
+def test_double_clicking_a_sound_plays_it_instead_of_opening_a_preview(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """A bigger still image of a waveform is not what anyone wants from a
+    sound. Double-click does what the detail panel's Play button does.
+    """
+    from asset_catalogue.ui.main_window import MainWindow, ThumbnailPreviewDialog
+
+    conn, catalogue = _library_with_one_audio_asset(tmp_path, monkeypatch)
+    window = MainWindow(catalogue)
+
+    opened_preview: list[int] = []
+    monkeypatch.setattr(
+        ThumbnailPreviewDialog, "exec", lambda self: opened_preview.append(1)
+    )
+    played: list[int] = []
+    monkeypatch.setattr(
+        window.detail_panel, "toggle_playback", lambda: played.append(1)
+    )
+
+    window._refresh_grid()
+    item = window.grid.item(0)
+    assert item is not None
+    window._on_grid_item_double_clicked(item)
+
+    assert played == [1]
+    assert opened_preview == [], "a sound should not open the still-image preview"
+
+    # And the panel is actually pointed at this file, so the real
+    # toggle_playback has something to play. Stubbing the call alone
+    # would pass even if the panel were still showing nothing.
+    assert window.detail_panel._playable_audio_path is not None
+    assert window.detail_panel._playable_audio_path.name == "hit.wav"
+    conn.close()
+
+
+def test_double_clicking_a_model_still_opens_the_preview(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Only audio changed; everything else keeps the preview dialog."""
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import MainWindow, ThumbnailPreviewDialog
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Models"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    write_minimal_glb(pack / "prop.glb", {"meshes": [{"name": "prop"}]})
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Models", "Models", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    window = MainWindow(
+        Catalogue(conn, staging, library / "thumbnails", library / "assets")
+    )
+
+    opened_preview: list[int] = []
+    monkeypatch.setattr(
+        ThumbnailPreviewDialog, "exec", lambda self: opened_preview.append(1)
+    )
+    window._refresh_grid()
+    window._on_grid_item_double_clicked(window.grid.item(0))
+    assert opened_preview == [1]
+    conn.close()
