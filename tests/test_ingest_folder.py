@@ -247,3 +247,96 @@ def test_highlighting_alone_still_selects_several(qapp, tmp_path: Path, monkeypa
     for row in (0, 1, 3):
         dialog.list_widget.item(row).setSelected(True)
     assert _picked(dialog) == ["alpha.zip", "beta.zip", "gamma.zip"]
+
+
+def _plain_click(widget, row, modifier=None):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(
+        widget.viewport(),
+        Qt.LeftButton,
+        modifier or Qt.NoModifier,
+        widget.visualItemRect(widget.item(row)).center(),
+    )
+
+
+def _double_click(widget, row):
+    """A faithful double-click: press, release, dbl-click, release.
+
+    QTest.mouseDClick does not make QListWidget emit itemDoubleClicked at
+    all, in any selection mode -- so a test built on it reports drilling
+    into a folder as broken when it works perfectly.
+    """
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    point = QPointF(widget.visualItemRect(widget.item(row)).center())
+    for kind in (
+        QEvent.MouseButtonPress,
+        QEvent.MouseButtonRelease,
+        QEvent.MouseButtonDblClick,
+        QEvent.MouseButtonRelease,
+    ):
+        QApplication.sendEvent(
+            widget.viewport(),
+            QMouseEvent(kind, point, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier),
+        )
+        QApplication.processEvents()
+
+
+def test_plain_clicks_pick_several_packs(qapp, tmp_path: Path) -> None:
+    """The batch browser used ExtendedSelection, where a plain click
+    *replaces* the selection and adding requires holding Ctrl -- so
+    clicking three packs in a row left one selected, which is exactly
+    "multi-select does not work". Measured: three plain clicks give one
+    item under Extended and three under MultiSelection.
+
+    Driven with real mouse events on purpose. Setting isSelected() in a
+    test passes under either mode and proves nothing about clicking.
+    """
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    for name in ("a.zip", "b.zip", "c.zip", "d.zip"):
+        (root / name).write_bytes(b"PK\x03\x04")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    dialog.show()
+    widget = dialog.list_widget
+
+    _plain_click(widget, 0)
+    _plain_click(widget, 1)
+    _plain_click(widget, 2)
+    assert sorted(i.text() for i in widget.selectedItems()) == ["a.zip", "b.zip", "c.zip"]
+
+    # Clicking a picked row again drops it.
+    _plain_click(widget, 1)
+    assert sorted(i.text() for i in widget.selectedItems()) == ["a.zip", "c.zip"]
+
+    dialog._select_current_folder()
+    assert [name for name, _is_zip in dialog.selected_items] == ["a.zip", "c.zip"]
+
+
+def test_double_clicking_a_folder_still_opens_it(qapp, tmp_path: Path) -> None:
+    """The risk of click-to-toggle: a double-click is two toggles. It must
+    still drill in, and must not leave the folder selected behind it.
+    """
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    (root / "Outer" / "Inner").mkdir(parents=True)
+    (root / "Outer" / "pack.zip").write_bytes(b"PK\x03\x04")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    dialog.show()
+    _double_click(dialog.list_widget, 0)
+
+    assert dialog._current_dir == root / "Outer"
+    assert [
+        dialog.list_widget.item(i).text() for i in range(dialog.list_widget.count())
+    ] == ["Inner", "pack.zip"]
+    assert dialog.location_label.text() == "Outer"
+    assert dialog.list_widget.selectedItems() == []

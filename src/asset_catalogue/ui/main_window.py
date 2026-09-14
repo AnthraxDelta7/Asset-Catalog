@@ -1632,15 +1632,26 @@ class StagingBrowserDialog(QDialog):
 
         self.list_widget = QListWidget()
         if multi_select:
-            self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            # MultiSelection, not ExtendedSelection. Extended is the mode
+            # the grid uses, where a plain click *replaces* the selection
+            # and adding requires holding Ctrl -- so clicking three packs
+            # in a row left one selected, which is exactly "multi-select
+            # does not work". Measured rather than assumed: three plain
+            # clicks give ['C'] under Extended and ['A', 'B', 'C'] here.
+            #
+            # Here each click toggles its own row, which is what a picker
+            # whose entire job is choosing several things should do. Ctrl
+            # still adds, and clicking a chosen row again drops it.
+            self.list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.list_widget, stretch=1)
 
         if multi_select:
             hint = QLabel(
-                "Double-click a folder to open it. Ctrl/Shift-click to pick several "
-                "folders and/or .zip files, then press Select -- siblings in the "
-                "folder you are in, not a recursive pick across subfolders."
+                "Click each folder and/or .zip you want -- they stay picked, and "
+                "clicking one again drops it. Double-click a folder to open it "
+                "instead. Select takes everything picked in the folder you are in, "
+                "not a recursive pick across subfolders."
             )
         else:
             hint = QLabel(
