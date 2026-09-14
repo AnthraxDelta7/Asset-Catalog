@@ -364,9 +364,9 @@ asset-catalogue-ui
 
 ### Picking what to ingest
 
-The pack browser lists **folders, `.zip` files and single asset files** side by side — any of them can be a pack. A lone `.glb`, `.fbx` or `.wav` becomes a pack of one, named after the file without its extension; a `.zip` after the archive name; a folder after itself. Only extensions the catalogue actually handles are listed, so the picker can never offer a file that ingest would then skip.
+**Browse...** opens a standard file dialog, anywhere on the machine. It lists **folders, `.zip` files and single asset files** side by side — any of them can be a pack. A lone `.glb`, `.fbx` or `.wav` becomes a pack of one, named after the file without its extension; a `.zip` after the archive name; a folder after itself. Only extensions the catalogue actually handles are listed, so the picker can never offer a file that ingest would then skip.
 
-Click each thing you want — they stay picked, and clicking one again drops it. Double-click a folder to open it instead. **Select** takes everything picked in the folder you're in (siblings at one level, not a recursive pick across subfolders). **Go to Folder...** jumps anywhere on the machine, and picking a `.zip` there lands the browser on it.
+Ctrl/Shift-click to pick several in one go — any mix of folders, zips and files — then press **Select**. This is Qt's own dialog rather than the Windows shell one, because only Qt's lists folders and files together and returns both; the hand-built browser this replaced existed solely to work around that.
 
 ### Ingest folder, and unpacked leftovers
 

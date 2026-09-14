@@ -1588,284 +1588,92 @@ def default_pack_name(relative_path: str, is_zip: bool) -> str:
     return name.name
 
 
-class StagingBrowserDialog(QDialog):
-    """A small custom folder browser scoped to the staging folder, showing
-    subfolders AND .zip files side by side as selectable pack sources.
+class StagingBrowserDialog(QFileDialog):
+    """Picks packs to ingest: any mix of folders, .zip files and single
+    asset files, from anywhere on the machine.
 
-    This exists because a native QFileDialog can't do this: it's either a
-    folder picker or a file picker, never both -- Directory mode's own
-    selection model treats files as inert even when they're shown in the
-    listing (verified rather than assumed: selectFile() on a .zip in
-    Directory mode reports it as "selected" programmatically, but that's
-    not the same as a real double-click doing anything sane in the actual
-    widget, which is the documented, known-flaky part). Building a small
-    dedicated browser sidesteps relying on that quirky, undocumented corner
-    of the native widget's behavior.
+    This was a hand-built browser for a long time, on the documented
+    belief that "a native QFileDialog can't do this: it's either a folder
+    picker or a file picker, never both". That is true of the *native*
+    Windows dialog, and only of that. Qt's own dialog, with
+    DontUseNativeDialog set, lists folders and files together, multi-
+    selects across both, and returns directories from selectedFiles() --
+    verified by driving its internal view with real Ctrl-clicks, which
+    returned ['AFolder', 'b.zip', 'c.glb', 'd.wav'] from one selection.
 
-    multi_select=True (used by batch ingest) switches the list to extended
-    selection: double-clicking a folder still drills into it (needed to
-    reach the right directory level), but a .zip no longer auto-accepts on
-    double-click since there may be more still to pick, and Select gathers
-    every highlighted entry at the current level -- siblings only, not a
-    recursive pick across subfolders -- into selected_items instead of
-    setting the single selected_relative_path/selected_is_zip pair.
+    So the custom widget went, and with it its Up button, its Go to
+    Folder button, its location label, its hint text, and the selection
+    behaviour that was the subject of four separate bug reports. What is
+    left is the dialog everyone already knows how to drive.
+
+    The public surface is unchanged -- selected_relative_path,
+    selected_is_zip and selected_items -- so the four callers did not
+    move.
     """
 
     def __init__(
         self, staging_folder: Path, parent: QWidget | None = None, multi_select: bool = False
     ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Select Packs" if multi_select else "Select Pack")
-        self.resize(480, 420)
-        # The default ingest folder: where browsing starts and what paths
-        # are recorded relative to. Not a boundary -- you can navigate out
-        # of it, and anything picked outside is recorded absolutely.
-        self._root = staging_folder
-        self._current_dir = staging_folder
+        super().__init__(parent, "Select Packs" if multi_select else "Select Pack")
+        self._root = Path(staging_folder)
         self._multi_select = multi_select
 
         self.selected_relative_path: str | None = None
         self.selected_is_zip: bool = False
         self.selected_items: list[tuple[str, bool]] = []
 
-        layout = QVBoxLayout(self)
+        self.setDirectory(str(staging_folder))
+        # ExistingFiles even for the single-pack case: it is the only mode
+        # that lists files and folders side by side, and one item is taken
+        # from the result rather than restricting the dialog.
+        self.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        # Not optional. The native dialog cannot show both kinds, which is
+        # the whole reason this used to be built by hand.
+        self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
 
-        nav_row = QHBoxLayout()
-        self.up_button = QPushButton("Up")
-        self.up_button.clicked.connect(self._go_up)
-        self.location_label = QLabel()
-        self.location_label.setWordWrap(True)
-        nav_row.addWidget(self.up_button)
-        # The folder you are in, named. It used to sit beside a button
-        # that jumped back to the ingest folder, which cost a third of the
-        # row to say something the label could say on its own.
-        location_font = self.location_label.font()
-        location_font.setBold(True)
-        self.location_label.setFont(location_font)
-        nav_row.addWidget(self.location_label, stretch=1)
-        layout.addLayout(nav_row)
-
-        self.list_widget = QListWidget()
-        if multi_select:
-            # MultiSelection, not ExtendedSelection. Extended is the mode
-            # the grid uses, where a plain click *replaces* the selection
-            # and adding requires holding Ctrl -- so clicking three packs
-            # in a row left one selected, which is exactly "multi-select
-            # does not work". Measured rather than assumed: three plain
-            # clicks give ['C'] under Extended and ['A', 'B', 'C'] here.
-            #
-            # Here each click toggles its own row, which is what a picker
-            # whose entire job is choosing several things should do. Ctrl
-            # still adds, and clicking a chosen row again drops it.
-            self.list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-        layout.addWidget(self.list_widget, stretch=1)
-
-        if multi_select:
-            hint = QLabel(
-                "Click each folder, .zip or file you want -- they stay picked, and "
-                "clicking one again drops it. Double-click a folder to open it "
-                "instead. Select takes everything picked in the folder you are in, "
-                "not a recursive pick across subfolders."
-            )
-        else:
-            hint = QLabel(
-                "Folders, .zip files and single asset files are all listed -- any "
-                "of them can be a pack. Double-click a folder to open it, or a "
-                ".zip/file to select it directly. "
-                "Single-click an entry and press Select to pick it without entering it "
-                "(a folder this way, not its contents); with nothing highlighted, Select "
-                "picks the folder you're currently browsing."
-            )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        button_row = QHBoxLayout()
-        browse_button = QPushButton("Go to Folder...")
-        browse_button.setToolTip(
-            "Jump this list to any folder on this machine, then pick the folder "
-            "or .zip from the list above"
+        patterns = " ".join(f"*{ext}" for ext in sorted(ingest.ASSET_TYPE_BY_EXTENSION))
+        self.setNameFilters(
+            [
+                f"Packs and assets (*.zip {patterns})",
+                "Archives (*.zip)",
+                "All files (*)",
+            ]
         )
-        browse_button.clicked.connect(self._browse_elsewhere)
-        button_row.addWidget(browse_button)
-        button_row.addStretch(1)
-        select_button = QPushButton("Select")
-        select_button.clicked.connect(self._select_current_folder)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_row.addWidget(select_button)
-        button_row.addWidget(cancel_button)
-        layout.addLayout(button_row)
-
-        self._refresh_listing()
-
-    def _refresh_listing(self) -> None:
-        self.list_widget.clear()
-        # Just the folder's own name: it is what tells you where you are
-        # at a glance, and the full path is one hover away rather than
-        # taking up the whole row. A drive root has no name, so it falls
-        # back to the path itself.
-        self.location_label.setText(self._current_dir.name or str(self._current_dir))
-        self.location_label.setToolTip(str(self._current_dir))
-        self.up_button.setEnabled(self._current_dir.parent != self._current_dir)
-
-        style = self.style()
-        try:
-            entries = sorted(
-                self._current_dir.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
-            )
-        except OSError:
-            entries = []
-
-        for entry in entries:
-            if entry.is_dir():
-                item = QListWidgetItem(style.standardIcon(QStyle.SP_DirIcon), entry.name)
-                item.setData(Qt.UserRole, ("folder", entry))
-            elif entry.is_file() and entry.suffix.lower() == ".zip":
-                item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
-                item.setData(Qt.UserRole, ("zip", entry))
-            elif entry.is_file() and entry.suffix.lower() in ingest.ASSET_TYPE_BY_EXTENSION:
-                # A lone model, texture or sound file is a pack of one --
-                # ingest has handled that since drag-and-drop landed (see
-                # its pack_root.is_file() branch). It was only ever the
-                # picker that would not show one, so a .glb sitting in a
-                # folder was invisible to the one dialog whose job is
-                # finding things to catalogue.
-                #
-                # Filtered by the same table ingest catalogues from, so
-                # the listing can never offer a file that would then be
-                # skipped as unrecognised.
-                item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
-                item.setData(Qt.UserRole, ("file", entry))
-            else:
-                continue
-            self.list_widget.addItem(item)
+        self.setLabelText(
+            QFileDialog.DialogLabel.Accept, "Select" if not multi_select else "Select Packs"
+        )
 
     def _path_for_caller(self, path: Path) -> str:
         """How a picked path is recorded: relative to the default ingest
-        folder when it sits inside it, absolute when it doesn't.
+        folder when it sits inside it, absolute when it does not.
 
-        Absolute is what lets a pack live anywhere at all. Every path in
-        the app is resolved as `ingest_folder / pack_folder`, and pathlib
-        returns the right-hand side unchanged when it is absolute -- so an
-        out-of-folder pack resolves correctly through the same code as
-        every other one, with nothing downstream needing to know.
+        Absolute is what lets a pack live anywhere. Every path in the app
+        resolves as `ingest_folder / pack_folder`, and pathlib returns the
+        right-hand side unchanged when it is absolute, so an out-of-folder
+        pack flows through the same code as every other one.
 
-        Relative is still preferred for anything inside the default
-        folder, so moving that folder later keeps those packs working.
+        Relative is preferred for anything inside the default folder, so
+        moving that folder later keeps those packs working.
         """
         try:
             return str(path.relative_to(self._root))
         except ValueError:
             return str(path)
 
-    def _go_up(self) -> None:
-        parent = self._current_dir.parent
-        # Stops at the filesystem root, not at the ingest folder: the
-        # ingest folder is a starting point now, not a boundary.
-        if parent == self._current_dir:
-            return
-        self._current_dir = parent
-        self._refresh_listing()
+    def _record(self, chosen: list[str]) -> None:
+        picked = [Path(p) for p in chosen if p]
+        self.selected_items = [
+            (self._path_for_caller(path), path.suffix.lower() == ".zip") for path in picked
+        ]
+        if picked:
+            self.selected_relative_path = self.selected_items[0][0]
+            self.selected_is_zip = self.selected_items[0][1]
 
-    def _browse_elsewhere(self) -> None:
-        """Jumps this browser to a folder, or straight to a .zip in one.
-
-        Deliberately not QFileDialog.getExistingDirectory: on Windows that
-        opens the shell's *folder* picker, which shows folders and nothing
-        else. A folder holding a hundred .zip files and no subfolders --
-        exactly what a downloads folder looks like -- renders as
-        completely empty there, so the honest conclusion from looking at
-        it is that the app cannot see zips at all.
-
-        Qt's own dialog in the same directory mode lists files and will
-        return one, so a .zip picked here is taken as "go to its folder,
-        with that zip ready to choose" rather than being refused.
-        """
-        dialog = QFileDialog(self, "Go to folder", str(self._current_dir))
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, False)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        chosen = dialog.selectedFiles()
-        if not chosen:
-            return
-
-        picked = Path(chosen[0])
-        # A file was chosen: show the folder it lives in, and put the
-        # cursor on it, so the next click is Select rather than a hunt
-        # through a long listing for the thing just picked.
-        target_name = picked.name if picked.is_file() else None
-        self._current_dir = picked.parent if picked.is_file() else picked
-        self._refresh_listing()
-        if target_name is not None:
-            self._highlight(target_name)
-
-    def _highlight(self, name: str) -> None:
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            if item.text() != name:
-                continue
-            self.list_widget.setCurrentItem(item)
-            self.list_widget.scrollToItem(item)
-            return
-
-    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
-        kind, path = item.data(Qt.UserRole)
-        if kind == "folder":
-            self._current_dir = path
-            self._refresh_listing()
-        elif not self._multi_select:
-            self.selected_relative_path = self._path_for_caller(path)
-            # A lone asset file is now selectable too, and it is not an
-            # archive -- saying it was would name the pack after the
-            # whole filename and offer the .zip-only Godot notice.
-            self.selected_is_zip = kind == "zip"
-            self.accept()
-        # multi_select: a double-click leaves the .zip selected (Qt's own
-        # click handling already did that) rather than accepting, since
-        # there may be more still to pick.
-
-    def _select_current_folder(self) -> None:
-        if self._multi_select:
-            # Row order rather than click order, so the result reads the
-            # same way the list does.
-            chosen = [
-                self.list_widget.item(row)
-                for row in range(self.list_widget.count())
-                if self.list_widget.item(row).isSelected()
-            ]
-            self.selected_items = [
-                (
-                    self._path_for_caller(item.data(Qt.UserRole)[1]),
-                    item.data(Qt.UserRole)[0] == "zip",
-                )
-                for item in chosen
-            ]
-            if not self.selected_items:
-                QMessageBox.warning(self, "Select Packs", "Select at least one folder or zip file.")
-                return
-            self.accept()
-            return
-
-        # A single-clicked-but-not-entered list item (the natural first
-        # instinct in most file pickers -- highlight, then press a button)
-        # takes priority over "the folder currently being browsed": without
-        # this, single-clicking a .zip and pressing Select silently picked
-        # the current directory instead, ignoring the highlighted zip
-        # entirely -- the real cause of "the name doesn't auto-fill for a
-        # zip" (the zip was never actually selected in the first place).
-        item = self.list_widget.currentItem()
-        if item is not None:
-            kind, path = item.data(Qt.UserRole)
-            self.selected_relative_path = self._path_for_caller(path)
-            self.selected_is_zip = kind == "zip"
-            self.accept()
-            return
-        self.selected_relative_path = self._path_for_caller(self._current_dir)
-        self.selected_is_zip = False
-        self.accept()
+    def exec(self) -> int:
+        result = super().exec()
+        if result == QDialog.Accepted:
+            self._record(self.selectedFiles())
+        return result
 
 
 class FormatSelectionDialog(QDialog):
@@ -1936,7 +1744,7 @@ class FormatSelectionDialog(QDialog):
 
 
 class IngestDialog(QDialog):
-    """One "Browse Folder/Zip..." button opens the custom StagingBrowserDialog
+    """One "Browse..." button opens the pack picker
     above, which shows subfolders and .zip files inside the staging folder
     together -- either one selectable directly, a zip picked this way
     auto-extracted at ingest time (see ingest.py's ingest_pack). There used
@@ -1984,7 +1792,7 @@ class IngestDialog(QDialog):
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
         source_row = QHBoxLayout()
-        browse_button = QPushButton("Browse Folder/Zip...")
+        browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self._browse_staging)
         source_row.addWidget(self.source_edit)
         source_row.addWidget(browse_button)
@@ -2174,8 +1982,8 @@ class PerPackMetadataDialog(QDialog):
 
 
 class BatchIngestDialog(QDialog):
-    """Picks several staging folders/zips at once (via StagingBrowserDialog
-    in multi-select mode) and ingests them as separate packs in a single
+    """Picks several folders, zips and/or single files at once (via the
+    pack picker in multi-select mode) and ingests them as separate packs in a single
     background job. Either the same creator/licence/source_url is applied
     to every pack (typical for a bundle bought from one source), or
     PerPackMetadataDialog is shown once per pack in turn before any
@@ -2200,7 +2008,7 @@ class BatchIngestDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        browse_button = QPushButton("Browse Folders/Zips...")
+        browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self._browse_staging)
         layout.addWidget(browse_button)
 
