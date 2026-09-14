@@ -1573,6 +1573,21 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+def default_pack_name(relative_path: str, is_zip: bool) -> str:
+    """What to call a pack taken from this source.
+
+    A .zip and a lone asset file are named after their stem -- "prop"
+    rather than "prop.glb" -- and a folder after itself. Tested against
+    the extension table rather than "does the name contain a dot",
+    because plenty of folders do (POLY_NaturePack_Godot-001, v1.2) and
+    stripping a suffix from one of those renames the pack wrongly.
+    """
+    name = Path(relative_path)
+    if is_zip or name.suffix.lower() in ingest.ASSET_TYPE_BY_EXTENSION:
+        return name.stem
+    return name.name
+
+
 class StagingBrowserDialog(QDialog):
     """A small custom folder browser scoped to the staging folder, showing
     subfolders AND .zip files side by side as selectable pack sources.
@@ -1648,15 +1663,16 @@ class StagingBrowserDialog(QDialog):
 
         if multi_select:
             hint = QLabel(
-                "Click each folder and/or .zip you want -- they stay picked, and "
+                "Click each folder, .zip or file you want -- they stay picked, and "
                 "clicking one again drops it. Double-click a folder to open it "
                 "instead. Select takes everything picked in the folder you are in, "
                 "not a recursive pick across subfolders."
             )
         else:
             hint = QLabel(
-                "Folders and .zip files are both listed -- either can be a pack. "
-                "Double-click a folder to open it, or a .zip to select it directly. "
+                "Folders, .zip files and single asset files are all listed -- any "
+                "of them can be a pack. Double-click a folder to open it, or a "
+                ".zip/file to select it directly. "
                 "Single-click an entry and press Select to pick it without entering it "
                 "(a folder this way, not its contents); with nothing highlighted, Select "
                 "picks the folder you're currently browsing."
@@ -1708,6 +1724,19 @@ class StagingBrowserDialog(QDialog):
             elif entry.is_file() and entry.suffix.lower() == ".zip":
                 item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
                 item.setData(Qt.UserRole, ("zip", entry))
+            elif entry.is_file() and entry.suffix.lower() in ingest.ASSET_TYPE_BY_EXTENSION:
+                # A lone model, texture or sound file is a pack of one --
+                # ingest has handled that since drag-and-drop landed (see
+                # its pack_root.is_file() branch). It was only ever the
+                # picker that would not show one, so a .glb sitting in a
+                # folder was invisible to the one dialog whose job is
+                # finding things to catalogue.
+                #
+                # Filtered by the same table ingest catalogues from, so
+                # the listing can never offer a file that would then be
+                # skipped as unrecognised.
+                item = QListWidgetItem(style.standardIcon(QStyle.SP_FileIcon), entry.name)
+                item.setData(Qt.UserRole, ("file", entry))
             else:
                 continue
             self.list_widget.addItem(item)
@@ -1789,7 +1818,10 @@ class StagingBrowserDialog(QDialog):
             self._refresh_listing()
         elif not self._multi_select:
             self.selected_relative_path = self._path_for_caller(path)
-            self.selected_is_zip = True
+            # A lone asset file is now selectable too, and it is not an
+            # archive -- saying it was would name the pack after the
+            # whole filename and offer the .zip-only Godot notice.
+            self.selected_is_zip = kind == "zip"
             self.accept()
         # multi_select: a double-click leaves the .zip selected (Qt's own
         # click handling already did that) rather than accepting, since
@@ -2036,8 +2068,9 @@ class IngestDialog(QDialog):
         self._selected_relative_path = relative_path
         self.source_edit.setText(relative_path)
         if self._pack_name_auto:
-            name = Path(relative_path)
-            self.pack_name_edit.setText(name.stem if browser.selected_is_zip else name.name)
+            self.pack_name_edit.setText(
+                default_pack_name(relative_path, browser.selected_is_zip)
+            )
         self._update_godot_notice(relative_path, browser.selected_is_zip)
 
     def _update_godot_notice(self, relative_path: str, is_zip: bool) -> None:
@@ -2224,10 +2257,7 @@ class BatchIngestDialog(QDialog):
         for relative_path, _is_zip in self._sources:
             self.sources_list.addItem(relative_path)
 
-    @staticmethod
-    def _default_pack_name(relative_path: str, is_zip: bool) -> str:
-        name = Path(relative_path)
-        return name.stem if is_zip else name.name
+    _default_pack_name = staticmethod(default_pack_name)
 
     def _on_accept(self) -> None:
         if not self._sources:

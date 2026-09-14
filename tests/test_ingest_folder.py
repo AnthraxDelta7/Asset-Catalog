@@ -340,3 +340,98 @@ def test_double_clicking_a_folder_still_opens_it(qapp, tmp_path: Path) -> None:
     ] == ["Inner", "pack.zip"]
     assert dialog.location_label.text() == "Outer"
     assert dialog.list_widget.selectedItems() == []
+
+
+def test_the_picker_lists_files_folders_and_zips(qapp, tmp_path: Path) -> None:
+    """ingest has treated a lone file as a pack of one since drag-and-drop
+    landed. Only the picker would not show one, so a .glb sitting in a
+    folder was invisible to the one dialog whose job is finding things to
+    catalogue.
+    """
+    from PySide6.QtCore import Qt
+
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "SomeFolder").mkdir()
+    for name in (
+        "Pack.zip", "prop.glb", "chair.fbx", "atlas.png", "hit.wav",
+        "readme.txt", "notes.md", "project.unity",
+    ):
+        (root / name).write_bytes(b"x")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    listed = {
+        dialog.list_widget.item(i).text(): dialog.list_widget.item(i).data(Qt.UserRole)[0]
+        for i in range(dialog.list_widget.count())
+    }
+    assert listed == {
+        "SomeFolder": "folder",
+        "Pack.zip": "zip",
+        "prop.glb": "file",
+        "chair.fbx": "file",
+        "atlas.png": "file",
+        "hit.wav": "file",
+    }
+    # Filtered by the table ingest catalogues from, so the listing can
+    # never offer something that would then be skipped as unrecognised.
+    assert "readme.txt" not in listed
+    assert "project.unity" not in listed
+
+
+def test_a_folder_a_zip_and_a_file_can_be_picked_together(qapp, tmp_path: Path) -> None:
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "AFolder").mkdir()
+    (root / "BPack.zip").write_bytes(b"PK\x03\x04")
+    (root / "Cprop.glb").write_bytes(b"glb")
+
+    dialog = StagingBrowserDialog(root, multi_select=True)
+    dialog.show()
+    for row in range(dialog.list_widget.count()):
+        _plain_click(dialog.list_widget, row)
+
+    dialog._select_current_folder()
+    assert dialog.selected_items == [
+        ("AFolder", False),
+        ("BPack.zip", True),
+        ("Cprop.glb", False),
+    ]
+
+
+def test_pack_names_come_out_right_for_each_kind() -> None:
+    """A folder keeps its name; a .zip and a lone file lose the extension.
+
+    Decided by the extension table rather than "does the name contain a
+    dot", because plenty of folders do -- POLY_NaturePack_Godot-001, v1.2
+    -- and stripping a suffix off one of those renames the pack wrongly.
+    """
+    from asset_catalogue.ui.main_window import default_pack_name
+
+    assert default_pack_name("Pack.zip", True) == "Pack"
+    assert default_pack_name("prop.glb", False) == "prop"
+    assert default_pack_name("hit.wav", False) == "hit"
+    assert default_pack_name("FolderPack", False) == "FolderPack"
+    assert default_pack_name("POLY_NaturePack_Godot-001", False) == "POLY_NaturePack_Godot-001"
+    assert default_pack_name("v1.2", False) == "v1.2"
+
+
+def test_double_clicking_a_lone_file_picks_it_as_a_file_not_an_archive(
+    qapp, tmp_path: Path
+) -> None:
+    """Saying a .glb was a zip would name the pack after the whole
+    filename and offer the .zip-only Godot notice.
+    """
+    from asset_catalogue.ui.main_window import StagingBrowserDialog
+
+    root = tmp_path / "ingest"
+    root.mkdir()
+    (root / "prop.glb").write_bytes(b"glb")
+
+    dialog = StagingBrowserDialog(root)
+    dialog._on_item_double_clicked(dialog.list_widget.item(0))
+    assert dialog.selected_relative_path == "prop.glb"
+    assert dialog.selected_is_zip is False

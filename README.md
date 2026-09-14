@@ -362,6 +362,12 @@ With `project_root`, only packs that have at least one asset actually exported i
 asset-catalogue-ui
 ```
 
+### Picking what to ingest
+
+The pack browser lists **folders, `.zip` files and single asset files** side by side — any of them can be a pack. A lone `.glb`, `.fbx` or `.wav` becomes a pack of one, named after the file without its extension; a `.zip` after the archive name; a folder after itself. Only extensions the catalogue actually handles are listed, so the picker can never offer a file that ingest would then skip.
+
+Click each thing you want — they stay picked, and clicking one again drops it. Double-click a folder to open it instead. **Select** takes everything picked in the folder you're in (siblings at one level, not a recursive pick across subfolders). **Go to Folder...** jumps anywhere on the machine, and picking a `.zip` there lands the browser on it.
+
 ### Ingest folder, and unpacked leftovers
 
 The **ingest folder** in Settings is where the pack browser starts, not a place packs have to live. Browsing is unrestricted — **Up** goes anywhere, **Browse...** jumps to any folder on the machine, and **Ingest Folder** comes back. A pack inside the ingest folder is recorded relative to it, so moving that folder later keeps those packs working; a pack outside it is recorded by absolute path.
