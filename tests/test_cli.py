@@ -662,3 +662,38 @@ def test_parser_dispatches_every_subcommand_to_a_callable() -> None:
     for command in leaf_commands:
         args = parser.parse_args(command)
         assert callable(args.func), command
+
+
+def test_export_godot_refuses_when_nothing_is_a_model(tmp_path: Path, monkeypatch, capsys) -> None:
+    """--godot only means anything for models. Saying so beats copying
+    textures into a project as though they were Godot resources.
+    """
+    import argparse
+
+    from asset_catalogue import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    args = argparse.Namespace(project_root=str(project), dest_subfolder="exported_assets")
+    with pytest.raises(SystemExit) as excinfo:
+        cli._export_to_godot(
+            None,
+            [{"id": 1, "asset_type": "texture"}],
+            project,
+            args.dest_subfolder,
+        )
+    assert "only applies to models" in str(excinfo.value)
+
+
+def test_export_godot_is_offered_on_the_cli(tmp_path: Path) -> None:
+    """Parity with the UI, which has had the whole .res/.tscn/preserved
+    flow while the CLI still did a plain file copy.
+    """
+    from asset_catalogue import cli
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["export", "SomeProject", "--pack", "P", "--godot"])
+    assert args.godot is True
+
+    plain = parser.parse_args(["export", "SomeProject", "--pack", "P"])
+    assert plain.godot is False

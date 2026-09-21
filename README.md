@@ -362,6 +362,16 @@ With `project_root`, only packs that have at least one asset actually exported i
 asset-catalogue-ui
 ```
 
+### Rig and animation badges
+
+A model that has a rig or animation clips shows a small dot in the corner of its thumbnail — blue for a rig, amber for clips — with the detail in the tooltip. A model with **no** dot is either genuinely plain or simply **not inspected yet**; the two look the same on purpose, because an absent dot means "nothing known", never a claim about a file nothing has opened.
+
+Rig facts come from a glTF's header at ingest (free), or from the thumbnail render for anything Blender must read. The status bar shows how many models still need rendering, since an un-rendered model has no badge, no "contains:" line, and is preserved whole on export rather than risk flattening something unseen.
+
+### Exporting from the CLI
+
+`asset-catalogue export <project> --godot` now does what the UI does: a single-mesh model becomes a `.res` Mesh resource, anything else a `.tscn`, and a model whose rig, animations or morph targets a flatten would destroy is preserved whole. Without `--godot` it is still a plain file copy.
+
 ### Double-click in the grid
 
 Double-clicking a **sound** plays it, exactly as the detail panel's Play button does — double-click again to stop. Everything else opens the larger preview. A waveform image is not what anyone wants from a sound.

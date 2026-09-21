@@ -778,6 +778,10 @@ def cmd_export(args: argparse.Namespace) -> None:
         return
 
     project_identifier = str(project_root.resolve())
+    if args.godot:
+        _export_to_godot(conn, assets, project_root, args.dest_subfolder)
+        return
+
     stats = exporting.export_assets(
         conn,
         Path(s.staging_folder),
@@ -785,8 +789,50 @@ def cmd_export(args: argparse.Namespace) -> None:
         project_identifier,
         args.dest_subfolder,
         assets,
+        assets_dir=s.assets_dir(),
     )
     print(f"Exported {stats.copied} asset(s) into {project_root}")
+
+
+def _export_to_godot(conn, assets, project_root: Path, dest_subfolder: str) -> None:
+    """The same path the UI takes, rather than a second implementation.
+
+    Export to Godot is the only place that knows which models are safe to
+    flatten and which must be preserved whole (see gltf_metadata's
+    allowlist), and getting that wrong destroys rigs and morph targets
+    silently. A CLI copy of the rule would be a second copy free to drift
+    from the one the UI uses.
+    """
+    from asset_catalogue.catalogue import Catalogue
+
+    eligible = [a for a in assets if a["asset_type"] == "model"]
+    skipped = len(assets) - len(eligible)
+    if not eligible:
+        raise SystemExit(
+            "Nothing to export as Godot resources -- --godot only applies to models."
+        )
+
+    catalogue = Catalogue.open()
+    try:
+        stats = catalogue.export_assets_to_godot_bg(
+            [a["id"] for a in eligible],
+            project_root,
+            dest_subfolder,
+            on_progress=print,
+        )
+    finally:
+        catalogue.close()
+
+    print(
+        f"Generated {stats.generated} Godot resource(s) in {project_root}"
+        + (f", preserved {stats.preserved} whole" if stats.preserved else "")
+        + (f", {stats.failed} failed" if stats.failed else "")
+        + (f", skipped {skipped} non-model asset(s)" if skipped else "")
+    )
+    for failure in stats.failures:
+        print(f"  {failure}")
+    if stats.failed:
+        raise SystemExit(1)
 
 
 def cmd_exports(args: argparse.Namespace) -> None:
@@ -1344,6 +1390,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="exported_assets",
         help="Subfolder under the project root that exports land in, grouped by pack "
         "(default: exported_assets)",
+    )
+    export_parser.add_argument(
+        "--godot",
+        action="store_true",
+        help="Export as native Godot resources rather than copying files: a single-mesh "
+        "model becomes a .res Mesh, anything else a .tscn, and a model whose rig, "
+        "animations or morph targets a flatten would destroy is preserved whole. "
+        "Needs Godot configured (and Blender, for any non-.glb source).",
     )
     export_parser.set_defaults(func=cmd_export)
 
