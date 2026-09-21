@@ -20,6 +20,7 @@ from asset_catalogue import (
     extractions,
     gltf_metadata,
     godot_export,
+    model_facts,
     model_metadata,
     ingest,
     library_assets,
@@ -49,6 +50,10 @@ class AssetSummary:
     pack_notes: str | None = None
     deleted_at: str | None = None
     needs_glb_conversion: bool = False
+    # None means "not inspected yet", not "has none" -- so a badge never
+    # claims a model has no rig when nothing has looked at it.
+    joint_count: int | None = None
+    animation_count: int | None = None
     tags: list[str] = field(default_factory=list)
 
 
@@ -265,7 +270,7 @@ class Catalogue:
     _ASSET_SUMMARY_COLUMNS = (
         "assets.id, assets.filename, assets.asset_type, "
         "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
-        "assets.favorite, assets.deleted_at, assets.needs_glb_conversion, "
+        "assets.favorite, assets.deleted_at, assets.needs_glb_conversion, assets.joint_count, assets.animation_count, "
         "packs.name AS pack_name, packs.rating AS pack_rating, packs.notes AS pack_notes"
     )
 
@@ -283,6 +288,8 @@ class Catalogue:
             pack_notes=row["pack_notes"],
             deleted_at=row["deleted_at"],
             needs_glb_conversion=bool(row["needs_glb_conversion"]),
+            joint_count=row["joint_count"],
+            animation_count=row["animation_count"],
             tags=self.get_asset_tags(row["id"]),
         )
 
@@ -426,6 +433,32 @@ class Catalogue:
         if path is None:
             return None
         return model_metadata.read(path, self._preview_dir, row["content_hash"])
+
+    def backfill_model_facts_bg(self, limit: int = 400) -> int:
+        """Fills in rig/clip counts for models that predate the columns.
+
+        Bounded per run and NULL-only, so it converges over a few
+        launches instead of stalling one, and costs a single indexed
+        query once the library has caught up. Returns rows filled.
+        """
+        with self._own_connection() as conn:
+            return model_facts.backfill(
+                conn, self._assets_dir, self._staging_folder, self._preview_dir, limit
+            )
+
+    def pending_model_render_count(self) -> int:
+        """Models with no thumbnail yet.
+
+        Load-bearing rather than cosmetic: a model's rig and clips are
+        captured during its render, so an un-rendered model is one the
+        app cannot fully describe -- no badge, no "contains:" line, and
+        Export to Godot preserves it whole rather than risk flattening
+        something it cannot see.
+        """
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE asset_type = 'model' "
+            "AND thumbnail_status != 'done' AND deleted_at IS NULL"
+        ).fetchone()[0]
 
     def list_animation_clips(self, asset_id: int) -> list[str]:
         """Named animation clips inside this asset -- [] for anything with
@@ -1278,6 +1311,16 @@ class Catalogue:
         wrapper_stats.preserved = len(to_preserve)
         wrapper_stats.failed += len(conversion_failures)
         wrapper_stats.failures.extend(conversion_failures)
+        # Point the export history at what survived, before deleting the
+        # .glb it was recorded against -- otherwise every row names a file
+        # this same operation is about to remove.
+        with self._own_connection() as conn:
+            for source_path in wrapper_stats.succeeded_sources:
+                artifact = exporting.wrapped_artifact_for(source_path)
+                if artifact is not None:
+                    exporting.repoint_export(conn, source_path, artifact)
+            conn.commit()
+
         for source_path in wrapper_stats.succeeded_sources:
             source_path.unlink(missing_ok=True)
             Path(f"{source_path}.import").unlink(missing_ok=True)

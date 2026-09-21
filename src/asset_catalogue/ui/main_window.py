@@ -9,7 +9,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QStringListModel, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QStringListModel, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -534,6 +534,66 @@ SHUTDOWN_WAIT_MS = 120_000
 THUMBNAIL_CACHE_ENTRIES = 1500
 
 
+RIG_BADGE_COLOR = QColor("#7aa2f7")
+ANIMATION_BADGE_COLOR = QColor("#e0b070")
+BADGE_RADIUS = 4
+
+
+def _badge_key(asset: AssetSummary) -> str:
+    return f"{bool(asset.joint_count)}{bool(asset.animation_count)}"
+
+
+def describe_contents(asset: AssetSummary) -> str:
+    """One line for a tooltip, or "" when there is nothing to say.
+
+    None means nothing has inspected this model yet, which is not the
+    same as it having no rig -- so it produces no badge and no text,
+    rather than a confident claim about a file nobody has read.
+    """
+    parts = []
+    if asset.joint_count:
+        parts.append(f"rigged ({asset.joint_count} joints)")
+    if asset.animation_count:
+        clips = "clip" if asset.animation_count == 1 else "clips"
+        parts.append(f"{asset.animation_count} animation {clips}")
+    return ", ".join(parts)
+
+
+def _paint_content_badges(pixmap: QPixmap, asset: AssetSummary, dpr: float) -> None:
+    """Two small dots in the corner: this model has a rig, or clips, or
+    both.
+
+    Painted onto the thumbnail rather than drawn as a separate widget so
+    it costs nothing per item at scroll time, and so it lands inside the
+    cached pixmap instead of being recomputed on every repaint. A dot
+    rather than a word because at 128px a label is either unreadable or
+    covers the model.
+    """
+    if not (asset.joint_count or asset.animation_count):
+        return
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(dpr, dpr)
+    width = THUMBNAIL_ICON_SIZE.width()
+    x = width - BADGE_RADIUS - 5
+    y = BADGE_RADIUS + 5
+    painter.setPen(Qt.NoPen)
+    for present, color in (
+        (asset.joint_count, RIG_BADGE_COLOR),
+        (asset.animation_count, ANIMATION_BADGE_COLOR),
+    ):
+        if not present:
+            continue
+        # A dark ring keeps the dot legible against a pale thumbnail;
+        # without it a light model swallows the amber one entirely.
+        painter.setBrush(QColor(0, 0, 0, 140))
+        painter.drawEllipse(QPoint(x, y), BADGE_RADIUS + 1, BADGE_RADIUS + 1)
+        painter.setBrush(color)
+        painter.drawEllipse(QPoint(x, y), BADGE_RADIUS, BADGE_RADIUS)
+        x -= BADGE_RADIUS * 2 + 3
+    painter.end()
+
+
 class ThumbnailGrid(QListWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -579,6 +639,10 @@ class ThumbnailGrid(QListWidget):
             tooltip = (
                 f"{asset.pack_name} / {asset.filename}" + chr(10) + asset.asset_type
             )
+            # What the corner dots mean, since a dot cannot say it itself.
+            contents = describe_contents(asset)
+            if contents:
+                tooltip += chr(10) + contents
             if asset.needs_glb_conversion:
                 tooltip += (
                     chr(10)
@@ -606,7 +670,12 @@ class ThumbnailGrid(QListWidget):
         # key's prefix rather than popping the hash itself. Collected
         # before deleting: mutating a dict mid-iteration raises.
         doomed = set(content_hashes)
-        stale = [key for key in self._thumbnail_cache if key.rsplit(":", 1)[0] in doomed]
+        # Matched on the *leading* segment. The key gained a badge-state
+        # suffix when rig dots were added, and stripping only the last
+        # segment then left "hash:width", which matches no hash at all --
+        # so invalidation silently stopped working. Caught by the test
+        # that asserts a re-render actually changes what the grid shows.
+        stale = [key for key in self._thumbnail_cache if key.split(":", 1)[0] in doomed]
         for key in stale:
             del self._thumbnail_cache[key]
 
@@ -666,7 +735,10 @@ class ThumbnailGrid(QListWidget):
         )
         # Keyed by content hash, already this app's identity for a
         # thumbnail -- two assets with identical bytes share one entry.
-        cache_key = f"{asset.content_hash}:{physical_size.width()}"
+        # The badge state is part of the key: a render fills in a model's
+        # rig facts, and the same bytes would otherwise keep serving the
+        # pixmap painted before anything was known about them.
+        cache_key = f"{asset.content_hash}:{physical_size.width()}:{_badge_key(asset)}"
         cached = self._thumbnail_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -681,6 +753,7 @@ class ThumbnailGrid(QListWidget):
                     Qt.SmoothTransformation,
                 )
                 scaled.setDevicePixelRatio(dpr)
+                _paint_content_badges(scaled, asset, dpr)
                 self._remember_thumbnail(cache_key, scaled)
                 return scaled
         # No thumbnail yet. A flat grey square says nothing -- it reads as
@@ -5423,6 +5496,16 @@ class MainWindow(QMainWindow):
         worse than the silence it replaces.
         """
         self._error_count = 0
+        # Models the app cannot fully describe yet. Rig and clips are
+        # captured during a render, so a pending model has no badge, no
+        # "contains:" line, and is preserved whole on export rather than
+        # risk flattening something unseen. Nothing self-heals, so it
+        # says so rather than waiting to be noticed.
+        self._pending_label = QLabel("")
+        self._pending_label.setStyleSheet("color: #e0b070;")
+        self._pending_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self._pending_label)
+
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: #d98080;")
         self._error_label.setVisible(False)
@@ -5432,8 +5515,52 @@ class MainWindow(QMainWindow):
         # A settings file that couldn't be read is reported the same way.
         # Falling back to defaults silently is indistinguishable from the
         # app having forgotten every preference for no reason.
+        self._refresh_pending_render_note()
+
         if settings.last_load_error:
             self.statusBar().showMessage(settings.last_load_error, 15000)
+
+    def _refresh_pending_render_note(self) -> None:
+        try:
+            pending = self._catalogue.pending_model_render_count()
+        except Exception:  # noqa: BLE001 -- a status note must never be what breaks a refresh
+            return
+        plural = "s" if pending != 1 else ""
+        self._pending_label.setText(f"{pending} model{plural} not rendered")
+        self._pending_label.setToolTip(
+            "Rig and animation data is captured during a model's thumbnail render, "
+            "so these are not fully catalogued yet." + chr(10)
+            + "Thumbnails > Generate 3D Thumbnails renders them."
+        )
+        self._pending_label.setVisible(pending > 0)
+
+    def _start_launch_maintenance(self) -> None:
+        """Fills in rig/clip counts for models that predate those columns.
+
+        Silent and in the background: it is bookkeeping nobody asked for,
+        and a progress dialog at launch would be worse than the delay.
+        Bounded per run and NULL-only, so it converges over a few launches
+        rather than stalling one.
+        """
+        def job(_report):
+            return self._catalogue.backfill_model_facts_bg()
+
+        worker = _BackgroundWorker(job)
+
+        def done(filled) -> None:
+            if filled:
+                # Only when it actually changed something, so a caught-up
+                # library says nothing at all.
+                self.statusBar().showMessage(
+                    f"Inspected {filled} model(s) for rigs and animations.", 8000
+                )
+                self._refresh_grid()
+
+        worker.finished_ok.connect(done, Qt.QueuedConnection)
+        # Failure is genuinely ignorable here: nothing depends on it
+        # having run, and the next launch tries again.
+        self._maintenance_worker = worker
+        worker.start()
 
     def _note_uncaught_error(self, summary: str) -> None:
         self._error_count += 1
@@ -5499,6 +5626,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _refresh_grid(self) -> None:
+        self._refresh_pending_render_note()
         self._current_assets = self._catalogue.list_assets(
             pack=self.filter_panel.selected_pack(),
             asset_type=self.filter_panel.selected_type(),
@@ -6060,6 +6188,7 @@ def main() -> None:
     window.show()
     splash.close()
     window._check_for_updates(silent=True)
+    window._start_launch_maintenance()
     sys.exit(app.exec())
 
 

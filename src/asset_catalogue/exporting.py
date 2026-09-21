@@ -160,6 +160,43 @@ def record_export(
     )
 
 
+def repoint_export(
+    conn: sqlite3.Connection, old_destination: Path, new_destination: Path
+) -> int:
+    """Moves an export record onto the file that actually survived.
+
+    Export to Godot lands an intermediate `.glb`, wraps it into a `.res`
+    or `.tscn`, then deletes the `.glb` -- but the export was recorded
+    against the `.glb`, so every row pointed at a file the same operation
+    had just removed. Nothing reads the exports table yet, so this was
+    latent rather than broken; it would have become wrong the instant an
+    "exported to" view existed, which is the worst time to find out.
+
+    Returns rows updated, so a caller can tell a real repoint from a
+    no-op rather than assuming.
+    """
+    cursor = conn.execute(
+        "UPDATE exports SET destination_path = ? WHERE destination_path = ?",
+        (str(new_destination), str(old_destination)),
+    )
+    return cursor.rowcount
+
+
+def wrapped_artifact_for(source_glb: Path) -> Path | None:
+    """The `.res` or `.tscn` a wrapped `.glb` became, if it is on disk.
+
+    Asked of the filesystem rather than inferred from the job: the
+    wrapper picks `.res` for a single mesh and `.tscn` for anything else,
+    and reproducing that rule here would be a second copy of it, free to
+    drift from the one in the .gd script that actually decides.
+    """
+    for suffix in (".res", ".tscn"):
+        candidate = source_glb.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _plan_destinations(
     project_root: Path,
     dest_subfolder: str,

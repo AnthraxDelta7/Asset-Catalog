@@ -963,3 +963,125 @@ def test_double_clicking_a_model_still_opens_the_preview(
     window._on_grid_item_double_clicked(window.grid.item(0))
     assert opened_preview == [1]
     conn.close()
+
+
+def test_the_grid_badges_rigged_and_animated_models(qapp, tmp_path: Path, monkeypatch) -> None:
+    """A dot in the corner, so you can see a rig without selecting the
+    asset. None means not inspected, and must produce no badge at all --
+    an absent dot has to mean "nothing known", not "nothing there".
+    """
+    from asset_catalogue.catalogue import AssetSummary
+    from asset_catalogue.ui.main_window import _badge_key, describe_contents
+
+    def summary(**kwargs) -> AssetSummary:
+        base = dict(
+            id=1, filename="m.glb", pack_name="P", asset_type="model",
+            thumbnail_status="done", content_hash="abc", relative_path="m.glb",
+        )
+        base.update(kwargs)
+        return AssetSummary(**base)
+
+    unknown = summary()
+    plain = summary(joint_count=0, animation_count=0)
+    rigged = summary(joint_count=38, animation_count=0)
+    animated = summary(joint_count=0, animation_count=6)
+    both = summary(joint_count=38, animation_count=6)
+
+    assert describe_contents(unknown) == ""
+    assert describe_contents(plain) == ""
+    assert describe_contents(rigged) == "rigged (38 joints)"
+    assert describe_contents(animated) == "6 animation clips"
+    assert describe_contents(both) == "rigged (38 joints), 6 animation clips"
+    assert describe_contents(summary(animation_count=1)) == "1 animation clip"
+
+    # An un-inspected model and a known-plain one look the same in the
+    # grid, which is correct -- neither has anything to show.
+    assert _badge_key(unknown) == _badge_key(plain)
+    assert len({_badge_key(a) for a in (plain, rigged, animated, both)}) == 4
+
+
+def test_the_badge_state_is_part_of_the_thumbnail_cache_key(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """A render fills in a model's rig facts. Without the badge state in
+    the key, the same bytes would keep serving the pixmap painted before
+    anything was known -- a rig that never appears until a restart.
+    """
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import ThumbnailGrid
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    write_minimal_glb(pack / "m.glb", {"meshes": [{}]})
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+    # A real thumbnail on disk: the placeholder branch deliberately does
+    # not cache, so without one there is nothing to key.
+    from PySide6.QtGui import QColor, QPixmap
+
+    from asset_catalogue import thumbnails as thumbnails_module
+
+    asset = catalogue.list_assets()[0]
+    thumb = thumbnails_module.thumbnail_path(library / "thumbnails", asset.content_hash)
+    thumb.parent.mkdir(parents=True, exist_ok=True)
+    swatch = QPixmap(64, 64)
+    swatch.fill(QColor("#336699"))
+    assert swatch.save(str(thumb))
+
+    grid = ThumbnailGrid()
+    grid._load_thumbnail(asset, catalogue)
+    keys_before = set(grid._thumbnail_cache)
+
+    asset.joint_count = 38
+    grid._load_thumbnail(asset, catalogue)
+    assert set(grid._thumbnail_cache) != keys_before
+
+    # And invalidation still reaches both, despite the longer key.
+    grid.invalidate_thumbnails([asset.content_hash])
+    assert grid._thumbnail_cache == {}
+    conn.close()
+
+
+def test_the_status_bar_says_how_many_models_still_need_rendering(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Rig and clips are captured during a render, so a pending model is
+    one the app cannot fully describe. Nothing self-heals, so it says so.
+    """
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import MainWindow
+    from conftest import write_minimal_glb
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    for name in ("a.glb", "b.glb"):
+        write_minimal_glb(pack / name, {"meshes": [{"name": name}]})
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+    window = MainWindow(catalogue)
+    assert catalogue.pending_model_render_count() == 2
+    assert not window._pending_label.isHidden()
+    assert "2 models not rendered" in window._pending_label.text()
+
+    conn.execute("UPDATE assets SET thumbnail_status = 'done'")
+    conn.commit()
+    window._refresh_pending_render_note()
+    assert window._pending_label.isHidden(), "a caught-up library should say nothing"
+    conn.close()

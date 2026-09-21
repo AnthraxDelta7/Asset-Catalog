@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import archives
+from asset_catalogue import archives, gltf_metadata
 
 ProgressCallback = Callable[[str], None]
 
@@ -454,6 +454,19 @@ def ingest_pack(
             stats.duplicate += 1
         else:
             stats.new += 1
+            # A glTF container answers "does it have a rig or clips" from
+            # its header, so it is filled in now rather than waiting for a
+            # render. Every other format needs Blender and stays NULL --
+            # "not inspected yet", which the grid shows as no badge rather
+            # than as a badge saying "none".
+            if classify(extension) == "model":
+                facts = gltf_metadata.read(entry)
+                if facts is not None:
+                    conn.execute(
+                        "UPDATE assets SET joint_count = ?, animation_count = ? "
+                        "WHERE content_hash = ?",
+                        (facts.joint_count, len(facts.animation_names), content_hash),
+                    )
 
     conn.commit()
     return stats

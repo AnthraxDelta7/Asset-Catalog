@@ -144,6 +144,14 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     # before this column, which sorts below anything touched since, so an
     # untouched library falls back to newest-ingested-first on date_added.
     _ensure_column(conn, "packs", "last_used_at", "last_used_at TEXT")
+    # What a model contains, denormalised onto the asset row. The facts
+    # themselves live in model_metadata's per-hash cache and in the glTF
+    # header, but both cost a file read, and the grid needs them for
+    # every visible asset at once -- the same reason thumbnails are
+    # cached rather than re-derived. NULL means "not inspected yet",
+    # which is deliberately distinct from 0 ("inspected, has none").
+    _ensure_column(conn, "assets", "joint_count", "joint_count INTEGER")
+    _ensure_column(conn, "assets", "animation_count", "animation_count INTEGER")
     # Folders this app unpacked itself, so cleanup can remove its own
     # leftovers and nothing else. Recording is the only honest way to
     # know: a folder sitting next to a zip of the same name looks exactly

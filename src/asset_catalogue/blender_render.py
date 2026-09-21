@@ -14,6 +14,7 @@ from asset_catalogue import (
     audio_thumbnails,
     broken_textures,
     library_assets,
+    model_facts,
     model_metadata,
     model_preview,
     paths,
@@ -317,12 +318,15 @@ def generate_model_thumbnails(
                     except ValueError:
                         rig = None
                     if rig_hash and rig is not None:
-                        model_metadata.write_cache(
-                            preview_dir,
-                            rig_hash,
-                            int(rig.get("joint_count") or 0),
-                            list(rig.get("animation_names") or []),
-                        )
+                        joints = int(rig.get("joint_count") or 0)
+                        clips = list(rig.get("animation_names") or [])
+                        model_metadata.write_cache(preview_dir, rig_hash, joints, clips)
+                        # Also onto the row, so the grid and the tag panel
+                        # can ask about every asset at once instead of
+                        # reading one JSON file per item. Keyed by hash:
+                        # identical bytes are the same model and get the
+                        # same answer without a second inspection.
+                        model_facts.record_by_hash(conn, rig_hash, joints, len(clips))
                 continue
             if not line.startswith("ASSET_CATALOGUE_RESULT|"):
                 continue
