@@ -1311,6 +1311,7 @@ class Catalogue:
                 asset_id=asset_id,
                 asset_ids=asset_ids,
                 on_progress=on_progress,
+                assets_dir=self._assets_dir,
             )
 
     def generate_audio_thumbnails_bg(
@@ -1333,6 +1334,7 @@ class Catalogue:
                 asset_id=asset_id,
                 asset_ids=asset_ids,
                 on_progress=on_progress,
+                assets_dir=self._assets_dir,
             )
 
     def convert_asset_to_gltf_bg(

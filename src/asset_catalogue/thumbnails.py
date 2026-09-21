@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from asset_catalogue import library_assets
+
 from PIL import Image, UnidentifiedImageError
 
 THUMBNAIL_SIZE = (512, 512)
@@ -40,7 +42,13 @@ def generate_texture_thumbnails(
     asset_id: int | None = None,
     asset_ids: list[int] | None = None,
     on_progress: ProgressCallback | None = None,
+    assets_dir: Path | None = None,
 ) -> ThumbnailStats:
+    """assets_dir, when given, reads the library's archived copy in
+    preference to the original unpacked folder -- so a re-render still
+    works after that folder has been cleaned up. Omitted, behaviour is
+    unchanged: original only.
+    """
     # Targeting specific asset(s) directly (e.g. the detail panel's
     # "Generate Thumbnail" button, or the grid's "Regenerate Thumbnail(s)"
     # context menu action) always renders them regardless of prior status,
@@ -52,7 +60,8 @@ def generate_texture_thumbnails(
     report = on_progress or (lambda _text: None)
     query = (
         "SELECT assets.id, assets.filename, assets.relative_path, assets.content_hash, "
-        "packs.pack_folder FROM assets JOIN packs ON packs.id = assets.pack_id "
+        "packs.pack_folder, packs.name AS pack_name "
+        "FROM assets JOIN packs ON packs.id = assets.pack_id "
         "WHERE assets.asset_type = 'texture'"
     )
     params: list = []
@@ -85,7 +94,14 @@ def generate_texture_thumbnails(
             continue
 
         report(f"Rendering thumbnail for {row['filename']}...")
-        source = staging_folder / row["pack_folder"] / row["relative_path"]
+        source = (
+            library_assets.source_file(
+                assets_dir, staging_folder, row["pack_name"],
+                row["pack_folder"], row["relative_path"],
+            )
+            if assets_dir is not None
+            else staging_folder / row["pack_folder"] / row["relative_path"]
+        )
         try:
             render_2d_thumbnail(source, dest)
         except (UnidentifiedImageError, OSError):

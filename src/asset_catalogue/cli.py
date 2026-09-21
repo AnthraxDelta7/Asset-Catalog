@@ -386,6 +386,7 @@ def cmd_thumbnail_generate(args: argparse.Namespace) -> None:
         pack_name=args.pack,
         force=args.force,
         asset_id=args.asset_id,
+        assets_dir=s.assets_dir(),
     )
     print(
         f"Thumbnails: {stats.generated} generated, "
@@ -408,6 +409,7 @@ def cmd_thumbnail_generate_audio(args: argparse.Namespace) -> None:
         pack_name=args.pack,
         force=args.force,
         asset_id=args.asset_id,
+        assets_dir=s.assets_dir(),
     )
     print(
         f"Audio thumbnails: {stats.generated} generated, "
@@ -436,6 +438,7 @@ def cmd_thumbnail_generate_models(args: argparse.Namespace) -> None:
         pack_name=args.pack,
         force=args.force,
         asset_id=args.asset_id,
+        assets_dir=s.assets_dir(),
     )
     print(
         f"Model thumbnails: {stats.generated} generated, "
@@ -465,7 +468,8 @@ def cmd_convert_to_gltf(args: argparse.Namespace) -> None:
         if not result.ok:
             raise SystemExit(f"Conversion failed: {result.error}")
         blender_render.generate_model_thumbnails(
-            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe, asset_id=asset_id
+            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe,
+            asset_id=asset_id, assets_dir=s.assets_dir(),
         )
         print(
             f"Converted asset {asset_id} to .glb. The pre-conversion original is kept "
@@ -487,6 +491,7 @@ def cmd_convert_to_gltf(args: argparse.Namespace) -> None:
             s.thumbnail_dir(),
             blender_exe,
             asset_ids=result.converted_asset_ids,
+            assets_dir=s.assets_dir(),
         )
     print(
         f"Converted {result.converted}, skipped {result.skipped} (not a model, or already "
@@ -540,6 +545,7 @@ def cmd_convert_flagged(args: argparse.Namespace) -> None:
             s.thumbnail_dir(),
             blender_exe,
             asset_ids=result.converted_asset_ids,
+            assets_dir=s.assets_dir(),
         )
     print(
         f"Converted {result.converted}, skipped {result.skipped} (not a model, or already "
@@ -570,7 +576,8 @@ def cmd_convert_revert(args: argparse.Namespace) -> None:
     blender_exe, error = blender_render.resolve_blender(s.blender_path)
     if blender_exe is not None:
         blender_render.generate_model_thumbnails(
-            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe, asset_id=args.asset_id
+            conn, Path(s.staging_folder), s.thumbnail_dir(), blender_exe,
+            asset_id=args.asset_id, assets_dir=s.assets_dir(),
         )
     print(f"Reverted asset {args.asset_id} to its pre-conversion original.")
 

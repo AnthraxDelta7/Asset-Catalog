@@ -133,3 +133,79 @@ def test_without_assets_dir_behaviour_is_unchanged(tmp_path: Path) -> None:
     for job in jobs:
         assert str(staging) in job["source_path"]
     conn.close()
+
+
+def _pack_with_a_texture_and_a_sound(tmp_path: Path):
+    """A pack whose non-model assets also need resolving."""
+    import struct
+    import wave
+
+    from PIL import Image
+
+    staging, library = tmp_path / "staging", tmp_path / "library"
+    pack = staging / "Pack"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    Image.new("RGB", (8, 8), (200, 40, 40)).save(pack / "atlas.png")
+    with wave.open(str(pack / "hit.wav"), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(struct.pack("<h", 0) * 800)
+    return staging, library, pack
+
+
+def test_textures_and_sounds_also_resolve_after_the_source_is_deleted(tmp_path: Path) -> None:
+    """The source-of-truth switch originally covered models and export
+    only. Textures and audio kept reading the unpacked folder, so a 2D or
+    waveform re-render broke once it was cleaned up -- the one thing the
+    cleanup was not supposed to be able to do.
+    """
+    import shutil
+
+    from asset_catalogue import audio_thumbnails, library_assets, thumbnails
+
+    staging, library, pack = _pack_with_a_texture_and_a_sound(tmp_path)
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    assets_dir = library / "assets"
+    library_assets.archive_pack(conn, staging, assets_dir, pack_id)
+
+    shutil.rmtree(pack)
+    assert not pack.exists()
+
+    texture_stats = thumbnails.generate_texture_thumbnails(
+        conn, staging, library / "thumbnails", force=True, assets_dir=assets_dir
+    )
+    assert texture_stats.generated == 1
+    assert texture_stats.failed == 0
+
+    audio_stats = audio_thumbnails.generate_audio_thumbnails(
+        conn, staging, library / "thumbnails", force=True, assets_dir=assets_dir
+    )
+    assert audio_stats.generated == 1
+    assert audio_stats.failed == 0
+    conn.close()
+
+
+def test_without_assets_dir_those_two_still_read_the_original(tmp_path: Path) -> None:
+    """Optional, so every caller that has not opted in is unaffected."""
+    import shutil
+
+    from asset_catalogue import library_assets, thumbnails
+
+    staging, library, pack = _pack_with_a_texture_and_a_sound(tmp_path)
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Pack", "Pack", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    library_assets.archive_pack(conn, staging, library / "assets", pack_id)
+
+    shutil.rmtree(pack)
+    stats = thumbnails.generate_texture_thumbnails(
+        conn, staging, library / "thumbnails", force=True
+    )
+    # Reads the deleted original, so it fails -- which is exactly the old
+    # behaviour, kept until a caller asks for the new one.
+    assert stats.generated == 0
+    conn.close()
