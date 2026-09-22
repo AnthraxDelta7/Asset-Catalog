@@ -216,8 +216,8 @@ class FilterPanel(QWidget):
 
         self.needs_conversion_checkbox = QCheckBox("⚠ Needs conversion only")
         self.needs_conversion_checkbox.setToolTip(
-            "A non-.glb model whose last render only looked right because of a texture fix "
-            "that lives in the render, not the file itself -- Convert to glTF bakes it in for real."
+            "Models that only look right because of a texture fix the file itself "
+            "doesn't contain. Convert to glTF writes the fix into the file."
         )
         self.needs_conversion_checkbox.toggled.connect(self._on_change)
         layout.addWidget(self.needs_conversion_checkbox)
@@ -1463,11 +1463,11 @@ def _format_broken_texture_note(filenames: list[str]) -> str:
     remainder = len(filenames) - len(shown)
     names = ", ".join(shown) + (f", and {remainder} more" if remainder else "")
     return (
-        f"\n\nWarning: {len(filenames)} asset(s) reference a texture that failed to load "
-        f"({names}) -- the pack may not actually include the textures it promises. "
-        "Worth checking if that's grounds for a refund. A pack-level 'Replace broken "
-        "textures with a flat gray fallback' correction is available (Edit Pack "
-        "Metadata) if you'd rather not see them rendered pink/wrong."
+        f"\n\n{len(filenames)} asset(s) point at a texture that isn't there: {names}.\n"
+        "The pack may not include the textures it says it does, which might be "
+        "worth a refund.\n"
+        "If you'd rather not look at pink models, Edit Pack Metadata has a "
+        "'Replace broken textures with a flat gray fallback' option."
     )
 
 
@@ -1489,9 +1489,10 @@ def _format_smart_texture_note(notes: list[str]) -> str:
     if remainder:
         lines += f"\n  - and {remainder} more"
     return (
-        f"\n\nAuto-matched {len(notes)} texture(s) by name to a file found elsewhere in the "
-        f"pack:\n{lines}\nTurn off 'Smart texture matching' (Edit Pack Metadata) for this pack "
-        "if a match looks wrong, or set a manual texture override for just that material."
+        f"\n\nFound {len(notes)} texture(s) elsewhere in the pack and linked them up:\n"
+        f"{lines}\n"
+        "If one looks wrong, turn off 'Smart texture matching' in Edit Pack "
+        "Metadata, or override just that material."
     )
 
 
@@ -1578,14 +1579,12 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
 
         hint = QLabel(
-            "Ingest folder: where the pack browser starts. A default, not a "
-            "restriction -- you can browse to and ingest from anywhere.\n"
-            "Library folder: portable -- holds catalogue.db and thumbnails/. Point at an "
-            "existing one (copied from another machine, a shared drive) to pick it up as-is.\n"
-            "Godot path: only needed for Tools > Extract Godot Scenes to GLB... (extracting "
-            "textured meshes from a Godot project before ingesting it).\n"
-            "Export to Project remembers your recently used project folders on its own -- "
-            "nothing to configure here."
+            "Ingest folder: where the pack browser opens. You can browse "
+            "anywhere from there.\n"
+            "Library folder: the catalogue itself. Copy it to another machine "
+            "and point at it to pick it up as-is.\n"
+            "Godot path: only needed to extract scenes from a Godot project.\n"
+            "Export remembers your recent project folders on its own."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1973,9 +1972,9 @@ class IngestDialog(QDialog):
         scenes = self._catalogue.count_godot_scenes(self.godot_projects)
         self.godot_notice.setText(
             f"Godot project detected ({scenes} scene{'s' if scenes != 1 else ''}). "
-            "These will be converted to .glb before ingesting, so their materials and "
-            "textures come through -- the raw model files in a pack like this reference "
-            "textures that only resolve at the scene level."
+            "The scenes will be converted to .glb first, so the textures come "
+            "through. In a pack like this the model files on their own have no "
+            "materials."
         )
         self.godot_notice.setVisible(True)
 
@@ -2397,18 +2396,17 @@ class CorrectionsFormWidget(QWidget):
         )
         self.broken_texture_fallback_check.setChecked(bool(initial.get("broken_texture_fallback")))
         self.broken_texture_fallback_check.setToolTip(
-            "Only affects meshes whose texture actually failed to load (e.g. an absolute "
-            "path baked in from the original author's machine) -- unlike the option above, "
-            "this leaves everything else in the pack untouched."
+            "Only touches meshes whose texture failed to load, usually because the "
+            "path points somewhere on the author's own machine. Everything else in "
+            "the pack is left alone."
         )
         form.addRow("", self.broken_texture_fallback_check)
 
         self.disable_smart_matching_check = QCheckBox("Disable smart texture matching")
         self.disable_smart_matching_check.setChecked(bool(initial.get("disable_smart_texture_matching")))
         self.disable_smart_matching_check.setToolTip(
-            "Turns off this pack's automatic texture relinking/matching-by-name entirely "
-            "(on by default) -- an easy rollback if an automatic match ever looks wrong. "
-            "Manual overrides below still apply even with this checked."
+            "Stops the app looking for missing textures by name. Use this if an "
+            "automatic match got it wrong. Manual overrides below still apply."
         )
         form.addRow("", self.disable_smart_matching_check)
 
@@ -3764,9 +3762,10 @@ class TrashDialog(QDialog):
         confirm = QMessageBox.question(
             self,
             "Delete Permanently",
-            f"Permanently delete {len(asset_ids)} asset(s)? This deletes the catalogue "
-            "entries, thumbnails, and any archived library copy -- the original files "
-            "in your ingest folder are untouched, but this cannot be undone here.",
+            f"Permanently delete {len(asset_ids)} asset(s)?\n\n"
+            "This removes the catalogue entries, thumbnails and the library's copy "
+            "of the files. Your original files aren't touched, but you can't undo "
+            "this from here.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -3789,10 +3788,10 @@ class TrashDialog(QDialog):
         confirm = QMessageBox.question(
             self,
             "Empty Trash",
-            f"Permanently delete all {count} trashed asset(s)? This deletes the "
-            "catalogue entries, thumbnails, and any archived library copy -- the "
-            "original files in your ingest folder are untouched, but this cannot "
-            "be undone here.",
+            f"Permanently delete all {count} trashed asset(s)?\n\n"
+            "This removes the catalogue entries, thumbnails and the library's copy "
+            "of the files. Your original files aren't touched, but you can't undo "
+            "this from here.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -5976,10 +5975,9 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.question(
             self,
             "Remove Pack",
-            f"Remove '{pack_name}' and all {detail.asset_count} of its asset(s) from the "
-            "catalogue?\n\nThis deletes the catalogue entries, thumbnails, and the pack's "
-            "entire archived library copy. The original files in your staging folder are "
-            "untouched.",
+            f"Remove '{pack_name}' and its {detail.asset_count} asset(s)?\n\n"
+            "This deletes the catalogue entries, thumbnails and the library's copy "
+            "of the files. Your original files aren't touched.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:

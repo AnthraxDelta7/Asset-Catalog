@@ -250,8 +250,8 @@ class PackManagerDialog(QDialog):
             self,
             "Remove Packs",
             f"Remove {names}{more}?\n\n"
-            "This deletes their catalogue entries, thumbnails and archived library "
-            "copies. Files in the staging folder are never touched.",
+            "This removes their catalogue entries, thumbnails and the library's "
+            "copies of the files. Your original files aren't touched.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
