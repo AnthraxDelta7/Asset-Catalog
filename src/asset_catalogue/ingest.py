@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from asset_catalogue import archives, gltf_metadata
+from asset_catalogue import archives, audio_facts, gltf_metadata
 
 ProgressCallback = Callable[[str], None]
 
@@ -459,6 +459,10 @@ def ingest_pack(
             # render. Every other format needs Blender and stays NULL --
             # "not inspected yet", which the grid shows as no badge rather
             # than as a badge saying "none".
+            if classify(extension) == "audio":
+                sound = audio_facts.read(entry)
+                if sound is not None:
+                    audio_facts.record(conn, content_hash, sound)
             if classify(extension) == "model":
                 facts = gltf_metadata.read(entry)
                 if facts is not None:

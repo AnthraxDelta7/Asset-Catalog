@@ -152,6 +152,13 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     # which is deliberately distinct from 0 ("inspected, has none").
     _ensure_column(conn, "assets", "joint_count", "joint_count INTEGER")
     _ensure_column(conn, "assets", "animation_count", "animation_count INTEGER")
+    # How long a sound is, and what shape. Read from the file's own header
+    # at ingest -- a WAV states it in the data chunk size, an MP3 in its
+    # VBR header -- so nothing decodes 37GB of audio to find out. NULL
+    # means "not read", never "zero length".
+    _ensure_column(conn, "assets", "duration_ms", "duration_ms INTEGER")
+    _ensure_column(conn, "assets", "sample_rate", "sample_rate INTEGER")
+    _ensure_column(conn, "assets", "channels", "channels INTEGER")
     # Folders this app unpacked itself, so cleanup can remove its own
     # leftovers and nothing else. Recording is the only honest way to
     # know: a folder sitting next to a zip of the same name looks exactly

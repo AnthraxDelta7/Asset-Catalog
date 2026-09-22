@@ -10,6 +10,7 @@ from typing import Callable
 from asset_catalogue import (
     animation_preview,
     archives,
+    audio_facts,
     audio_thumbnails,
     blender_render,
     broken_textures,
@@ -54,6 +55,9 @@ class AssetSummary:
     # claims a model has no rig when nothing has looked at it.
     joint_count: int | None = None
     animation_count: int | None = None
+    duration_ms: int | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
     tags: list[str] = field(default_factory=list)
 
 
@@ -270,7 +274,9 @@ class Catalogue:
     _ASSET_SUMMARY_COLUMNS = (
         "assets.id, assets.filename, assets.asset_type, "
         "assets.thumbnail_status, assets.content_hash, assets.relative_path, "
-        "assets.favorite, assets.deleted_at, assets.needs_glb_conversion, assets.joint_count, assets.animation_count, "
+        "assets.favorite, assets.deleted_at, assets.needs_glb_conversion, "
+        "assets.joint_count, assets.animation_count, "
+        "assets.duration_ms, assets.sample_rate, assets.channels, "
         "packs.name AS pack_name, packs.rating AS pack_rating, packs.notes AS pack_notes"
     )
 
@@ -290,6 +296,9 @@ class Catalogue:
             needs_glb_conversion=bool(row["needs_glb_conversion"]),
             joint_count=row["joint_count"],
             animation_count=row["animation_count"],
+            duration_ms=row["duration_ms"],
+            sample_rate=row["sample_rate"],
+            channels=row["channels"],
             tags=self.get_asset_tags(row["id"]),
         )
 
@@ -302,6 +311,7 @@ class Catalogue:
         search: str | None = None,
         favorites_only: bool = False,
         needs_conversion_only: bool = False,
+        duration_band: str | None = None,
     ) -> list[AssetSummary]:
         query = (
             f"SELECT {self._ASSET_SUMMARY_COLUMNS} "
@@ -331,6 +341,18 @@ class Catalogue:
             clauses.append("assets.favorite = 1")
         if needs_conversion_only:
             clauses.append("assets.needs_glb_conversion = 1")
+        if duration_band:
+            low, high = audio_facts.band_bounds_ms(duration_band)
+            # NULL is excluded on purpose. A sound whose length was never
+            # read has not been shown to be short, and putting it in every
+            # band would make the filter meaningless.
+            clauses.append("assets.duration_ms IS NOT NULL")
+            if low is not None:
+                clauses.append("assets.duration_ms >= ?")
+                params.append(low)
+            if high is not None:
+                clauses.append("assets.duration_ms < ?")
+                params.append(high)
         if search:
             # Escape LIKE's own wildcards so a filename that happens to
             # contain a literal "%" or "_" is matched literally, not
@@ -444,6 +466,17 @@ class Catalogue:
         with self._own_connection() as conn:
             return model_facts.backfill(
                 conn, self._assets_dir, self._staging_folder, self._preview_dir, limit
+            )
+
+    def backfill_audio_facts_bg(self, limit: int = 1500) -> int:
+        """Reads length and format for sounds that predate those columns.
+
+        Header reads only, about 1.4ms each, so a few thousand costs a
+        few seconds. NULL-only and bounded, same as the model pass.
+        """
+        with self._own_connection() as conn:
+            return audio_facts.backfill(
+                conn, self._assets_dir, self._staging_folder, limit
             )
 
     def pending_model_render_count(self) -> int:

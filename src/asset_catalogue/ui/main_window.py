@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QSlider,
     QSplitter,
     QStyle,
     QTableWidget,
@@ -65,6 +66,7 @@ from asset_catalogue.ui.jobs import (
     wait_for_job,
 )
 from asset_catalogue import (
+    audio_facts,
     blender_render,
     crash_log,
     animation_preview,
@@ -227,6 +229,7 @@ class FilterPanel(QWidget):
         self.type_combo.addItem("All types", None)
         for asset_type in catalogue.list_asset_types():
             self.type_combo.addItem(asset_type, asset_type)
+        self.type_combo.currentIndexChanged.connect(self._update_length_filter_visibility)
         self.type_combo.currentIndexChanged.connect(self._on_change)
         layout.addWidget(self.type_combo)
 
@@ -235,6 +238,17 @@ class FilterPanel(QWidget):
         self._populate_format_combo(catalogue)
         self.format_combo.currentIndexChanged.connect(self._on_change)
         layout.addWidget(self.format_combo)
+
+        # Only useful for sounds, so it stays out of the way until the
+        # type filter is on audio or showing everything.
+        self.length_label = QLabel("Length")
+        layout.addWidget(self.length_label)
+        self.length_combo = QComboBox()
+        self.length_combo.addItem("Any length", None)
+        for band_label, _low, _high in audio_facts.DURATION_BANDS:
+            self.length_combo.addItem(band_label, band_label)
+        self.length_combo.currentIndexChanged.connect(self._on_change)
+        layout.addWidget(self.length_combo)
 
         # Header row: the label, plus a magnifier that expands into a
         # filter box. Collapsed by default because a library with a
@@ -319,6 +333,10 @@ class FilterPanel(QWidget):
         self.tag_list.currentRowChanged.connect(self._on_change)
         layout.addWidget(self.tag_list, stretch=1)
 
+        # Correct from the first paint, not only after the type filter is
+        # touched.
+        self._update_length_filter_visibility()
+
     def _populate_format_combo(self, catalogue: Catalogue) -> None:
         self.format_combo.addItem("All formats", None)
         for extension in catalogue.list_asset_extensions():
@@ -338,6 +356,20 @@ class FilterPanel(QWidget):
 
     def selected_format(self) -> str | None:
         return self.format_combo.currentData()
+
+    def selected_duration_band(self) -> str | None:
+        return self.length_combo.currentData()
+
+    def _update_length_filter_visibility(self) -> None:
+        """Length only means something for sounds, so the control is
+        hidden when the type filter has excluded them. Reset on the way
+        out, or a hidden filter would go on quietly narrowing the grid.
+        """
+        relevant = self.selected_type() in (None, "audio")
+        if not relevant and self.length_combo.currentIndex() != 0:
+            self.length_combo.setCurrentIndex(0)
+        self.length_label.setVisible(relevant)
+        self.length_combo.setVisible(relevant)
 
     def refresh_formats(self, catalogue: Catalogue) -> None:
         previous = self.selected_format()
@@ -633,7 +665,9 @@ class ThumbnailGrid(QListWidget):
                 badges += "★"
             if asset.needs_glb_conversion:
                 badges += "⚠"
-            label = f"{badges} {asset.filename}" if badges else asset.filename
+            length = audio_facts.format_duration(asset.duration_ms)
+            name = f"{asset.filename}  {length}" if length else asset.filename
+            label = f"{badges} {name}" if badges else name
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, asset.id)
             tooltip = (
@@ -643,6 +677,13 @@ class ThumbnailGrid(QListWidget):
             contents = describe_contents(asset)
             if contents:
                 tooltip += chr(10) + contents
+            if asset.duration_ms is not None:
+                channels = {1: "mono", 2: "stereo"}.get(asset.channels or 0, "")
+                tooltip += (
+                    chr(10) + audio_facts.format_duration(asset.duration_ms)
+                    + (f", {asset.sample_rate} Hz" if asset.sample_rate else "")
+                    + (f", {channels}" if channels else "")
+                )
             if asset.needs_glb_conversion:
                 tooltip += (
                     chr(10)
@@ -1022,15 +1063,39 @@ class DetailPanel(QWidget):
         # unaffected by whatever's currently selected in the staging
         # browser and always available once ingested.
         self._playable_audio_path: Path | None = None
+        # What the catalogue already knows, so the total shows before the
+        # media player has finished opening the file.
+        self._known_duration_ms: int | None = None
         self._media_player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._media_player.setAudioOutput(self._audio_output)
         self._media_player.playbackStateChanged.connect(self._on_playback_state_changed)
         self._media_player.positionChanged.connect(self._on_playback_position_changed)
+        self._media_player.durationChanged.connect(self._on_media_duration_changed)
         self.play_button = PlayButton("▶ Play")
         self.play_button.clicked.connect(self.toggle_playback)
         self.play_button.setVisible(False)
         layout.addWidget(self.play_button)
+
+        # A seek bar, because auditioning a two-minute ambience from the
+        # start every time is no way to find the part you want. Most of
+        # this library is over a minute long.
+        scrub_row = QHBoxLayout()
+        self.scrub_slider = QSlider(Qt.Horizontal)
+        self.scrub_slider.setRange(0, 0)
+        self.scrub_slider.setEnabled(False)
+        # sliderMoved, not valueChanged: the latter also fires when
+        # playback advances the slider, which would seek to wherever it
+        # already is on every tick.
+        self.scrub_slider.sliderMoved.connect(self._seek_to)
+        scrub_row.addWidget(self.scrub_slider, stretch=1)
+        self.scrub_time_label = QLabel("")
+        self.scrub_time_label.setStyleSheet("color: #9a9a9a;")
+        scrub_row.addWidget(self.scrub_time_label)
+        self.scrub_widget = QWidget()
+        self.scrub_widget.setLayout(scrub_row)
+        self.scrub_widget.setVisible(False)
+        layout.addWidget(self.scrub_widget)
 
         # Only shown for a single-selected asset with a pending conversion
         # (see conversion.py) -- lets the user review a converted .glb next
@@ -1306,6 +1371,10 @@ class DetailPanel(QWidget):
         self._playable_audio_path = archived if asset.asset_type == "audio" else None
         self.play_button.setVisible(self._playable_audio_path is not None)
         self.play_button.setText("▶ Play")
+        self._known_duration_ms = asset.duration_ms if asset is not None else None
+        self.scrub_widget.setVisible(self._playable_audio_path is not None)
+        self.scrub_slider.setValue(0)
+        self._update_scrub_label(0)
 
     def _show_rig_summary(self, archived: Path | None) -> None:
         """What this model contains, from whichever source can answer.
@@ -1405,6 +1474,9 @@ class DetailPanel(QWidget):
         self.play_button.setVisible(False)
         self.play_button.setText("▶ Play")
         self.play_button.set_progress(0.0)
+        self.scrub_widget.setVisible(False)
+        self.scrub_slider.setValue(0)
+        self._known_duration_ms = None
 
     def is_audio_playable(self) -> bool:
         return self._playable_audio_path is not None
@@ -1426,7 +1498,31 @@ class DetailPanel(QWidget):
         if state != QMediaPlayer.PlayingState:
             self.play_button.set_progress(0.0)
 
+    def _seek_to(self, position_ms: int) -> None:
+        self._media_player.setPosition(position_ms)
+        self._update_scrub_label(position_ms)
+
+    def _update_scrub_label(self, position_ms: int) -> None:
+        total = self._media_player.duration() or self._known_duration_ms or 0
+        if not total:
+            self.scrub_time_label.setText("")
+            return
+        self.scrub_time_label.setText(
+            f"{audio_facts.format_duration(position_ms)} / "
+            f"{audio_facts.format_duration(total)}"
+        )
+
+    def _on_media_duration_changed(self, duration_ms: int) -> None:
+        # The real duration only arrives once the file is loaded, so the
+        # range is set here rather than guessed from the stored one.
+        self.scrub_slider.setRange(0, max(0, duration_ms))
+        self.scrub_slider.setEnabled(duration_ms > 0)
+        self._update_scrub_label(self._media_player.position())
+
     def _on_playback_position_changed(self, position: int) -> None:
+        if not self.scrub_slider.isSliderDown():
+            self.scrub_slider.setValue(position)
+        self._update_scrub_label(position)
         duration = self._media_player.duration()
         if duration > 0:
             self.play_button.set_progress(position / duration)
@@ -5542,7 +5638,9 @@ class MainWindow(QMainWindow):
         rather than stalling one.
         """
         def job(_report):
-            return self._catalogue.backfill_model_facts_bg()
+            sounds = self._catalogue.backfill_audio_facts_bg()
+            models = self._catalogue.backfill_model_facts_bg()
+            return sounds + models
 
         worker = _BackgroundWorker(job)
 
@@ -5551,7 +5649,7 @@ class MainWindow(QMainWindow):
                 # Only when it actually changed something, so a caught-up
                 # library says nothing at all.
                 self.statusBar().showMessage(
-                    f"Inspected {filled} model(s) for rigs and animations.", 8000
+                    f"Inspected {filled} asset(s).", 8000
                 )
                 self._refresh_grid()
 
@@ -5634,6 +5732,7 @@ class MainWindow(QMainWindow):
             search=self.filter_panel.selected_search(),
             favorites_only=self.filter_panel.favorites_only(),
             needs_conversion_only=self.filter_panel.needs_conversion_only(),
+            duration_band=self.filter_panel.selected_duration_band(),
         )
         self.grid.set_assets(self._current_assets, self._catalogue)
         self.grid.select_asset_id(self._selected_asset_id)

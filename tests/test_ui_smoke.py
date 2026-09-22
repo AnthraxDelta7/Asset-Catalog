@@ -1085,3 +1085,73 @@ def test_the_status_bar_says_how_many_models_still_need_rendering(
     window._refresh_pending_render_note()
     assert window._pending_label.isHidden(), "a caught-up library should say nothing"
     conn.close()
+
+
+def test_the_length_filter_hides_itself_when_sounds_are_out_of_scope(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Length means nothing for a model. It also resets on the way out,
+    or a hidden filter would go on quietly narrowing the grid.
+    """
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import FilterPanel
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    library.mkdir()
+    staging.mkdir()
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    ingest.get_or_create_pack(conn, "P", "P", None, None, None)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+    noop = lambda *args: None
+    panel = FilterPanel(catalogue, noop, noop, noop, noop, noop, noop, noop)
+    panel.show()
+
+    # "All types" includes audio, so it's relevant.
+    assert panel.length_combo.isVisibleTo(panel)
+
+    panel.length_combo.setCurrentIndex(1)
+    assert panel.selected_duration_band() is not None
+
+    index = panel.type_combo.findData("model")
+    if index >= 0:
+        panel.type_combo.setCurrentIndex(index)
+        assert not panel.length_combo.isVisibleTo(panel)
+        assert panel.selected_duration_band() is None, "a hidden filter must not still apply"
+    conn.close()
+
+
+def test_a_sounds_length_shows_on_its_grid_item(qapp, tmp_path: Path, monkeypatch) -> None:
+    import struct
+    import wave
+
+    from asset_catalogue import db, ingest, settings
+    from asset_catalogue.catalogue import Catalogue
+    from asset_catalogue.ui.main_window import ThumbnailGrid
+
+    library, staging = tmp_path / "library", tmp_path / "staging"
+    pack = staging / "Sounds"
+    pack.mkdir(parents=True)
+    library.mkdir()
+    with wave.open(str(pack / "hit.wav"), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(struct.pack("<h", 0) * 8000 * 3)
+
+    monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings.save(settings.Settings(staging_folder=str(staging), library_folder=str(library)))
+    conn = db.connect(library / "catalogue.db")
+    pack_id, _ = ingest.get_or_create_pack(conn, "Sounds", "Sounds", None, None, None)
+    ingest.ingest_pack(conn, pack, pack_id)
+    catalogue = Catalogue(conn, staging, library / "thumbnails", library / "assets")
+
+    grid = ThumbnailGrid()
+    grid.set_assets(catalogue.list_assets(), catalogue)
+    label = grid.item(0).text()
+    assert "hit.wav" in label
+    assert "3.0s" in label, f"length missing from {label!r}"
+    conn.close()
